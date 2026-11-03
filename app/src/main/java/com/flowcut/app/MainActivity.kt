@@ -83,9 +83,28 @@ class MainActivity : ComponentActivity() {
                     viewModel.navigateTo(AppScreen.HOME)
                 }
 
+                // Safe photo picker max limit (must be <= MediaStore.getPickImagesMaxLimit())
+                val maxPickerItems = remember {
+                    val systemLimit = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        try {
+                            android.provider.MediaStore.getPickImagesMaxLimit()
+                        } catch (_: Exception) {
+                            100
+                        }
+                    } else {
+                        try {
+                            val method = android.provider.MediaStore::class.java.getMethod("getPickImagesMaxLimit")
+                            (method.invoke(null) as? Int) ?: 100
+                        } catch (_: Exception) {
+                            100
+                        }
+                    }
+                    minOf(MAX_CLIPS, maxOf(2, systemLimit))
+                }
+
                 // 1. New Project Video Pickers
                 val newProjectMultiplePicker = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = MAX_CLIPS)
+                    contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = maxPickerItems)
                 ) { uris ->
                     if (uris.isNotEmpty()) {
                         viewModel.createNewProject(uris)
@@ -101,11 +120,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // 2. Editor "Add clips" Pickers (appends to existing project)
-                val remainingSlots = maxOf(1, MAX_CLIPS - uiState.project.clips.size)
+                val remainingSlots = maxOf(2, minOf(maxPickerItems, MAX_CLIPS - uiState.project.clips.size))
                 val editorMultiplePicker = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.PickMultipleVisualMedia(
-                        maxItems = if (remainingSlots > 1) remainingSlots else 2
-                    )
+                    contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = remainingSlots)
                 ) { uris ->
                     if (uris.isNotEmpty()) {
                         viewModel.importClips(uris)
@@ -165,7 +182,7 @@ class MainActivity : ComponentActivity() {
                 val openEditorAddClipsPicker = {
                     val slots = MAX_CLIPS - uiState.project.clips.size
                     if (slots <= 0) {
-                        viewModel.showToast("You can add up to 10 clips")
+                        viewModel.showToast("Maximum clip limit reached ($MAX_CLIPS clips)")
                     } else {
                         launchWithPermissionIfNeeded {
                             if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(this@MainActivity)) {

@@ -336,7 +336,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun importClips(uris: List<Uri>) {
         val currentClipsCount = _uiState.value.project.clips.size
         if (currentClipsCount >= MAX_CLIPS) {
-            showToast("You can add up to 10 clips")
+            showToast("Maximum clip limit reached ($MAX_CLIPS clips)")
             return
         }
 
