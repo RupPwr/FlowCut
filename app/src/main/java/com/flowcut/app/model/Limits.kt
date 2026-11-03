@@ -4,7 +4,22 @@ const val MAX_CLIPS = 1000
 const val MIN_CLIP_MS = 1_000L
 const val MAX_CLIP_MS = 300_000L
 const val MAX_TOTAL_MS = 300_000L
-const val MAX_SIDE_PX = 1920
+const val MAX_1080P_SHORT_SIDE = 1080
+const val MAX_1080P_LONG_SIDE = 2560
+const val MAX_SIDE_PX = 2560
+
+/**
+ * Resolution check for 1080p class videos.
+ * Supports both vertical and horizontal videos up to 1080p (e.g., 1080x2400, 1080x1920, 1920x1080).
+ * Blocks 1440p (2K), 4K, 8K videos where the shorter dimension exceeds 1080.
+ */
+fun isResolutionSupported1080p(width: Int, height: Int, rotation: Int = 0): Boolean {
+    val effW = if (rotation == 90 || rotation == 270) height else width
+    val effH = if (rotation == 90 || rotation == 270) width else height
+    val shortSide = minOf(effW, effH)
+    val longSide = maxOf(effW, effH)
+    return shortSide in 1..MAX_1080P_SHORT_SIDE && longSide in 1..MAX_1080P_LONG_SIDE
+}
 const val DP_PER_SECOND = 48
 const val TRANSITION_MIN_MS = 300L
 const val TRANSITION_MAX_MS = 2_000L

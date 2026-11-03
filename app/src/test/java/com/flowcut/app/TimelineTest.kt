@@ -266,5 +266,37 @@ class TimelineTest {
         assertEquals(3500L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 4999L))
         assertEquals(5000L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 6000L))
     }
+
+    @Test
+    fun test1080pResolutionValidation() {
+        // Supported 1080p vertical videos (including modern 20:9 phone screen recordings)
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(1080, 1920, 0))
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(1080, 2400, 0))
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(1080, 2340, 0))
+
+        // Supported 1080p horizontal videos
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(1920, 1080, 0))
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(2400, 1080, 0))
+
+        // Supported rotated videos (raw width 1920, height 1080 with rotation 90 or 270)
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(1920, 1080, 90))
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(2400, 1080, 90))
+
+        // Supported 720p videos
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(720, 1280, 0))
+        assertTrue(com.flowcut.app.model.isResolutionSupported1080p(1280, 720, 0))
+
+        // Blocked: 1440p (2K) videos (shorter side 1440 > 1080)
+        assertFalse(com.flowcut.app.model.isResolutionSupported1080p(1440, 2560, 0))
+        assertFalse(com.flowcut.app.model.isResolutionSupported1080p(2560, 1440, 0))
+
+        // Blocked: 4K (2160p) videos (shorter side 2160 > 1080)
+        assertFalse(com.flowcut.app.model.isResolutionSupported1080p(2160, 3840, 0))
+        assertFalse(com.flowcut.app.model.isResolutionSupported1080p(3840, 2160, 0))
+
+        // Blocked: Oversized dimensions (> 2560)
+        assertFalse(com.flowcut.app.model.isResolutionSupported1080p(1080, 3000, 0))
+        assertFalse(com.flowcut.app.model.isResolutionSupported1080p(3000, 1080, 0))
+    }
 }
 

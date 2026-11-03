@@ -6,6 +6,8 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import com.flowcut.app.model.Clip
+import com.flowcut.app.model.MAX_1080P_LONG_SIDE
+import com.flowcut.app.model.MAX_1080P_SHORT_SIDE
 import com.flowcut.app.model.MAX_CLIP_MS
 import com.flowcut.app.model.MAX_SIDE_PX
 import com.flowcut.app.model.MAX_TOTAL_MS
@@ -161,12 +163,25 @@ class ClipImporter(private val context: Context) {
                 return ImportValidationResult.Error("Clip is longer than 5 minutes")
             }
 
-            // 1080p limit check (Section 12.1 / P0-8 / P0-9): Max 1080p
-            val minSide = minOf(width, height)
-            val maxSide = maxOf(width, height)
-            if (minSide > 1080 || maxSide > MAX_SIDE_PX) {
+            // 1080p limit check: Supports both Vertical and Horizontal videos up to 1080p
+            // (e.g., 1080x2400, 1080x1920, 1920x1080, 2400x1080)
+            val effectiveWidth = if (rotation == 90 || rotation == 270) height else width
+            val effectiveHeight = if (rotation == 90 || rotation == 270) width else height
+            val shortSide = minOf(effectiveWidth, effectiveHeight)
+            val longSide = maxOf(effectiveWidth, effectiveHeight)
+
+            if (shortSide > MAX_1080P_SHORT_SIDE) {
                 tempFile.delete()
-                return ImportValidationResult.Error("Video exceeds 1080p limit (max 1080p supported)")
+                return ImportValidationResult.Error(
+                    "Video resolution (${effectiveWidth}x${effectiveHeight}) exceeds 1080p limit. Videos higher than 1080p (e.g. 1440p, 4K) are not supported."
+                )
+            }
+
+            if (longSide > MAX_1080P_LONG_SIDE) {
+                tempFile.delete()
+                return ImportValidationResult.Error(
+                    "Video dimension (${effectiveWidth}x${effectiveHeight}) exceeds maximum supported limit (${MAX_1080P_LONG_SIDE}px)."
+                )
             }
 
             // Total timeline > 300000 ms: "Total length limit is 5 minutes"
