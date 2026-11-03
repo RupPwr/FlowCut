@@ -1,10 +1,10 @@
 package com.flowcut.app.model
 
-const val MAX_CLIPS = 10
+const val MAX_CLIPS = 1000
 const val MIN_CLIP_MS = 1_000L
 const val MAX_CLIP_MS = 300_000L
 const val MAX_TOTAL_MS = 300_000L
-const val MAX_SIDE_PX = 3840
+const val MAX_SIDE_PX = 1920
 const val DP_PER_SECOND = 48
 const val TRANSITION_MIN_MS = 300L
 const val TRANSITION_MAX_MS = 2_000L
@@ -18,6 +18,7 @@ const val EXPORT_W = 1080
 const val EXPORT_H = 1920
 const val EXPORT_FPS = 30
 const val EXPORT_BITRATE = 10_000_000
-const val PREFETCH_MS = 1_500L
+const val EXPORT_BITRATE_30 = 10_000_000
+const val EXPORT_BITRATE_60 = 16_000_000
+const val PREFETCH_MS = 2_000L
 const val AUTO_PLAY_MARGIN_MS = 700L
-

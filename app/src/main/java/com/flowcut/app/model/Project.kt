@@ -22,7 +22,8 @@ data class Clip(
     val durationMs: Long,
     val width: Int,
     val height: Int,
-    val rotation: Int
+    val rotation: Int,
+    val frameRate: Int = 30
 ) {
     val displayWidth: Int
         get() = if (rotation == 90 || rotation == 270) height else width
