@@ -61,6 +61,7 @@ import com.flowcut.app.model.DP_PER_SECOND
 import com.flowcut.app.model.MAX_CLIPS
 import com.flowcut.app.model.ProgramTimeline
 import com.flowcut.app.model.TransitionType
+import kotlin.math.abs
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -96,6 +97,19 @@ fun TimelineBlock(
     val flingAnim = remember { Animatable(0f) }
     val decay = rememberSplineBasedDecay<Float>()
     val velocityTracker = remember { VelocityTracker() }
+    var lastScrubMs by remember { mutableStateOf<Long?>(null) }
+    var lastScrubAtNs by remember { mutableStateOf(0L) }
+
+    fun requestScrub(targetMs: Long) {
+        val nowNs = System.nanoTime()
+        val last = lastScrubMs
+        val shouldUpdate = last == null || abs(targetMs - last) >= 50L || (nowNs - lastScrubAtNs) >= 33_000_000L
+        if (shouldUpdate) {
+            lastScrubMs = targetMs
+            lastScrubAtNs = nowNs
+            onScrub(targetMs)
+        }
+    }
 
     BoxWithConstraints(
         modifier = modifier
@@ -111,7 +125,7 @@ fun TimelineBlock(
                     onDragEnd = {
                         isUserScrolling = false
                         val velocity = velocityTracker.calculateVelocity().x
-                        if (Math.abs(velocity) > 200f) {
+                        if (abs(velocity) > 200f) {
                             scope.launch {
                                 var lastVal = 0f
                                 flingAnim.snapTo(0f)
@@ -121,7 +135,7 @@ fun TimelineBlock(
                                     scrollState.dispatchRawDelta(-deltaPx)
                                     val newMs = ((scrollState.value / density.density) / DP_PER_SECOND * 1000f).toLong()
                                         .coerceIn(0L, maxOf(0L, totalMsState.value))
-                                    onScrub(newMs)
+                                    requestScrub(newMs)
                                 }
                             }
                         }
@@ -130,11 +144,10 @@ fun TimelineBlock(
                     onHorizontalDrag = { change, dragAmount ->
                         change.consume()
                         velocityTracker.addPosition(change.uptimeMillis, change.position)
-                        // Synchronous raw delta dispatch: immediate 0ms visual update without recomposition delay
                         scrollState.dispatchRawDelta(-dragAmount)
                         val newMs = ((scrollState.value / density.density) / DP_PER_SECOND * 1000f).toLong()
                             .coerceIn(0L, maxOf(0L, totalMsState.value))
-                        onScrub(newMs)
+                        requestScrub(newMs)
                     }
                 )
             }
@@ -142,18 +155,16 @@ fun TimelineBlock(
         val halfViewportDp = maxWidth / 2f
         val halfViewportPx = with(density) { halfViewportDp.toPx() }
 
-        // Sync scroll position from playback or seek ONLY when user is not actively dragging or flinging
         LaunchedEffect(currentMs, isUserScrolling, halfViewportPx) {
             if (!isUserScrolling && !flingAnim.isRunning) {
                 val targetScrollDp = (currentMs / 1000f) * DP_PER_SECOND
                 val targetScrollPx = with(density) { targetScrollDp.dp.toPx() }.toInt()
-                if (Math.abs(scrollState.value - targetScrollPx) > 1) {
+                if (abs(scrollState.value - targetScrollPx) > 1) {
                     scrollState.scrollTo(targetScrollPx)
                 }
             }
         }
 
-        // Virtualized visible range calculated from actual physical scroll position
         val currentScrollDp = scrollState.value / density.density
         val visibleClips = if (timeline.n > 0) timeline.visibleRange(currentScrollDp, maxWidth.value) else IntRange.EMPTY
         val k0 = if (visibleClips.isEmpty()) 0 else maxOf(0, visibleClips.first - 2)
@@ -162,16 +173,13 @@ fun TimelineBlock(
         val j0 = if (visibleClips.isEmpty()) 0 else maxOf(0, k0 - 1)
         val j1 = if (visibleClips.isEmpty()) -1 else minOf(timeline.n - 2, k1)
 
-        // Scrollable timeline content
         Row(
             modifier = Modifier
                 .fillMaxSize()
                 .horizontalScroll(scrollState, enabled = false)
         ) {
-            // Half-viewport spacer at start
             Spacer(modifier = Modifier.width(halfViewportDp))
 
-            // Main track area
             Box(
                 modifier = Modifier
                     .width(maxOf(120.dp, totalWidthDp.dp + if (timeline.n < MAX_CLIPS) 60.dp else 0.dp))
@@ -180,10 +188,8 @@ fun TimelineBlock(
                 Column(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    // Top 8 dp empty playhead spacer
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Video Track: 44 dp
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -191,7 +197,6 @@ fun TimelineBlock(
                             .clip(RoundedCornerShape(6.dp))
                             .background(colors.surface1)
                     ) {
-                        // 1. Overlap bands behind junctions (keyed & virtualized)
                         if (j1 >= j0) {
                             for (j in j0..j1) {
                                 key("band_$j") {
@@ -210,7 +215,6 @@ fun TimelineBlock(
                             }
                         }
 
-                        // 2. Clips (keyed & virtualized: only k0..k1 rendered, stable slots)
                         if (k1 >= k0) {
                             for (k in k0..k1) {
                                 val clip = timeline.project.clips.getOrNull(k)
@@ -251,7 +255,6 @@ fun TimelineBlock(
                             }
                         }
 
-                        // 3. Add tile after last clip
                         if (timeline.n < MAX_CLIPS) {
                             val addTileLeft = totalWidthDp + 8f
                             Box(
@@ -282,7 +285,6 @@ fun TimelineBlock(
                             }
                         }
 
-                        // 4. Junction Nodes (keyed & virtualized)
                         if (j1 >= j0) {
                             for (j in j0..j1) {
                                 key("node_$j") {
@@ -298,7 +300,7 @@ fun TimelineBlock(
                                     Box(
                                         modifier = Modifier
                                             .offset(x = (junction.centerX - 24f).dp, y = (-2).dp)
-                                            .size(48.dp) // 48 dp touch target
+                                            .size(48.dp)
                                             .combinedClickable(
                                                 onClick = {
                                                     if (isSelected && isApplied) {
@@ -312,10 +314,10 @@ fun TimelineBlock(
                                     ) {
                                         Box(
                                             modifier = Modifier
-                                                .size(22.dp) // 22 dp visual
-                                            .clip(CircleShape)
-                                            .background(nodeBg)
-                                            .border(nodeBorderWidth, nodeBorderColor, CircleShape),
+                                                .size(22.dp)
+                                                .clip(CircleShape)
+                                                .background(nodeBg)
+                                                .border(nodeBorderWidth, nodeBorderColor, CircleShape),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Icon(
@@ -331,10 +333,8 @@ fun TimelineBlock(
                         }
                     }
 
-                    // Gap between tracks: 8 dp
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Audio track: 36 dp
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -356,11 +356,9 @@ fun TimelineBlock(
                 }
             }
 
-            // Half-viewport spacer at end
             Spacer(modifier = Modifier.width(halfViewportDp))
         }
 
-        // Fixed playhead in exact center of viewport (50% width)
         Box(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -369,7 +367,6 @@ fun TimelineBlock(
                 .background(colors.textPrimary, RoundedCornerShape(1.dp))
         )
 
-        // Clip long-press context menu: "Delete"
         contextMenuClipIndex?.let { index ->
             DropdownMenu(
                 expanded = true,
