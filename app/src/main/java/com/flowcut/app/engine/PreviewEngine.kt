@@ -7,6 +7,9 @@ import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.Looper
+import android.view.Choreographer
+import android.view.Surface
+import com.flowcut.app.model.FrameSpecMutable
 import com.flowcut.app.model.PREFETCH_MS
 import com.flowcut.app.model.PREVIEW_H
 import com.flowcut.app.model.PREVIEW_W
@@ -15,11 +18,16 @@ import com.flowcut.app.model.TransitionType
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
+/**
+ * PreviewEngine (Section 19.5, 19.6, 19.7):
+ * Choreographer vsync playback loop, MasterClock, PlayheadState,
+ * FrameSpecMutable zero-allocation resolve, decoder reuse, API 30 Surface.setFrameRate.
+ */
 class PreviewEngine(
     context: Context,
     private val onPlayheadUpdate: (Long) -> Unit,
     private val onPlaybackStateChange: (Boolean) -> Unit
-) : GLSurfaceView.Renderer {
+) : GLSurfaceView.Renderer, Choreographer.FrameCallback {
 
     val glSurfaceView: GLSurfaceView = GLSurfaceView(context).apply {
         setEGLContextClientVersion(3)
@@ -30,6 +38,8 @@ class PreviewEngine(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val renderer = TransitionRenderer()
+    val playheadState = PlayheadState()
+    private val masterClock = MasterClock()
 
     private var surfaceTextureA: SurfaceTexture? = null
     private var surfaceTextureB: SurfaceTexture? = null
@@ -42,8 +52,11 @@ class PreviewEngine(
     private var currentClipIndexB: Int = -1
     private var prefetchClipIndex: Int = -1
 
+    // Pre-allocated arrays to avoid allocation on hot path (Section 19.10)
     private val matA = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
     private val matB = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
+    private val specMutable = FrameSpecMutable()
+    private val defaultCrop = floatArrayOf(1f, 1f)
 
     @Volatile
     var timeline: ProgramTimeline = ProgramTimeline(com.flowcut.app.model.Project())
@@ -60,10 +73,28 @@ class PreviewEngine(
     var isPlaying: Boolean = false
         private set
 
-    private var lastFrameTimeNs: Long = 0L
-
     @Volatile
     private var pendingSeekMs: Long? = null
+
+    override fun doFrame(frameTimeNanos: Long) {
+        if (!isPlaying) return
+
+        val nowUs = masterClock.timeUsAt(frameTimeNanos)
+        val newMs = (nowUs / 1000L).coerceIn(0L, maxOf(0L, timeline.total))
+        playheadMs = newMs
+        playheadState.updateTime(nowUs, Driver.PLAYBACK)
+
+        if (newMs >= timeline.total) {
+            pause()
+        } else {
+            glSurfaceView.requestRender()
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+
+        mainHandler.post {
+            onPlayheadUpdate(playheadMs)
+        }
+    }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         renderer.init()
@@ -81,10 +112,8 @@ class PreviewEngine(
         surfaceTextureA = stA
         surfaceTextureB = stB
 
-        // Invalidate current frame sources so they get recreated on new textures
         releaseDecoders()
 
-        // If we have clips, decode current frame
         if (timeline.n > 0) {
             decodeCurrentFrame()
         }
@@ -100,80 +129,70 @@ class PreviewEngine(
 
         if (timeline.n == 0) return
 
-        val now = System.nanoTime()
-
-        // Handle seeking if requested
         val seekTarget = pendingSeekMs
         if (seekTarget != null) {
             pendingSeekMs = null
             playheadMs = seekTarget.coerceIn(0L, maxOf(0L, timeline.total))
-            lastFrameTimeNs = now
             seekToInternal(playheadMs)
-        } else if (isPlaying) {
-            val deltaMs = if (lastFrameTimeNs > 0) ((now - lastFrameTimeNs) / 1_000_000L) else 0L
-            playheadMs += deltaMs
-            lastFrameTimeNs = now
-
-            if (playheadMs >= timeline.total) {
-                playheadMs = timeline.total
-                isPlaying = false
-                mainHandler.post {
-                    onPlaybackStateChange(false)
-                    glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
-                }
+            mainHandler.post {
+                onPlayheadUpdate(playheadMs)
             }
         }
 
-        mainHandler.post {
-            onPlayheadUpdate(playheadMs)
-        }
-
-        val spec = timeline.resolve(playheadMs)
-        val clipA = timeline.project.clips.getOrNull(spec.aIndex) ?: return
+        // Zero-allocation resolve on hot path (Section 19.3 & 19.10)
+        timeline.resolve(playheadMs, specMutable)
+        val clipA = timeline.project.clips.getOrNull(specMutable.aIndex) ?: return
         val stA = surfaceTextureA ?: return
         val stB = surfaceTextureB ?: return
 
-        // 1. Ensure FrameSource A is ready
-        if (frameSourceA == null || currentClipIndexA != spec.aIndex) {
-            // Check if prefetch matches
-            if (prefetchSource != null && prefetchClipIndex == spec.aIndex) {
+        // 1. FrameSource A
+        if (frameSourceA == null || currentClipIndexA != specMutable.aIndex) {
+            if (prefetchSource != null && prefetchClipIndex == specMutable.aIndex) {
                 frameSourceA?.release()
                 frameSourceA = prefetchSource
                 prefetchSource = null
                 prefetchClipIndex = -1
+            } else if (frameSourceA != null && frameSourceA!!.canReuse(clipA)) {
+                // Reuse existing decoder with flush
+                frameSourceA!!.clip = clipA
+                frameSourceA!!.seekTo(specMutable.aLocalMs * 1000L)
             } else {
                 frameSourceA?.release()
                 frameSourceA = FrameSource(clipA, stA).apply {
                     prepare()
-                    seekTo(spec.aLocalMs * 1000L)
+                    seekTo(specMutable.aLocalMs * 1000L)
                 }
             }
-            currentClipIndexA = spec.aIndex
+            currentClipIndexA = specMutable.aIndex
         }
 
-        // Render Frame A
-        frameSourceA?.frameAt(spec.aLocalMs * 1000L)
+        frameSourceA?.frameAt(specMutable.aLocalMs * 1000L)
         try {
             stA.updateTexImage()
             stA.getTransformMatrix(matA)
         } catch (_: Exception) {}
 
         val cropA = TransitionRenderer.calculateCrop(clipA)
-        var cropB = floatArrayOf(1f, 1f)
+        var cropB = defaultCrop
 
         // 2. Handle Transition and FrameSource B
-        if (spec.isTransition && spec.bIndex != null) {
-            val clipB = timeline.project.clips.getOrNull(spec.bIndex)
+        if (specMutable.isTransition && specMutable.bIndex >= 0) {
+            val clipB = timeline.project.clips.getOrNull(specMutable.bIndex)
             if (clipB != null) {
-                if (frameSourceB == null || currentClipIndexB != spec.bIndex) {
-                    frameSourceB?.release()
-                    frameSourceB = FrameSource(clipB, stB).apply {
-                        prepare()
-                        seekTo(spec.bLocalMs!! * 1000L)
+                if (frameSourceB == null || currentClipIndexB != specMutable.bIndex) {
+                    if (frameSourceB != null && frameSourceB!!.canReuse(clipB)) {
+                        frameSourceB!!.clip = clipB
+                        frameSourceB!!.seekTo(specMutable.bLocalMs * 1000L)
+                    } else {
+                        frameSourceB?.release()
+                        frameSourceB = FrameSource(clipB, stB).apply {
+                            prepare()
+                            seekTo(specMutable.bLocalMs * 1000L)
+                        }
                     }
-                    currentClipIndexB = spec.bIndex
+                    currentClipIndexB = specMutable.bIndex
                 } else {
-                    frameSourceB?.frameAt(spec.bLocalMs!! * 1000L)
+                    frameSourceB?.frameAt(specMutable.bLocalMs * 1000L)
                 }
 
                 try {
@@ -184,7 +203,6 @@ class PreviewEngine(
                 cropB = TransitionRenderer.calculateCrop(clipB)
             }
         } else {
-            // No transition: release B if any
             if (frameSourceB != null) {
                 frameSourceB?.release()
                 frameSourceB = null
@@ -192,9 +210,9 @@ class PreviewEngine(
             }
         }
 
-        // 3. Prefetch next clip if approaching junction
-        val nextClipIndex = spec.aIndex + 1
-        if (nextClipIndex < timeline.n && spec.bIndex == null) {
+        // 3. Prefetch next clip (Section 19.7)
+        val nextClipIndex = specMutable.aIndex + 1
+        if (nextClipIndex < timeline.n && specMutable.bIndex < 0) {
             val junctionStart = timeline.start[nextClipIndex]
             if (playheadMs >= junctionStart - PREFETCH_MS) {
                 if (prefetchSource == null || prefetchClipIndex != nextClipIndex) {
@@ -209,10 +227,10 @@ class PreviewEngine(
             }
         }
 
-        val easedP = ProgramTimeline.ease(spec.linearP)
+        val easedP = ProgramTimeline.ease(specMutable.linearP)
         renderer.draw(
             DrawSpec(
-                type = spec.type,
+                type = specMutable.type,
                 easedP = easedP,
                 matA = matA,
                 matB = matB,
@@ -228,50 +246,72 @@ class PreviewEngine(
             playheadMs = 0L
         }
         isPlaying = true
-        lastFrameTimeNs = System.nanoTime()
-        glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-        onPlaybackStateChange(true)
+        val startNanos = System.nanoTime()
+        masterClock.start(playheadMs * 1000L, startNanos)
+        playheadState.updateTime(playheadMs * 1000L, Driver.PLAYBACK)
+
+        // API 30 Frame Rate hint (Section 19.6 & 19.9)
+        try {
+            val exportFps = if (timeline.project.clips.any { it.frameRate >= 50 }) 60f else 30f
+            glSurfaceView.holder.surface?.setFrameRate(exportFps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+        } catch (_: Exception) {}
+
+        mainHandler.post {
+            onPlaybackStateChange(true)
+            Choreographer.getInstance().postFrameCallback(this@PreviewEngine)
+        }
     }
 
     fun pause() {
         if (!isPlaying) return
         isPlaying = false
-        glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
-        onPlaybackStateChange(false)
+        masterClock.stop(playheadMs * 1000L)
+        playheadState.updateTime(playheadMs * 1000L, Driver.IDLE)
+
+        try {
+            glSurfaceView.holder.surface?.setFrameRate(0f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+        } catch (_: Exception) {}
+
+        mainHandler.post {
+            Choreographer.getInstance().removeFrameCallback(this@PreviewEngine)
+            onPlaybackStateChange(false)
+            glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+        }
     }
 
     fun seekTo(targetMs: Long) {
         val clamped = targetMs.coerceIn(0L, maxOf(0L, timeline.total))
         pendingSeekMs = clamped
+        playheadState.updateTime(clamped * 1000L, Driver.PROGRAMMATIC_SEEK)
         requestRender()
     }
 
     private fun seekToInternal(ms: Long) {
-        val spec = timeline.resolve(ms)
-        val clipA = timeline.project.clips.getOrNull(spec.aIndex) ?: return
+        timeline.resolve(ms, specMutable)
+        val clipA = timeline.project.clips.getOrNull(specMutable.aIndex) ?: return
         val stA = surfaceTextureA ?: return
         val stB = surfaceTextureB ?: return
 
-        if (frameSourceA == null || currentClipIndexA != spec.aIndex) {
+        if (frameSourceA == null || currentClipIndexA != specMutable.aIndex) {
             frameSourceA?.release()
             frameSourceA = FrameSource(clipA, stA).apply {
                 prepare()
             }
-            currentClipIndexA = spec.aIndex
+            currentClipIndexA = specMutable.aIndex
         }
-        frameSourceA?.seekTo(spec.aLocalMs * 1000L)
+        frameSourceA?.seekTo(specMutable.aLocalMs * 1000L)
 
-        if (spec.isTransition && spec.bIndex != null) {
-            val clipB = timeline.project.clips.getOrNull(spec.bIndex)
+        if (specMutable.isTransition && specMutable.bIndex >= 0) {
+            val clipB = timeline.project.clips.getOrNull(specMutable.bIndex)
             if (clipB != null) {
-                if (frameSourceB == null || currentClipIndexB != spec.bIndex) {
+                if (frameSourceB == null || currentClipIndexB != specMutable.bIndex) {
                     frameSourceB?.release()
                     frameSourceB = FrameSource(clipB, stB).apply {
                         prepare()
                     }
-                    currentClipIndexB = spec.bIndex
+                    currentClipIndexB = specMutable.bIndex
                 }
-                frameSourceB?.seekTo(spec.bLocalMs!! * 1000L)
+                frameSourceB?.seekTo(specMutable.bLocalMs * 1000L)
             }
         } else {
             frameSourceB?.release()
@@ -324,4 +364,3 @@ class PreviewEngine(
         renderer.release()
     }
 }
-
