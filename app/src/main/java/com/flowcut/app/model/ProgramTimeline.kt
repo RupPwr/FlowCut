@@ -12,6 +12,27 @@ data class FrameSpec(
         get() = bIndex != null && type != TransitionType.NONE
 }
 
+class FrameSpecMutable {
+    var aIndex = 0
+    var aLocalMs = 0L
+    var bIndex = -1      // -1 means no transition
+    var bLocalMs = 0L
+    var type = TransitionType.NONE
+    var linearP = 0f
+
+    val isTransition: Boolean
+        get() = bIndex != -1 && type != TransitionType.NONE
+
+    fun copyFrom(other: FrameSpecMutable) {
+        aIndex = other.aIndex
+        aLocalMs = other.aLocalMs
+        bIndex = other.bIndex
+        bLocalMs = other.bLocalMs
+        type = other.type
+        linearP = other.linearP
+    }
+}
+
 data class ClipLayoutInfo(
     val index: Int,
     val leftDp: Float,
@@ -27,16 +48,31 @@ data class JunctionLayoutInfo(
     val durationMs: Long
 )
 
-class ProgramTimeline(val project: Project) {
-    val n = project.clips.size
-    val dur = LongArray(n) { project.clips[it].durationMs }
-    val d = LongArray(if (n > 1) n - 1 else 0) {
-        if (project.transitions[it].type != TransitionType.NONE) project.transitions[it].durationMs else 0L
-    }
+class ProgramTimeline(
+    val clips: List<Clip>,
+    val transitions: List<Transition>
+) {
+    constructor(project: Project) : this(project.clips, project.transitions)
 
-    val start = LongArray(n)
-    val end = LongArray(n)
+    val project: Project = Project(clips, transitions)
+
+    val n: Int = clips.size
+    val dur: LongArray = LongArray(n) { clips[it].durationMs }
+    val durMs: LongArray get() = dur
+
+    val d: LongArray = LongArray(maxOf(0, n - 1)) {
+        if (transitions[it].type != TransitionType.NONE) transitions[it].durationMs else 0L
+    }
+    val dMs: LongArray get() = d
+
+    val start: LongArray = LongArray(n)
+    val startMs: LongArray get() = start
+
+    val end: LongArray = LongArray(n)
+    val endMs: LongArray get() = end
+
     val total: Long
+    val totalMs: Long get() = total
 
     init {
         if (n > 0) {
@@ -53,47 +89,80 @@ class ProgramTimeline(val project: Project) {
         }
     }
 
-    fun resolve(t: Long): FrameSpec {
+    /** Largest index k such that start[k] <= t (binary search O(log n)). */
+    fun lastStartAtOrBefore(t: Long): Int {
+        var lo = 0
+        var hi = n - 1
+        var ans = 0
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (start[mid] <= t) {
+                ans = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return ans
+    }
+
+    /** Zero-allocation frame resolution into a reusable mutable object (Section 19.3). */
+    fun resolve(t: Long, out: FrameSpecMutable) {
         if (n == 0) {
-            return FrameSpec(0, 0L, null, null, TransitionType.NONE, 0f)
+            out.aIndex = 0
+            out.aLocalMs = 0L
+            out.bIndex = -1
+            out.bLocalMs = 0L
+            out.type = TransitionType.NONE
+            out.linearP = 0f
+            return
         }
         val tt = t.coerceIn(0L, maxOf(0L, total - 1L))
-        // 1. Overlap check first
-        for (k in 0 until n - 1) {
-            if (d[k] > 0L && tt >= start[k + 1] && tt < end[k]) {
-                val p = (tt - start[k + 1]).toFloat() / d[k].toFloat()
-                return FrameSpec(
-                    aIndex = k,
-                    aLocalMs = tt - start[k],
-                    bIndex = k + 1,
-                    bLocalMs = tt - start[k + 1],
-                    type = project.transitions[k].type,
-                    linearP = p.coerceIn(0f, 1f)
-                )
-            }
+        val k = lastStartAtOrBefore(tt)
+        if (k > 0 && tt < end[k - 1]) {
+            // Overlap: transition k-1 active
+            out.aIndex = k - 1
+            out.aLocalMs = tt - start[k - 1]
+            out.bIndex = k
+            out.bLocalMs = tt - start[k]
+            out.type = transitions[k - 1].type
+            val dVal = d[k - 1]
+            out.linearP = if (dVal > 0L) {
+                ((tt - start[k]).toFloat() / dVal.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+        } else {
+            out.aIndex = k
+            out.aLocalMs = tt - start[k]
+            out.bIndex = -1
+            out.bLocalMs = 0L
+            out.type = TransitionType.NONE
+            out.linearP = 0f
         }
-        // 2. Single clip
-        for (k in 0 until n) {
-            if (tt >= start[k] && tt < end[k]) {
-                return FrameSpec(
-                    aIndex = k,
-                    aLocalMs = tt - start[k],
-                    bIndex = null,
-                    bLocalMs = null,
-                    type = TransitionType.NONE,
-                    linearP = 0f
-                )
-            }
-        }
-        // Fallback for edge cases
+    }
+
+    /** Immutable resolve for callers and existing unit tests. */
+    fun resolve(t: Long): FrameSpec {
+        val mutable = FrameSpecMutable()
+        resolve(t, mutable)
         return FrameSpec(
-            aIndex = n - 1,
-            aLocalMs = dur[n - 1],
-            bIndex = null,
-            bLocalMs = null,
-            type = TransitionType.NONE,
-            linearP = 0f
+            aIndex = mutable.aIndex,
+            aLocalMs = mutable.aLocalMs,
+            bIndex = if (mutable.bIndex == -1) null else mutable.bIndex,
+            bLocalMs = if (mutable.bIndex == -1) null else mutable.bLocalMs,
+            type = mutable.type,
+            linearP = mutable.linearP
         )
+    }
+
+    /** Visible range of clips for virtualized Canvas drawing (Section 19.3 / 19.4). */
+    fun visibleRange(scrollOffsetDp: Float, viewportWidthDp: Float): IntRange {
+        if (n == 0) return IntRange.EMPTY
+        val viewportHalfDp = viewportWidthDp / 2f
+        val leftMs = ((scrollOffsetDp - viewportHalfDp) / DP_PER_SECOND * 1000f).toLong()
+        val rightMs = leftMs + (viewportWidthDp / DP_PER_SECOND * 1000f).toLong()
+        val k0 = maxOf(0, lastStartAtOrBefore(leftMs) - 1)
+        val k1 = minOf(n - 1, lastStartAtOrBefore(rightMs) + 1)
+        return k0..k1
     }
 
     fun maxDuration(j: Int): Long {
@@ -123,8 +192,8 @@ class ProgramTimeline(val project: Project) {
             index = j,
             centerX = centerX,
             bandWidth = bandWidth,
-            type = project.transitions[j].type,
-            durationMs = project.transitions[j].durationMs
+            type = transitions[j].type,
+            durationMs = transitions[j].durationMs
         )
     }
 
@@ -153,23 +222,12 @@ class ProgramTimeline(val project: Project) {
             val newTransitions = mutableListOf<Transition>()
             val oldTransitions = project.transitions
 
-            // Old transitions indices:
-            // 0: clips[0]-clips[1]
-            // ...
-            // indexToDelete - 1: clips[indexToDelete-1]-clips[indexToDelete]
-            // indexToDelete: clips[indexToDelete]-clips[indexToDelete+1]
             for (i in 0 until newClips.size - 1) {
                 if (indexToDelete == 0) {
-                    // Deleted first clip: old transitions[0] removed, rest shifted by 1
                     newTransitions.add(oldTransitions[i + 1])
                 } else if (indexToDelete == project.clips.size - 1) {
-                    // Deleted last clip: keep oldTransitions[0 until size - 1]
                     newTransitions.add(oldTransitions[i])
                 } else {
-                    // Deleted middle clip:
-                    // Before indexToDelete - 1: unchanged
-                    // At indexToDelete - 1 (junction between indexToDelete-1 and indexToDelete+1): new NONE transition
-                    // After indexToDelete - 1: takes oldTransitions[i + 1]
                     if (i < indexToDelete - 1) {
                         newTransitions.add(oldTransitions[i])
                     } else if (i == indexToDelete - 1) {
@@ -187,11 +245,6 @@ class ProgramTimeline(val project: Project) {
             val newClips = project.clips + addedClips
             val newTransitions = project.transitions.toMutableList()
 
-            // If project had clips, junction between last old clip and first new clip is NONE
-            var currentClipCount = project.clips.size
-            if (currentClipCount == 0) {
-                currentClipCount = 1
-            }
             while (newTransitions.size < newClips.size - 1) {
                 newTransitions.add(Transition(TransitionType.NONE, 0L))
             }
@@ -199,4 +252,3 @@ class ProgramTimeline(val project: Project) {
         }
     }
 }
-

@@ -224,5 +224,35 @@ class TimelineTest {
         // Should throw because 2 clips require 1 transition, but emptyList provided
         Project(clips, emptyList())
     }
+
+    @Test
+    fun testFrameSpecMutableAndBinarySearch() {
+        val project = createSpecTestProject()
+        val timeline = ProgramTimeline(project)
+        val mutable = com.flowcut.app.model.FrameSpecMutable()
+
+        // Test t = 4500 (inside transition 0)
+        timeline.resolve(4500L, mutable)
+        assertEquals(0, mutable.aIndex)
+        assertEquals(4500L, mutable.aLocalMs)
+        assertEquals(1, mutable.bIndex)
+        assertEquals(500L, mutable.bLocalMs)
+        assertEquals(TransitionType.SLIDE, mutable.type)
+        assertEquals(0.5f, mutable.linearP, 0.001f)
+        assertTrue(mutable.isTransition)
+
+        // Test binary search
+        assertEquals(0, timeline.lastStartAtOrBefore(0L))
+        assertEquals(0, timeline.lastStartAtOrBefore(3999L))
+        assertEquals(1, timeline.lastStartAtOrBefore(4000L))
+        assertEquals(1, timeline.lastStartAtOrBefore(7199L))
+        assertEquals(2, timeline.lastStartAtOrBefore(7200L))
+        assertEquals(2, timeline.lastStartAtOrBefore(15000L))
+
+        // Test visibleRange virtualization
+        val range = timeline.visibleRange(scrollOffsetDp = 200f, viewportWidthDp = 400f)
+        assertTrue(range.first >= 0)
+        assertTrue(range.last <= timeline.n - 1)
+    }
 }
 
