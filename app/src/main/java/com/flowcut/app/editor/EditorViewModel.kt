@@ -143,6 +143,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private var preciseSeekJob: Job? = null
+
+    fun scrubTo(ms: Long) {
+        val engine = previewEngine ?: return
+        if (engine.isPlaying) {
+            engine.pause()
+        }
+        _uiState.update { it.copy(currentMs = ms) }
+        engine.seekTo(ms, fastScrub = true)
+
+        // Debounce precise seek by 120ms (Section 19.8)
+        preciseSeekJob?.cancel()
+        preciseSeekJob = viewModelScope.launch {
+            delay(120L)
+            engine.seekTo(ms, fastScrub = false)
+        }
+    }
+
     fun seekTo(ms: Long) {
         val engine = previewEngine ?: return
         if (engine.isPlaying) {

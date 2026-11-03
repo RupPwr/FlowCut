@@ -233,7 +233,7 @@ class MainActivity : ComponentActivity() {
                             onUndoClick = { viewModel.undo() },
                             onRedoClick = { viewModel.redo() },
                             onPlayPauseClick = { viewModel.playPause() },
-                            onSeekScrub = { ms -> viewModel.seekTo(ms) },
+                            onSeekScrub = { ms -> viewModel.scrubTo(ms) },
                             onSelectClip = { index -> viewModel.selectClip(index) },
                             onDeleteClip = { index -> viewModel.deleteClip(index) },
                             onSelectJunction = { index -> viewModel.selectJunction(index) },

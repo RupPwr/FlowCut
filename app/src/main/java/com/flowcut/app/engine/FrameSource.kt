@@ -87,11 +87,22 @@ class FrameSource(
         return isPrepared && codec != null && clip.width == other.width && clip.height == other.height
     }
 
-    fun seekTo(localUs: Long) {
+    fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false) {
         val ext = extractor ?: return
         val dec = codec ?: return
         try {
-            ext.seekTo(localUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            var seekTimeUs = localUs
+            if (fastKeyframeOnly) {
+                val idxPath = clip.path.replace(".mp4", ".idx")
+                val keyframes = com.flowcut.app.storage.KeyframeIndex.load(idxPath)
+                if (keyframes != null && keyframes.isNotEmpty()) {
+                    val targetMs = localUs / 1000L
+                    val closestKeyframeMs = com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, targetMs)
+                    seekTimeUs = closestKeyframeMs * 1000L
+                }
+            }
+
+            ext.seekTo(seekTimeUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             dec.flush()
             isEos = false
             currentPtsUs = -1L
@@ -101,8 +112,9 @@ class FrameSource(
             var rendered = false
             var feedEos = false
             var attempts = 0
+            val maxAttempts = if (fastKeyframeOnly) 25 else 120
 
-            while (!rendered && attempts < 120) {
+            while (!rendered && attempts < maxAttempts) {
                 attempts++
                 if (!feedEos) {
                     val inputIndex = dec.dequeueInputBuffer(timeoutUs)
@@ -127,7 +139,7 @@ class FrameSource(
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                         isEos = true
                     }
-                    if (pts >= localUs - 16_000L || isEos) {
+                    if (fastKeyframeOnly || pts >= localUs - 16_000L || isEos) {
                         dec.releaseOutputBuffer(outIndex, true)
                         currentPtsUs = pts
                         rendered = true

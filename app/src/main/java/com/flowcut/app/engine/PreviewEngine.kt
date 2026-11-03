@@ -76,6 +76,9 @@ class PreviewEngine(
     @Volatile
     private var pendingSeekMs: Long? = null
 
+    @Volatile
+    private var isPendingFastScrub: Boolean = false
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!isPlaying) return
 
@@ -131,9 +134,10 @@ class PreviewEngine(
 
         val seekTarget = pendingSeekMs
         if (seekTarget != null) {
+            val fast = isPendingFastScrub
             pendingSeekMs = null
             playheadMs = seekTarget.coerceIn(0L, maxOf(0L, timeline.total))
-            seekToInternal(playheadMs)
+            seekToInternal(playheadMs, fastKeyframeOnly = fast)
             mainHandler.post {
                 onPlayheadUpdate(playheadMs)
             }
@@ -279,14 +283,15 @@ class PreviewEngine(
         }
     }
 
-    fun seekTo(targetMs: Long) {
+    fun seekTo(targetMs: Long, fastScrub: Boolean = false) {
         val clamped = targetMs.coerceIn(0L, maxOf(0L, timeline.total))
         pendingSeekMs = clamped
-        playheadState.updateTime(clamped * 1000L, Driver.PROGRAMMATIC_SEEK)
+        isPendingFastScrub = fastScrub
+        playheadState.updateTime(clamped * 1000L, if (fastScrub) Driver.USER_SCRUB else Driver.PROGRAMMATIC_SEEK)
         requestRender()
     }
 
-    private fun seekToInternal(ms: Long) {
+    private fun seekToInternal(ms: Long, fastKeyframeOnly: Boolean = false) {
         timeline.resolve(ms, specMutable)
         val clipA = timeline.project.clips.getOrNull(specMutable.aIndex) ?: return
         val stA = surfaceTextureA ?: return
@@ -299,7 +304,7 @@ class PreviewEngine(
             }
             currentClipIndexA = specMutable.aIndex
         }
-        frameSourceA?.seekTo(specMutable.aLocalMs * 1000L)
+        frameSourceA?.seekTo(specMutable.aLocalMs * 1000L, fastKeyframeOnly = fastKeyframeOnly)
 
         if (specMutable.isTransition && specMutable.bIndex >= 0) {
             val clipB = timeline.project.clips.getOrNull(specMutable.bIndex)
@@ -311,7 +316,7 @@ class PreviewEngine(
                     }
                     currentClipIndexB = specMutable.bIndex
                 }
-                frameSourceB?.seekTo(specMutable.bLocalMs * 1000L)
+                frameSourceB?.seekTo(specMutable.bLocalMs * 1000L, fastKeyframeOnly = fastKeyframeOnly)
             }
         } else {
             frameSourceB?.release()
