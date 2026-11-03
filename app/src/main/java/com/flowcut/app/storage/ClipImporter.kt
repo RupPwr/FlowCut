@@ -10,7 +10,9 @@ import com.flowcut.app.model.MAX_CLIP_MS
 import com.flowcut.app.model.MAX_SIDE_PX
 import com.flowcut.app.model.MAX_TOTAL_MS
 import com.flowcut.app.model.MIN_CLIP_MS
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -82,6 +84,7 @@ class ClipImporter(private val context: Context) {
             val extractor = MediaExtractor()
             var videoTrackIndex = -1
             var videoMime: String? = null
+            var videoTrackFormat: MediaFormat? = null
             try {
                 extractor.setDataSource(tempFile.absolutePath)
                 for (i in 0 until extractor.trackCount) {
@@ -90,6 +93,7 @@ class ClipImporter(private val context: Context) {
                     if (mime.startsWith("video/")) {
                         videoTrackIndex = i
                         videoMime = mime
+                        videoTrackFormat = format
                         break
                     }
                 }
@@ -97,7 +101,9 @@ class ClipImporter(private val context: Context) {
                 tempFile.delete()
                 return ImportValidationResult.Error("Unsupported video format")
             } finally {
-                extractor.release()
+                try {
+                    extractor.release()
+                } catch (e: Exception) {}
             }
 
             if (videoTrackIndex == -1 || videoMime == null) {
@@ -137,7 +143,9 @@ class ClipImporter(private val context: Context) {
                 tempFile.delete()
                 return ImportValidationResult.Error("Unsupported video format")
             } finally {
-                retriever.release()
+                try {
+                    retriever.release()
+                } catch (e: Exception) {}
             }
 
             // Validations:
@@ -153,10 +161,12 @@ class ClipImporter(private val context: Context) {
                 return ImportValidationResult.Error("Clip is longer than 5 minutes")
             }
 
-            // Width or height > 3840: "Video is too large (max 4K)"
-            if (width > MAX_SIDE_PX || height > MAX_SIDE_PX) {
+            // 1080p limit check (Section 12.1 / P0-8 / P0-9): Max 1080p
+            val minSide = minOf(width, height)
+            val maxSide = maxOf(width, height)
+            if (minSide > 1080 || maxSide > MAX_SIDE_PX) {
                 tempFile.delete()
-                return ImportValidationResult.Error("Video is too large (max 4K)")
+                return ImportValidationResult.Error("Video exceeds 1080p limit (max 1080p supported)")
             }
 
             // Total timeline > 300000 ms: "Total length limit is 5 minutes"
@@ -165,13 +175,36 @@ class ClipImporter(private val context: Context) {
                 return ImportValidationResult.Error("Total length limit is 5 minutes")
             }
 
+            // Frame rate detection (Section 19.9):
+            var frameRate = 30
+            try {
+                if (videoTrackFormat != null && videoTrackFormat.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                    frameRate = videoTrackFormat.getInteger(MediaFormat.KEY_FRAME_RATE)
+                }
+            } catch (e: Exception) {
+                try {
+                    frameRate = videoTrackFormat?.getFloat(MediaFormat.KEY_FRAME_RATE)?.toInt() ?: 30
+                } catch (ignored: Exception) {}
+            }
+            if (frameRate <= 0) {
+                val fpsMeta = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+                frameRate = fpsMeta?.toFloatOrNull()?.toInt() ?: 30
+            }
+            if (frameRate <= 0) {
+                frameRate = 30
+            }
+
             // Move tempFile to destination: filesDir/clips/<clipId>.mp4
             val clipId = UUID.randomUUID().toString()
             val destFile = File(clipsDir, "$clipId.mp4")
             if (!tempFile.renameTo(destFile)) {
-                // If rename fails, copy and delete
                 tempFile.copyTo(destFile, overwrite = true)
                 tempFile.delete()
+            }
+
+            // Trigger keyframe index in background (Section 19.8)
+            CoroutineScope(Dispatchers.IO).launch {
+                KeyframeIndex.build(destFile.absolutePath, destFile.absolutePath.replace(".mp4", ".idx"))
             }
 
             val clip = Clip(
@@ -180,7 +213,8 @@ class ClipImporter(private val context: Context) {
                 durationMs = durationMs,
                 width = width,
                 height = height,
-                rotation = rotation
+                rotation = rotation,
+                frameRate = frameRate
             )
             return ImportValidationResult.Success(clip)
 
@@ -190,4 +224,3 @@ class ClipImporter(private val context: Context) {
         }
     }
 }
-

@@ -254,5 +254,17 @@ class TimelineTest {
         assertTrue(range.first >= 0)
         assertTrue(range.last <= timeline.n - 1)
     }
+
+    @Test
+    fun testKeyframeIndexBinarySearch() {
+        val keyframes = longArrayOf(0L, 1000L, 2000L, 3500L, 5000L)
+        assertEquals(0L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 0L))
+        assertEquals(0L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 500L))
+        assertEquals(1000L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 1000L))
+        assertEquals(1000L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 1999L))
+        assertEquals(2000L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 2500L))
+        assertEquals(3500L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 4999L))
+        assertEquals(5000L, com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, 6000L))
+    }
 }
 
