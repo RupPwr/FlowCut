@@ -155,6 +155,9 @@ fun EditorScreen(
                         Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
                     }
                 )
+
+                // Preserves exact screen position, height and spacing of Timeline (128 dp)
+                Spacer(modifier = Modifier.height(128.dp))
             }
 
             Spacer(modifier = Modifier.height(8.dp))
