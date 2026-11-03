@@ -72,10 +72,6 @@ fun EditorScreen(
         if (t != null && t != TransitionType.NONE) t.displayName else null
     }
 
-    val activeGridType = selectedJunctionIndex?.let { j ->
-        timeline.project.transitions.getOrNull(j)?.type
-    }
-
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -159,38 +155,6 @@ fun EditorScreen(
                         Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
                     }
                 )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // 5. Transition chips: 36 dp
-                TransitionChips(
-                    onLockedChipClick = {
-                        Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
-                    }
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // 6. Transition grid: 76 dp
-                TransitionGrid(
-                    activeTransitionType = activeGridType,
-                    onTransitionClick = { tappedType ->
-                        if (!hasClips) {
-                            Toast.makeText(context, "Add clips first", Toast.LENGTH_SHORT).show()
-                            return@TransitionGrid
-                        }
-                        if (selectedJunctionIndex == null) {
-                            Toast.makeText(context, "Select a junction between two clips", Toast.LENGTH_SHORT).show()
-                            return@TransitionGrid
-                        }
-                        val maxDur = timeline.maxDuration(selectedJunctionIndex)
-                        if (maxDur < 300L) {
-                            Toast.makeText(context, "Clip is too short for this transition", Toast.LENGTH_SHORT).show()
-                            return@TransitionGrid
-                        }
-                        onApplyTransition(tappedType)
-                    }
-                )
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -233,3 +197,4 @@ fun EditorScreen(
         }
     }
 }
+
