@@ -19,6 +19,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -134,8 +135,10 @@ fun PlaybackRow(
             }
         }
 
-        // 4. Time text "mm:ss / mm:ss"
-        val timeString = "${formatTimeMs(currentMs)} / ${formatTimeMs(totalMs)}"
+        // 4. Time text "mm:ss / mm:ss" (only recomposes when whole second changes)
+        val timeString = remember(currentMs / 1000L, totalMs / 1000L) {
+            "${formatTimeMs(currentMs)} / ${formatTimeMs(totalMs)}"
+        }
         Text(
             text = timeString,
             color = colors.textSecondary,

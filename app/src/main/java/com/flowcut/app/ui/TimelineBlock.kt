@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -91,11 +92,7 @@ fun TimelineBlock(
     var contextMenuClipIndex by remember { mutableStateOf<Int?>(null) }
     var isUserScrolling by remember { mutableStateOf(false) }
 
-    val currentMsState = rememberUpdatedState(currentMs)
     val totalMsState = rememberUpdatedState(totalMs)
-    var dragStartMs by remember { mutableStateOf(0L) }
-    var accumulatedDeltaMs by remember { mutableStateOf(0f) }
-
     val flingAnim = remember { Animatable(0f) }
     val decay = rememberSplineBasedDecay<Float>()
     val velocityTracker = remember { VelocityTracker() }
@@ -110,8 +107,6 @@ fun TimelineBlock(
                         scope.launch { flingAnim.stop() }
                         velocityTracker.resetTracking()
                         isUserScrolling = true
-                        dragStartMs = currentMsState.value
-                        accumulatedDeltaMs = 0f
                     },
                     onDragEnd = {
                         isUserScrolling = false
@@ -123,10 +118,10 @@ fun TimelineBlock(
                                 flingAnim.animateDecay(velocity, decay) {
                                     val deltaPx = this.value - lastVal
                                     lastVal = this.value
-                                    val deltaDp = -deltaPx / density.density
-                                    val deltaMs = (deltaDp / DP_PER_SECOND * 1000f).toLong()
-                                    val targetMs = (currentMsState.value + deltaMs).coerceIn(0L, maxOf(0L, totalMsState.value))
-                                    onScrub(targetMs)
+                                    scrollState.dispatchRawDelta(-deltaPx)
+                                    val newMs = ((scrollState.value / density.density) / DP_PER_SECOND * 1000f).toLong()
+                                        .coerceIn(0L, maxOf(0L, totalMsState.value))
+                                    onScrub(newMs)
                                 }
                             }
                         }
@@ -135,13 +130,11 @@ fun TimelineBlock(
                     onHorizontalDrag = { change, dragAmount ->
                         change.consume()
                         velocityTracker.addPosition(change.uptimeMillis, change.position)
-                        accumulatedDeltaMs += (-dragAmount / density.density) * (1000f / DP_PER_SECOND)
-                        val rawTargetMs = dragStartMs + accumulatedDeltaMs.toLong()
-                        val clampedMs = rawTargetMs.coerceIn(0L, maxOf(0L, totalMsState.value))
-                        if (rawTargetMs != clampedMs) {
-                            accumulatedDeltaMs = (clampedMs - dragStartMs).toFloat()
-                        }
-                        onScrub(clampedMs)
+                        // Synchronous raw delta dispatch: immediate 0ms visual update without recomposition delay
+                        scrollState.dispatchRawDelta(-dragAmount)
+                        val newMs = ((scrollState.value / density.density) / DP_PER_SECOND * 1000f).toLong()
+                            .coerceIn(0L, maxOf(0L, totalMsState.value))
+                        onScrub(newMs)
                     }
                 )
             }
@@ -149,17 +142,19 @@ fun TimelineBlock(
         val halfViewportDp = maxWidth / 2f
         val halfViewportPx = with(density) { halfViewportDp.toPx() }
 
-        // Sync scroll position with currentMs
-        LaunchedEffect(currentMs, halfViewportPx) {
-            val targetScrollDp = (currentMs / 1000f) * DP_PER_SECOND
-            val targetScrollPx = with(density) { targetScrollDp.dp.toPx() }.toInt()
-            if (scrollState.value != targetScrollPx) {
-                scrollState.scrollTo(targetScrollPx)
+        // Sync scroll position from playback or seek ONLY when user is not actively dragging or flinging
+        LaunchedEffect(currentMs, isUserScrolling, halfViewportPx) {
+            if (!isUserScrolling && !flingAnim.isRunning) {
+                val targetScrollDp = (currentMs / 1000f) * DP_PER_SECOND
+                val targetScrollPx = with(density) { targetScrollDp.dp.toPx() }.toInt()
+                if (Math.abs(scrollState.value - targetScrollPx) > 1) {
+                    scrollState.scrollTo(targetScrollPx)
+                }
             }
         }
 
-        // Virtualized visible range (Section 19.3 & 19.4)
-        val currentScrollDp = (currentMs / 1000f) * DP_PER_SECOND
+        // Virtualized visible range calculated from actual physical scroll position
+        val currentScrollDp = scrollState.value / density.density
         val visibleClips = if (timeline.n > 0) timeline.visibleRange(currentScrollDp, maxWidth.value) else IntRange.EMPTY
         val k0 = if (visibleClips.isEmpty()) 0 else maxOf(0, visibleClips.first - 2)
         val k1 = if (visibleClips.isEmpty()) -1 else minOf(timeline.n - 1, visibleClips.last + 2)
@@ -196,56 +191,62 @@ fun TimelineBlock(
                             .clip(RoundedCornerShape(6.dp))
                             .background(colors.surface1)
                     ) {
-                        // 1. Overlap bands behind junctions (virtualized)
+                        // 1. Overlap bands behind junctions (keyed & virtualized)
                         if (j1 >= j0) {
                             for (j in j0..j1) {
-                                val junction = timeline.getJunctionLayout(j)
-                                if (junction.type != TransitionType.NONE && junction.durationMs > 0) {
-                                    val bandLeft = junction.centerX - junction.bandWidth / 2f
-                                    Box(
-                                        modifier = Modifier
-                                            .offset(x = bandLeft.dp)
-                                            .width(junction.bandWidth.dp)
-                                            .fillMaxHeight()
-                                            .background(colors.accent.copy(alpha = 0.18f))
-                                    )
+                                key("band_$j") {
+                                    val junction = timeline.getJunctionLayout(j)
+                                    if (junction.type != TransitionType.NONE && junction.durationMs > 0) {
+                                        val bandLeft = junction.centerX - junction.bandWidth / 2f
+                                        Box(
+                                            modifier = Modifier
+                                                .offset(x = bandLeft.dp)
+                                                .width(junction.bandWidth.dp)
+                                                .fillMaxHeight()
+                                                .background(colors.accent.copy(alpha = 0.18f))
+                                        )
+                                    }
                                 }
                             }
                         }
 
-                        // 2. Clips (virtualized: only k0..k1 rendered)
+                        // 2. Clips (keyed & virtualized: only k0..k1 rendered, stable slots)
                         if (k1 >= k0) {
                             for (k in k0..k1) {
-                                val layout = timeline.getClipLayout(k)
-                                val clipColors = getClipColors(k, isDark)
-                                val isSelected = selectedClipIndex == k
+                                val clip = timeline.project.clips.getOrNull(k)
+                                val clipKey = clip?.id ?: "clip_$k"
+                                key(clipKey) {
+                                    val layout = timeline.getClipLayout(k)
+                                    val clipColors = getClipColors(k, isDark)
+                                    val isSelected = selectedClipIndex == k
 
-                                Box(
-                                    modifier = Modifier
-                                        .offset(x = layout.leftDp.dp, y = 2.dp)
-                                        .width(layout.widthDp.dp)
-                                        .height(40.dp)
-                                        .clip(RoundedCornerShape(5.dp))
-                                        .background(clipColors.bg)
-                                        .then(
-                                            if (isSelected) {
-                                                Modifier.border(2.dp, colors.accent, RoundedCornerShape(5.dp))
-                                            } else Modifier
+                                    Box(
+                                        modifier = Modifier
+                                            .offset(x = layout.leftDp.dp, y = 2.dp)
+                                            .width(layout.widthDp.dp)
+                                            .height(40.dp)
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(clipColors.bg)
+                                            .then(
+                                                if (isSelected) {
+                                                    Modifier.border(2.dp, colors.accent, RoundedCornerShape(5.dp))
+                                                } else Modifier
+                                            )
+                                            .combinedClickable(
+                                                onClick = { onSelectClip(k) },
+                                                onLongClick = { contextMenuClipIndex = k }
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Clip ${k + 1}",
+                                            color = clipColors.text,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            textAlign = TextAlign.Center
                                         )
-                                        .combinedClickable(
-                                            onClick = { onSelectClip(k) },
-                                            onLongClick = { contextMenuClipIndex = k }
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "Clip ${k + 1}",
-                                        color = clipColors.text,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        textAlign = TextAlign.Center
-                                    )
+                                    }
                                 }
                             }
                         }
@@ -281,47 +282,49 @@ fun TimelineBlock(
                             }
                         }
 
-                        // 4. Junction Nodes (centered between clips, virtualized)
+                        // 4. Junction Nodes (keyed & virtualized)
                         if (j1 >= j0) {
                             for (j in j0..j1) {
-                                val junction = timeline.getJunctionLayout(j)
-                                val isSelected = selectedJunctionIndex == j
-                                val isApplied = junction.type != TransitionType.NONE
+                                key("node_$j") {
+                                    val junction = timeline.getJunctionLayout(j)
+                                    val isSelected = selectedJunctionIndex == j
+                                    val isApplied = junction.type != TransitionType.NONE
 
-                                val nodeBg = if (isSelected) colors.bgAccent else colors.surface2
-                                val nodeBorderColor = if (isSelected || isApplied) colors.accent else colors.borderStrong
-                                val nodeBorderWidth = if (isSelected) 2.dp else 1.5.dp
-                                val iconColor = if (isSelected || isApplied) colors.accent else colors.textMuted
+                                    val nodeBg = if (isSelected) colors.bgAccent else colors.surface2
+                                    val nodeBorderColor = if (isSelected || isApplied) colors.accent else colors.borderStrong
+                                    val nodeBorderWidth = if (isSelected) 2.dp else 1.5.dp
+                                    val iconColor = if (isSelected || isApplied) colors.accent else colors.textMuted
 
-                                Box(
-                                    modifier = Modifier
-                                        .offset(x = (junction.centerX - 24f).dp, y = (-2).dp)
-                                        .size(48.dp) // 48 dp touch target
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (isSelected && isApplied) {
-                                                    onOpenDurationSheet()
-                                                } else {
-                                                    onSelectJunction(j)
-                                                }
-                                            }
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
                                     Box(
                                         modifier = Modifier
-                                            .size(22.dp) // 22 dp visual
+                                            .offset(x = (junction.centerX - 24f).dp, y = (-2).dp)
+                                            .size(48.dp) // 48 dp touch target
+                                            .combinedClickable(
+                                                onClick = {
+                                                    if (isSelected && isApplied) {
+                                                        onOpenDurationSheet()
+                                                    } else {
+                                                        onSelectJunction(j)
+                                                    }
+                                                }
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(22.dp) // 22 dp visual
                                             .clip(CircleShape)
                                             .background(nodeBg)
                                             .border(nodeBorderWidth, nodeBorderColor, CircleShape),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.SwapHoriz,
-                                            contentDescription = "Transition",
-                                            tint = iconColor,
-                                            modifier = Modifier.size(14.dp)
-                                        )
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.SwapHoriz,
+                                                contentDescription = "Transition",
+                                                tint = iconColor,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
