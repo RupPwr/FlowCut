@@ -52,10 +52,19 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: EditorViewModel by viewModels()
     private var previewEngine: PreviewEngine? = null
+    private var jankStats: androidx.metrics.performance.JankStats? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        try {
+            jankStats = androidx.metrics.performance.JankStats.createAndTrack(window) { frameData ->
+                // Logs or tracks jank if needed in debug
+            }
+        } catch (e: Exception) {
+            // Best effort
+        }
 
         val engine = PreviewEngine(
             context = this,
@@ -193,7 +202,15 @@ class MainActivity : ComponentActivity() {
                         HomeScreen(
                             currentProject = uiState.project,
                             onNewProjectClick = openNewProjectPicker,
-                            onResumeProjectClick = { viewModel.openExistingProject() }
+                            onResumeProjectClick = { viewModel.openExistingProject() },
+                            onResetAndNewProjectClick = {
+                                viewModel.resetProject {
+                                    openNewProjectPicker()
+                                }
+                            },
+                            onStressTestSelected = { count ->
+                                viewModel.createStressProject(count)
+                            }
                         )
                     }
 
@@ -281,11 +298,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        jankStats?.isTrackingEnabled = false
         viewModel.onAppBackground()
     }
 
     override fun onResume() {
         super.onResume()
+        jankStats?.isTrackingEnabled = true
         viewModel.onAppResume()
     }
 }

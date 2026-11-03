@@ -1,13 +1,12 @@
 package com.flowcut.app.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,261 +14,256 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.flowcut.app.BuildConfig
 import com.flowcut.app.model.Project
 
+/**
+ * HomeScreen (Section 20.6):
+ * Centered single column, FlowCut theme tokens.
+ * - "FlowCut", 28 sp medium
+ * - Title long-press in debug opens stress test menu (Section 19.11)
+ * - "Continue editing" button (filled accent, 320 dp x 48 dp) if >= 1 clip, with "{N} clips · {mm:ss}" (11 sp)
+ * - "New project" button: Outlined if clips exist, with delete confirmation dialog
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     currentProject: Project,
     onNewProjectClick: () -> Unit,
     onResumeProjectClick: () -> Unit,
+    onResetAndNewProjectClick: () -> Unit,
+    onStressTestSelected: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = FlowCutTheme.colors
     val hasRecentProject = currentProject.clips.isNotEmpty()
+
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var showStressDialog by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(colors.surface0)
             .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
+            .windowInsetsPadding(WindowInsets.navigationBars),
+        contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.SpaceBetween
+                .width(320.dp)
+                .padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            // Top Section: App Branding
-            Column(
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Spacer(modifier = Modifier.height(16.dp))
+            // App Name: "FlowCut", 28 sp medium
+            Text(
+                text = "FlowCut",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.textPrimary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = {
+                            if (BuildConfig.DEBUG) {
+                                showStressDialog = true
+                            }
+                        }
+                    )
+                    .padding(8.dp)
+            )
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(colors.bgAccent),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Movie,
-                            contentDescription = "FlowCut Logo",
-                            tint = colors.accent,
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
+            Spacer(modifier = Modifier.height(40.dp))
 
-                    Column {
-                        Text(
-                            text = "FlowCut",
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = colors.textPrimary
-                        )
-                        Text(
-                            text = "Fast & Simple Video Editor",
-                            fontSize = 12.sp,
-                            color = colors.textSecondary
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(36.dp))
-
-                // Prominent "New Project" Button / Card
-                Card(
-                    onClick = onNewProjectClick,
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = colors.accent
+            // "Continue editing" button (only when saved project has >= 1 clip)
+            if (hasRecentProject) {
+                Button(
+                    onClick = onResumeProjectClick,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.accent,
+                        contentColor = colors.onAccent
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(72.dp)
+                        .height(48.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 20.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(14.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(colors.onAccent.copy(alpha = 0.2f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Add,
-                                    contentDescription = null,
-                                    tint = colors.onAccent,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-
-                            Column {
-                                Text(
-                                    text = "New Project",
-                                    fontSize = 17.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = colors.onAccent
-                                )
-                                Text(
-                                    text = "Select videos from gallery",
-                                    fontSize = 12.sp,
-                                    color = colors.onAccent.copy(alpha = 0.8f)
-                                )
-                            }
-                        }
-
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Open",
-                            tint = colors.onAccent,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(32.dp))
-
-                // Recent Project Section (if exists)
-                if (hasRecentProject) {
                     Text(
-                        text = "Recent Project",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.textSecondary,
-                        modifier = Modifier.padding(bottom = 12.dp)
+                        text = "Continue editing",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
                     )
-
-                    Card(
-                        onClick = onResumeProjectClick,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = colors.surface1
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(0.5.dp, colors.border, RoundedCornerShape(12.dp))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(14.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(colors.surface2),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.VideoLibrary,
-                                        contentDescription = null,
-                                        tint = colors.accent,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-
-                                Column {
-                                    Text(
-                                        text = "My reel 01",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = colors.textPrimary
-                                    )
-                                    val clipCount = currentProject.clips.size
-                                    val clipText = if (clipCount == 1) "1 clip" else "$clipCount clips"
-                                    val totalSec = currentProject.clips.sumOf { it.durationMs } / 1000
-                                    val durationFormatted = String.format("%02d:%02d", totalSec / 60, totalSec % 60)
-
-                                    Text(
-                                        text = "$clipText • $durationFormatted",
-                                        fontSize = 12.sp,
-                                        color = colors.textSecondary
-                                    )
-                                }
-                            }
-
-                            Button(
-                                onClick = onResumeProjectClick,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = colors.bgAccent,
-                                    contentColor = colors.accent
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                                modifier = Modifier.height(34.dp)
-                            ) {
-                                Text(
-                                    text = "Edit",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
                 }
-            }
 
-            // Bottom Footer
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Subtext: "{N} clips · {mm:ss}" (11 sp, textSecondary)
+                val clipCount = currentProject.clips.size
+                val clipText = if (clipCount == 1) "1 clip" else "$clipCount clips"
+                val totalSec = currentProject.clips.sumOf { it.durationMs } / 1000
+                val durationFormatted = String.format("%02d:%02d", totalSec / 60, totalSec % 60)
+
                 Text(
-                    text = "FlowCut • Android 11+ Ready",
+                    text = "$clipText · $durationFormatted",
                     fontSize = 11.sp,
-                    color = colors.textMuted
+                    color = colors.textSecondary,
+                    textAlign = TextAlign.Center
                 )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // "New project" button: Outlined when recent project exists
+                OutlinedButton(
+                    onClick = { showDeleteConfirmDialog = true },
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, colors.border),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = colors.textPrimary
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = "New project",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            } else {
+                // When no project exists: Primary Filled "New project" button
+                Button(
+                    onClick = onNewProjectClick,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.accent,
+                        contentColor = colors.onAccent
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = "New project",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
     }
-}
 
+    // Confirmation Dialog: "Start a new project? Your current project will be deleted."
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            title = {
+                Text(
+                    text = "Start a new project?",
+                    color = colors.textPrimary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Text(
+                    text = "Your current project will be deleted.",
+                    color = colors.textSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        onResetAndNewProjectClick()
+                    }
+                ) {
+                    Text(
+                        text = "Delete and start",
+                        color = colors.accent,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showDeleteConfirmDialog = false }
+                ) {
+                    Text(
+                        text = "Cancel",
+                        color = colors.textSecondary
+                    )
+                }
+            },
+            containerColor = colors.surface1
+        )
+    }
+
+    // Stress Test Menu (Debug build only, Section 19.11)
+    if (showStressDialog) {
+        AlertDialog(
+            onDismissRequest = { showStressDialog = false },
+            title = {
+                Text(
+                    text = "Stress Test (Phase 0)",
+                    color = colors.textPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Select clip count to benchmark:",
+                        color = colors.textSecondary,
+                        fontSize = 13.sp
+                    )
+                    listOf(10, 50, 200, 1000).forEach { count ->
+                        Button(
+                            onClick = {
+                                showStressDialog = false
+                                onStressTestSelected(count)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.surface2,
+                                contentColor = colors.textPrimary
+                            ),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.fillMaxWidth().height(40.dp)
+                        ) {
+                            Text(text = "Stress: $count clips", fontSize = 14.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showStressDialog = false }) {
+                    Text(text = "Cancel", color = colors.textSecondary)
+                }
+            },
+            containerColor = colors.surface1
+        )
+    }
+}

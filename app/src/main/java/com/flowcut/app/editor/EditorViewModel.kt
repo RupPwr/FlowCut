@@ -199,6 +199,78 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         previewEngine?.seekTo(_uiState.value.currentMs)
     }
 
+    fun resetProject(onComplete: () -> Unit = {}) {
+        viewModelScope.launch {
+            projectStore.clearAll()
+            undoStack.clear()
+            _uiState.update {
+                it.copy(
+                    project = Project(),
+                    currentMs = 0L,
+                    selectedClipIndex = null,
+                    selectedJunctionIndex = null,
+                    canUndo = false,
+                    canRedo = false
+                )
+            }
+            previewEngine?.let { engine ->
+                engine.timeline = ProgramTimeline(Project())
+                engine.seekTo(0L)
+            }
+            onComplete()
+        }
+    }
+
+    fun createStressProject(count: Int) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            var template = _uiState.value.project.clips.firstOrNull()
+            if (template == null) {
+                val clipsDir = java.io.File(getApplication<Application>().filesDir, "clips")
+                val firstMp4 = clipsDir.listFiles()?.firstOrNull { it.extension == "mp4" }
+                if (firstMp4 != null) {
+                    template = Clip(
+                        id = "template",
+                        path = firstMp4.absolutePath,
+                        durationMs = 5000L,
+                        width = 1080,
+                        height = 1920,
+                        rotation = 0,
+                        frameRate = 30
+                    )
+                }
+            }
+            if (template == null) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    showToast("Please import at least one video first for stress testing")
+                }
+                return@launch
+            }
+            val clips = (0 until count).map { i ->
+                template.copy(
+                    id = "stress_${i}_${System.currentTimeMillis()}"
+                )
+            }
+            val transitions = (0 until count - 1).map {
+                Transition(type = TransitionType.NONE, durationMs = 0L)
+            }
+            val stressProject = Project(clips = clips, transitions = transitions)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                undoStack.clear()
+                updateProject(stressProject, recordUndo = false)
+                _uiState.update {
+                    it.copy(
+                        currentScreen = AppScreen.EDITOR,
+                        currentMs = 0L,
+                        selectedClipIndex = null,
+                        selectedJunctionIndex = null
+                    )
+                }
+                previewEngine?.seekTo(0L)
+                showToast("Stress test loaded: $count clips")
+            }
+        }
+    }
+
     fun createNewProject(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val urisToProcess = uris.take(MAX_CLIPS)

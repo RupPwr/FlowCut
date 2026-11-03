@@ -51,5 +51,17 @@ class ProjectStore(private val context: Context) {
             }
         }
     }
+
+    suspend fun clearAll(): Unit = withContext(Dispatchers.IO) {
+        if (projectFile.exists()) {
+            projectFile.delete()
+        }
+        val allClips = clipsDir.listFiles() ?: return@withContext
+        for (file in allClips) {
+            if (file.isFile) {
+                file.delete()
+            }
+        }
+    }
 }
 
