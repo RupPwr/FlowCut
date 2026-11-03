@@ -45,3 +45,4 @@ enum class TransitionType(val glId: Int, val displayName: String) {
     ZOOM(3, "Zoom"),
     FADE(4, "Fade")
 }
+

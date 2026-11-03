@@ -25,7 +25,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+enum class AppScreen {
+    HOME,
+    EDITOR
+}
+
 data class EditorUiState(
+    val currentScreen: AppScreen = AppScreen.HOME,
     val project: Project = Project(),
     val currentMs: Long = 0L,
     val isPlaying: Boolean = false,
@@ -181,6 +187,59 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 selectedClipIndex = null,
                 selectedJunctionIndex = null
             )
+        }
+    }
+
+    fun navigateTo(screen: AppScreen) {
+        _uiState.update { it.copy(currentScreen = screen) }
+    }
+
+    fun openExistingProject() {
+        _uiState.update { it.copy(currentScreen = AppScreen.EDITOR) }
+        previewEngine?.seekTo(_uiState.value.currentMs)
+    }
+
+    fun createNewProject(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val urisToProcess = uris.take(MAX_CLIPS)
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isImporting = true,
+                    importProgressText = "Importing 1/${urisToProcess.size}..."
+                )
+            }
+
+            val imported = clipImporter.importUris(
+                uris = urisToProcess,
+                currentTotalMs = 0L,
+                onProgress = { cur, tot ->
+                    _uiState.update { it.copy(importProgressText = "Importing $cur/$tot...") }
+                },
+                onError = { message ->
+                    showToast(message)
+                }
+            )
+
+            if (imported.isNotEmpty()) {
+                val newProject = ProgramTimeline.addClips(Project(), imported)
+                undoStack.clear()
+                updateProject(newProject, recordUndo = false)
+                _uiState.update {
+                    it.copy(
+                        currentScreen = AppScreen.EDITOR,
+                        currentMs = 0L,
+                        selectedClipIndex = null,
+                        selectedJunctionIndex = null
+                    )
+                }
+                previewEngine?.seekTo(0L)
+            }
+
+            _uiState.update {
+                it.copy(isImporting = false, importProgressText = "")
+            }
         }
     }
 
@@ -402,3 +461,4 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         previewEngine?.release()
     }
 }
+

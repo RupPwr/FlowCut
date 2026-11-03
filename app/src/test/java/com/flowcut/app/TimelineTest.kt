@@ -225,3 +225,4 @@ class TimelineTest {
         Project(clips, emptyList())
     }
 }
+

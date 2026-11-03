@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
@@ -40,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,22 +93,35 @@ fun TimelineBlock(
     var contextMenuClipIndex by remember { mutableStateOf<Int?>(null) }
     var isUserScrolling by remember { mutableStateOf(false) }
 
+    val currentMsState = rememberUpdatedState(currentMs)
+    val totalMsState = rememberUpdatedState(totalMs)
+    var dragStartMs by remember { mutableStateOf(0L) }
+    var accumulatedDeltaMs by remember { mutableStateOf(0f) }
+
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(96.dp)
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { isUserScrolling = true },
+            .height(224.dp)
+            .pointerInput(density) {
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        isUserScrolling = true
+                        dragStartMs = currentMsState.value
+                        accumulatedDeltaMs = 0f
+                    },
                     onDragEnd = { isUserScrolling = false },
-                    onDragCancel = { isUserScrolling = false }
-                ) { change, dragAmount ->
-                    change.consume()
-                    // 1 dp = 1000 / 48 ms
-                    val deltaMs = (-dragAmount.x / density.density) * (1000f / DP_PER_SECOND)
-                    val newMs = (currentMs + deltaMs.toLong()).coerceIn(0L, maxOf(0L, totalMs))
-                    onScrub(newMs)
-                }
+                    onDragCancel = { isUserScrolling = false },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        accumulatedDeltaMs += (-dragAmount / density.density) * (1000f / DP_PER_SECOND)
+                        val rawTargetMs = dragStartMs + accumulatedDeltaMs.toLong()
+                        val clampedMs = rawTargetMs.coerceIn(0L, maxOf(0L, totalMsState.value))
+                        if (rawTargetMs != clampedMs) {
+                            accumulatedDeltaMs = (clampedMs - dragStartMs).toFloat()
+                        }
+                        onScrub(clampedMs)
+                    }
+                )
             }
     ) {
         val halfViewportDp = maxWidth / 2f
@@ -135,9 +150,6 @@ fun TimelineBlock(
                 modifier = Modifier
                     .width(maxOf(120.dp, totalWidthDp.dp + if (timeline.n < MAX_CLIPS) 60.dp else 0.dp))
                     .fillMaxHeight()
-                    .pointerInput(Unit) {
-                        detectDragGestures { _, _ -> }
-                    }
             ) {
                 Column(
                     modifier = Modifier.fillMaxSize()
@@ -314,7 +326,7 @@ fun TimelineBlock(
                 .align(Alignment.Center)
                 .width(2.dp)
                 .fillMaxHeight()
-                .background(colors.textPrimary)
+                .background(colors.textPrimary, RoundedCornerShape(1.dp))
         )
 
         // Clip long-press context menu: "Delete"

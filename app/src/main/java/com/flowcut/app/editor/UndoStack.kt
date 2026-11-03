@@ -40,3 +40,4 @@ class UndoStack(private val maxCapacity: Int = UNDO_LIMIT) {
         redoList.clear()
     }
 }
+

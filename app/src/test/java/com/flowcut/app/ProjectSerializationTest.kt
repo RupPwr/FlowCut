@@ -46,3 +46,4 @@ class ProjectSerializationTest {
         assertEquals(800L, decoded.transitions[0].durationMs)
     }
 }
+

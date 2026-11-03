@@ -84,3 +84,4 @@ class UndoStackTest {
         assertFalse(stack.canRedo)
     }
 }
+
