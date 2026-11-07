@@ -1,0 +1,839 @@
+FLOWCUT FOUNDATION SPEC (Timeline + Playhead ka core)
+Version: F1
+Yeh file plain text hai. Agent ko seedha de sakte ho, aur aap bhi padh sakte ho.
+Total 17 sections. Har section apne aap mein ek alag kaam hai.
+
+Section list:
+ 0. Is spec ka maqsad aur kya NAHI badlega
+ 1. Bade niyam (12 iron rules)
+ 2. Package structure aur dependency ki disha
+ 3. Time ke units
+ 4. Project data model (main track, lanes, TimeMap)
+ 5. Snapshot aur index (O(log n))
+ 6. Playhead aur PlaybackController (ek hi writer)
+ 7. FrameDriver (ek hi vsync, sab kuch isi se)
+ 8. Timeline Canvas UI
+ 9. Commands, undo aur live params (edit ka ek hi darwaza)
+10. Feature plug-in contract
+11. Threads aur frame budgets
+12. Scale test (100+ features ka saboot)
+13. Niyam ki auto-check (checkRules)
+14. Naya feature kaise jodte hain (recipe)
+15. Purane code se migration steps
+16. Agent ke liye rules (paste-ready)
+17. Foundation kab complete maana jaayega
+
+
+==================================================
+SECTION 0: IS SPEC KA MAQSAD AUR KYA NAHI BADLEGA
+==================================================
+
+Maqsad
+- Timeline aur playhead ko ek patla, sthir core banana. Audio, text, transition, speed, trim jaise saare features is core ke bahar plug-in ki tarah jude.
+- Features ki ginti badhne se timeline par dabav na badhe. Dabav sirf "screen par dikhne wale items" aur "us pal chalu items" par nirbhar kare.
+- Jitter ki jad (playhead aur scroll ka do jagah se badalna) khatam ho.
+
+Sachchai (jaan-boojh kar likhi hai)
+- "100 features ke baad bhi bilkul wahi dabav" ka wada koi nahi kar sakta.
+- Jo pakka kiya ja sakta hai: dabav features ki ginti par nahi, sirf dikhne wale aur chalu items par depend kare. Isse Section 12 ka scale test har baar jaanchega.
+
+Jo is spec mein NAHI badlega (jaisa hai waisa rahega)
+- FrameSource aur video decoder ke niyam (decoder pool, prefetch, latest-wins seek, generation token).
+- Import ke niyam (1080p, 15 minute) aur dialog.
+- Export ka frame-by-frame loop (sirf frame ka "kya chalu hai" ab naye snapshot se aayega).
+- OpenGL shaders aur transitions ka rendering.
+- Editor screen ka visual layout (fixed layout, rang, size).
+- Audio phase (V2) ki design. Foundation ke baad usme chhota badlav hoga taaki wo plug-in ki tarah jude.
+
+Is spec mein kya badlega
+- Timeline ka data (index), playhead, vsync ka loop, timeline ka UI, edit ka tareeka (commands), aur features ke jodne ka tareeka.
+
+
+==================================================
+SECTION 1: BADE NIYAM (12 IRON RULES)
+==================================================
+
+R1. Playhead ka time sirf ek class likhti hai (PlaybackController). Baaki sab sirf padhte hain.
+R2. Scroll ka apna koi state nahi hota. Timeline ka scroll offset playhead ke time se nikalta hai, ulta kabhi nahi.
+R3. Jo state har frame badalta hai (playhead, scroll, zoom animation) wo sirf draw phase mein padha jaata hai. Composition mein kabhi nahi.
+R4. Ek hi vsync loop (FrameDriver) hai. Timeline, preview, sab usi se chalte hain.
+R5. Time hamesha Long mein (ms, us, audio frames). Float mein kabhi nahi.
+R6. Project immutable hai. Har edit ke baad naya snapshot background mein banta hai aur ek jhatke mein badalta hai.
+R7. Frame ke waqt koi index build nahi hota. Sirf binary search.
+R8. Timeline kisi feature ko "push" nahi karti. Har feature khud poochta hai "time t par mera kya chalu hai?" (pull).
+R9. Har edit ek Command banke ek hi darwaze (EditorController.dispatch) se jaata hai.
+R10. Hot path (vsync, GL draw, audio block, timeline draw) mein: koi memory allocation nahi, koi lock nahi, koi file ya JSON nahi, koi Log nahi, koi sleep nahi.
+R11. Sab consumers (video, audio, baad mein waveform) clip ke andar ka time TimeMap se nikalte hain. Khud "local time" ka hisaab nahi karte.
+R12. Naya feature core ki kisi file ko nahi chhuta. Wo plug-in banke (Section 10) judta hai.
+
+
+==================================================
+SECTION 2: PACKAGE STRUCTURE AUR DEPENDENCY KI DISHA
+==================================================
+
+Package (ek hi Gradle module rahega, abhi alag modules nahi banane)
+
+com.flowcut.app
+ |- core/        (pure Kotlin, Android ka koi framework nahi)
+ |   |- time/       Time.kt, TimeMap.kt
+ |   |- model/      Project.kt, Clip.kt, Lane.kt
+ |   |- timeline/   MainIndex.kt, LaneIndex.kt, TimelineSnapshot.kt, SnapshotHolder.kt, ActiveSet.kt
+ |   |- playback/   PlayheadReader.kt, PlaybackController.kt, Clock.kt
+ |   |- edit/       Command.kt, EditorController.kt, UndoStack.kt, Validator.kt
+ |   |- feature/    Feature.kt, FeatureRegistry.kt (sirf interfaces)
+ |- engine/      FrameDriver.kt, PreviewRenderer.kt, FrameSource.kt, decoder pool, TransitionRenderer.kt, ExportEngine.kt
+ |- audio/       AudioFeature aur mixer (V2 ka design)
+ |- features/    text/, speed/, trim/ ... (har feature ka apna package)
+ |- ui/          EditorScreen aur baaki, ui/timeline/TimelineCanvas.kt
+ |- storage/     ProjectStore, ClipImporter
+ |- debug/       ScaleTest.kt, DummyFeature.kt (sirf debug build)
+
+Dependency ki disha (sirf ek taraf)
+- core kisi par depend nahi karta (na engine, na ui, na features).
+- features, engine, ui, audio: core par depend kar sakte hain.
+- features ek doosre par depend nahi karte.
+- ui kisi feature ki andar ki class nahi chhuta, sirf registry ke zariye.
+
+Core mein kya allowed hai
+- Pure Kotlin, kotlinx.serialization, kotlinx.coroutines.
+- Compose se sirf annotations: androidx.compose.runtime.Immutable aur Stable (stability ke liye).
+- android.* aur baaki androidx.* import mana hai (Section 13 ka script pakadta hai).
+- Isse core ke saare tests phone ke bina, JVM par chalte hain.
+
+
+==================================================
+SECTION 3: TIME KE UNITS
+==================================================
+
+Ek hi file: core/time/Time.kt
+
+Kaun sa time kis unit mein
+- Project model (clip, item ki position aur lambai): milliseconds, Long.
+- Playhead aur frame ka time: microseconds, Long.
+- Audio: frames, Long (48000 Hz par 1 ms = 48 frames).
+- Pixel: Double, sirf draw ke waqt nikalta hai, kahin store nahi hota.
+
+Code
+
+  const val US_PER_MS = 1_000L
+  const val AUDIO_FRAMES_PER_MS = 48L
+
+  fun msToUs(ms: Long): Long = ms * US_PER_MS
+  fun usToMs(us: Long): Long = Math.floorDiv(us, US_PER_MS)
+  fun msToAudioFrames(ms: Long): Long = ms * AUDIO_FRAMES_PER_MS
+  fun usToAudioFrames(us: Long): Long = Math.floorDiv(us * AUDIO_FRAMES_PER_MS, US_PER_MS)
+
+Niyam
+- Time, position ya duration ke liye Float ya Int kabhi nahi.
+- Conversion sirf in functions se. Kahin aur "/ 1000" ya "* 1000" haath se nahi likhna.
+- Overflow nahi hota: 15 minute = 900,000,000 us, audio frames = 43,200,000.
+- Pixel ka hisaab: px = timeUs * pxPerUs (Double). Draw mein sirf ek baar integer pixel mein round hota hai (Section 8).
+
+
+==================================================
+SECTION 4: PROJECT DATA MODEL (MAIN TRACK, LANES, TIMEMAP)
+==================================================
+
+Soch
+- Main track: clips ek ke baad ek, beech mein junction (transition). Jaisa abhi hai.
+- Lanes: baaki sab (text, music, sticker, effect) alag lanes mein, apni absolute position par.
+- Jo field names abhi project mein hain (Clip.durationMs, transitions) unhe rakho. Sirf neeche likhe naye cheezein jodo, sab default value ke saath, taaki purani project.json khule.
+
+Naye data
+
+  @Immutable @Serializable
+  data class Project(
+      // ... jo pehle se hai (clips, transitions) wahi rahega ...
+      val lanes: List<Lane> = emptyList()          // naya
+  )
+
+  @Immutable @Serializable
+  data class Lane(
+      val id: String,
+      val kind: String,                            // feature ki id, jaise "text", "music"
+      val items: List<LaneItem> = emptyList()
+  )
+
+  interface LaneItem {                             // har feature apna item banayega
+      val id: String
+      val startMs: Long                            // timeline par absolute position
+      val durationMs: Long
+  }
+
+  @Immutable @Serializable
+  data class TimeMap(
+      val inUs: Long,                              // source mein kahan se
+      val outUs: Long,                             // source mein kahan tak
+      val speedNum: Int = 1,                       // speed = speedNum / speedDen
+      val speedDen: Int = 1                        // abhi hamesha 1/1. Reverse (negative) abhi mana.
+  ) {
+      fun timelineDurationUs(): Long = (outUs - inUs) * speedDen / speedNum
+      fun sourceUs(localTimelineUs: Long): Long = inUs + localTimelineUs * speedNum / speedDen
+  }
+
+  // Clip mein: val timeMap: TimeMap? = null   (null = pura clip, speed 1)
+  fun Clip.map(): TimeMap = timeMap ?: TimeMap(0L, durationMs * 1000L)
+
+Lane ke niyam
+- Ek lane ke items kabhi ek doosre par chadhe nahi hote (no overlap). Items startMs se sorted rehte hain.
+- Overlap chahiye to alag lane. Isse "time t par chalu item" binary search se mil jaata hai.
+- Lane items timeline par absolute position par hote hain, clip se jude nahi. Main track mein ripple (clip hatana) hone par lane items apni jagah rehte hain. (Baad mein "clip se jodna" option aa sakta hai.)
+- Lane item timeline ke end ke baad nikal jaaye to wo dikhta nahi (timeline ki total length sirf main track tay karti hai).
+- Lane khaali ho to bhi rakhi ja sakti hai.
+
+Unknown item type
+- Agar project mein koi item type ka feature ab maujood nahi, to project corrupt nahi hona chahiye. Item skip hoga aur warning log hogi. (Abhi lanes khaali hain, isliye sirf registry mein ye hook rakhna hai, poora implementation tab jab pehla lane-feature aaye.)
+
+TimeMap ka niyam (R11)
+- Video decoder, audio source, aur koi bhi consumer clip ke andar ka time sirf clip.map().sourceUs(localTimelineUs) se nikalega.
+- Trim aur speed baad mein sirf TimeMap ki values badlenge. Baaki code nahi badlega.
+
+Invariants (har edit ke baad Validator check karta hai)
+- junction/transitions ki ginti = max(0, clips.size - 1).
+- Har lane mein items sorted aur no-overlap.
+- Sabhi clips ki duration ka sum 15 minute se zyada nahi (import ki limit wahi).
+- Har clip ki duration kam se kam 1 second.
+
+
+==================================================
+SECTION 5: SNAPSHOT AUR INDEX (O(log n))
+==================================================
+
+Kya hai
+- TimelineSnapshot project ki ek immutable tasveer hai, uske saath uske index. Ek baar ban gaya to kabhi badalta nahi.
+- Har edit par naya snapshot background thread par banta hai aur SnapshotHolder.current mein ek jhatke mein badal jaata hai.
+
+Code
+
+  class SnapshotHolder { @Volatile var current: TimelineSnapshot = TimelineSnapshot.EMPTY }
+
+  class TimelineSnapshot(val version: Long, val project: Project) {
+      val main = MainIndex(project)
+      val lanes: Array<LaneIndex> = Array(project.lanes.size) { LaneIndex(project.lanes[it]) }
+      val totalMs: Long get() = main.totalMs
+
+      fun resolve(tUs: Long, out: ActiveSet) {      // koi allocation nahi
+          main.resolve(tUs, out)
+          val tMs = usToMs(tUs)
+          for (i in lanes.indices) out.laneItem[i] = lanes[i].indexAt(tMs)   // -1 = kuch nahi
+      }
+  }
+
+  class ActiveSet(laneCount: Int) {                 // ek baar bana kar baar-baar use hota hai
+      var aIndex = 0; var aLocalUs = 0L
+      var bIndex = -1; var bLocalUs = 0L            // bIndex == -1 matlab transition nahi
+      var type = TransitionType.NONE
+      var linearP = 0f                              // transition ki progress (0..1), time nahi
+      val laneItem = IntArray(laneCount) { -1 }
+  }
+
+MainIndex (abhi ke ProgramTimeline wala hi logic, sirf us mein time ab us mein)
+
+  class MainIndex(project: Project) {
+      val n = project.clips.size
+      val durMs = LongArray(n) { project.clips[it].durationMs }
+      val dMs = LongArray(maxOf(0, n - 1)) { project.transitions[it].durationMs }   // NONE => 0
+      val types = Array(maxOf(0, n - 1)) { project.transitions[it].type }
+      val startMs = LongArray(n)
+      val endMs = LongArray(n)
+      val totalMs: Long
+      init {
+          var s = 0L
+          for (k in 0 until n) {
+              startMs[k] = s
+              endMs[k] = s + durMs[k]
+              s = endMs[k] - (if (k < n - 1) dMs[k] else 0L)
+          }
+          totalMs = if (n == 0) 0L else endMs[n - 1]
+      }
+      fun lastStartAtOrBefore(tMs: Long): Int {          // binary search
+          var lo = 0; var hi = n - 1; var ans = 0
+          while (lo <= hi) {
+              val mid = (lo + hi) ushr 1
+              if (startMs[mid] <= tMs) { ans = mid; lo = mid + 1 } else hi = mid - 1
+          }
+          return ans
+      }
+      fun resolve(tUs: Long, out: ActiveSet) {
+          if (n == 0) { out.aIndex = -1; out.bIndex = -1; out.type = TransitionType.NONE; return }
+          val tt = tUs.coerceIn(0L, maxOf(0L, totalMs * 1000L - 1))
+          val tMs = tt / 1000L
+          val k = lastStartAtOrBefore(tMs)
+          if (k > 0 && tMs < endMs[k - 1]) {              // overlap: transition (k-1) chal rahi hai
+              out.aIndex = k - 1; out.aLocalUs = tt - startMs[k - 1] * 1000L
+              out.bIndex = k;     out.bLocalUs = tt - startMs[k] * 1000L
+              out.type = types[k - 1]
+              out.linearP = (tt - startMs[k] * 1000L).toFloat() / (dMs[k - 1] * 1000L)
+          } else {
+              out.aIndex = k; out.aLocalUs = tt - startMs[k] * 1000L
+              out.bIndex = -1; out.type = TransitionType.NONE; out.linearP = 0f
+          }
+      }
+  }
+
+LaneIndex
+
+  class LaneIndex(lane: Lane) {
+      val n = lane.items.size
+      val startMs = LongArray(n) { lane.items[it].startMs }
+      val endMs = LongArray(n) { lane.items[it].startMs + lane.items[it].durationMs }
+      fun indexAt(tMs: Long): Int            // t par chalu item ka index, nahi to -1
+      fun firstEndingAfter(tMs: Long): Int   // sabse chhota i jiska endMs[i] > tMs (nahi to n)
+      fun lastStartingBefore(tMs: Long): Int // sabse bada i jiska startMs[i] < tMs (nahi to -1)
+  }
+  // Teeno binary search hain. Items sorted aur no-overlap hain, isliye startMs aur endMs dono ascending hain.
+  // Dikhne wale items = [firstEndingAfter(leftMs) .. lastStartingBefore(rightMs)]
+
+Niyam
+- Snapshot ek baar bana to uske andar kuch nahi badalta.
+- Kisi bhi consumer ko ek frame mein ek hi baar snapshot padhna hai: val s = holder.current, phir poore frame mein wahi s.
+- Snapshot banne ka kaam Dispatchers.Default par, main thread par nahi.
+- Purane tests (7.7 wali table: dur [5000, 4000, 6000], transitions [1000, 800], total 13200) bina badle pass hone chahiye. Time ab us mein aata hai, isliye test mein t ko 1000 se guna karo.
+
+
+==================================================
+SECTION 6: PLAYHEAD AUR PLAYBACKCONTROLLER (EK HI WRITER)
+==================================================
+
+Kya hai
+- Playhead ka time sirf PlaybackController ke andar badalta hai. Bahar ke sab ko sirf padhne wala interface (PlayheadReader) milta hai.
+- Compiler isse force karta hai: likhne wali class private hai, bahar nazar hi nahi aati.
+
+Code
+
+  enum class PlayMode { PAUSED, PLAYING, SCRUBBING, FLINGING }
+
+  interface PlayheadReader {
+      val timeUs: Long
+      val mode: PlayMode
+      val generation: Int          // har seek/play/pause/scrub par badhta hai (purane results ignore karne ke liye)
+  }
+
+  interface Clock {                // abhi MasterClock, V2 mein AudioClock
+      fun start(fromUs: Long)
+      fun stop()
+      fun timeUsAt(frameTimeNanos: Long): Long
+      val isReady: Boolean         // audio clock ka pehla timestamp aane tak false
+  }
+
+  class PlaybackController(private val clock: Clock, private val holder: SnapshotHolder) {
+      private class MutablePlayhead : PlayheadReader {
+          @Volatile override var timeUs = 0L
+          @Volatile override var mode = PlayMode.PAUSED
+          @Volatile override var generation = 0
+      }
+      private val state = MutablePlayhead()
+      val playhead: PlayheadReader = state
+
+      // UI se (main thread). Yeh seedha time nahi badalte, sirf request rakhte hain.
+      fun play(); fun pause()
+      fun seekTo(us: Long)                     // seekbar tap, programmatic
+      fun beginScrub()
+      fun scrubBy(deltaUs: Long)               // drag ka delta (us mein, Long)
+      fun endScrub(velocityUsPerSec: Double)   // fling shuru karta hai
+
+      // Sirf FrameDriver bulata hai, har vsync par ek baar
+      fun tick(frameTimeNanos: Long)
+      fun needsFrames(): Boolean               // PLAYING, SCRUBBING, FLINGING, ya pending seek
+  }
+
+tick() ka kaam (har mode ke liye)
+- PAUSED: kuch nahi.
+- PLAYING: timeUs = clock.timeUsAt(frameTimeNanos), [0, total] mein clamp. Total par pahunche to pause.
+- SCRUBBING: jo scrubBy ka jama delta hai use ek baar timeUs mein jodo (isliye ek frame mein playhead sirf ek baar badalta hai).
+- FLINGING: velocity ko exponential decay se ghatao: v = v * exp(-FLING_DECAY * dt), dt = do vsync ka asli gap. timeUs += v * dt. Jab |v| * pxPerUs 20 pixel/second se kam ho to PAUSED. Edge (0 ya total) par pahunch kar turant rukta hai.
+  FLING_DECAY ka shuruati value 3.0 (per second), isse feel ke hisaab se tune karna.
+- Mode badalne par (play, pause, seek, scrub shuru, fling shuru) generation ek badhta hai.
+
+Niyam
+- Koi bhi aur class playhead ka time nahi likhti. Na ViewModel, na UI, na engine.
+- seekTo aur scrub ke baad bhi time tick() mein hi badalta hai (ek frame ki der theek hai, par ek hi jagah badalna zaroori hai).
+- Frame ke waqt har consumer val t = playhead.timeUs ek baar padhe aur poore frame mein wahi t use kare.
+- timeUs ko StateFlow ya Compose state banakar composition mein padhna mana hai (R3).
+- Playing mein seek hone par controller clock.start(newTime) bulata hai (MasterClock ke liye anchor, AudioClock ke liye naya audio session).
+
+
+==================================================
+SECTION 7: FRAMEDRIVER (EK HI VSYNC, SAB KUCH ISI SE)
+==================================================
+
+Kya hai
+- Poore app mein ek hi Choreographer callback hai. Timeline, preview, audio-clock sab usi frame par chalte hain, isliye aapas mein phase ka farak (jitter) nahi aata.
+
+Code
+
+  class FrameDriver(
+      private val controller: PlaybackController,
+      private val frameTick: MutableLongState,        // Compose state, sirf draw phase mein padhi jaati hai
+      private val preview: PreviewRenderer
+  ) : Choreographer.FrameCallback {
+      private var running = false
+      fun wake() { if (!running) { running = true; Choreographer.getInstance().postFrameCallback(this) } }
+      override fun doFrame(frameTimeNanos: Long) {
+          controller.tick(frameTimeNanos)              // playhead yahin badalta hai
+          frameTick.longValue = frameTimeNanos         // timeline ka draw dobara hoga, recomposition nahi
+          preview.requestRender()                      // GL thread ko batao
+          if (controller.needsFrames()) Choreographer.getInstance().postFrameCallback(this)
+          else running = false                         // kuch nahi chal raha to 0 CPU
+      }
+  }
+
+Kab wake() bulana hai
+- Play, scrub shuru, fling shuru, seek, zoom badalna, snapshot badalna (edit ke baad), selection badalna.
+
+Niyam
+- Choreographer par koi aur frame callback nahi (timeline ke liye alag, preview ke liye alag, mana).
+- doFrame ke andar sirf: tick, frameTick, requestRender, repost. Koi bhaari kaam nahi.
+- Idle mein (kuch nahi chal raha) callback band, CPU zero.
+
+
+==================================================
+SECTION 8: TIMELINE CANVAS UI
+==================================================
+
+Kya hai
+- Poori timeline (ruler, main track, saari lanes, playhead line) ek hi Canvas hai. Har clip ya item ke liye alag composable nahi.
+
+Structure
+- Composable: TimelineCanvas(holder, playhead: PlayheadReader, controller, zoom, frameTick, selection)
+- Draw ke andar sabse pehle frameTick.longValue padho (taaki har frame draw ho), phir:
+    val t = playhead.timeUs
+    val s = holder.current
+    val half = size.width / 2
+    val offsetPx = Math.round(t * pxPerUs)              // Double -> ek hi baar integer pixel
+    // koi bhi item ka x = round(startMs * 1000 * pxPerUs) - offsetPx + half
+- Visible range:
+    leftMs = usToMs(t - halfWidthPx / pxPerUs), rightMs = usToMs(t + halfWidthPx / pxPerUs)
+    main track: lastStartAtOrBefore se k0 - 1 .. k1 + 1
+    lanes: firstEndingAfter(leftMs) .. lastStartingBefore(rightMs)
+- Main track ka drawing built-in MainTrackPainter karta hai. Har lane ka drawing us lane ke kind wale feature ka LanePainter karta hai (Section 10).
+
+Scroll aur zoom
+- Playhead screen ke beech mein fixed hai. Scroll ka matlab hai playhead ka time badalna. Isliye UI mein scroll ka alag koi state nahi hota (R2).
+- Zoom: pxPerSecond = dp * density. Range 0.4 dp/s (poore 15 minute screen par) se 400 dp/s. Zoom sirf scale badalta hai, playhead ka time nahi, kyunki playhead beech mein fixed hai.
+- Pinch ke dauraan zoom Double mein, volatile. Draw usse padhta hai. Pinch par frameTick/wake() se redraw.
+
+Gestures (ek hi pointerInput mein)
+- Horizontal drag: beginScrub, scrubBy(-dxPx / pxPerUs as Long), endScrub(velocity) (VelocityTracker se).
+- Tap: x se time, phir binary search se item. Pehle junction node (48 dp touch area), phir clip, phir lane items.
+- Long-press: us item ka menu (jo pehle se hai).
+- Pinch: zoom.
+- Drag shuru hote hi chalti fling ruk jaati hai (controller mode SCRUBBING ho jaata hai).
+
+Hot path niyam (draw lambda ke andar)
+- Koi naya object nahi: Paint, Path, Rect, Brush, list sab pehle se remember mein.
+- Text ke liye TextMeasurer ka cache (key: text aur size, max 200 entries).
+- Sirf visible range ka kaam.
+- Pixel translate hamesha integer.
+
+Mana hai (ye timeline ke files mein nahi ayenge)
+- LazyRow, LazyColumn, rememberScrollState, ScrollState, horizontalScroll, scrollable (ye doosra scroll state bana dete hain, R2 tootta hai).
+- Har clip ke liye alag composable.
+- Playhead ya zoom ko composition mein padhna.
+- animate*AsState se scroll chalana.
+
+Chrome (ye alag hai, har frame nahi badalta)
+- Selection, toolbar, sheet open/close, time label: ViewModel ke StateFlow se. Time label sirf tab badalta hai jab second badle.
+
+
+==================================================
+SECTION 9: COMMANDS, UNDO AUR LIVE PARAMS (EDIT KA EK HI DARWAZA)
+==================================================
+
+Command
+
+  interface Command {
+      val label: String
+      val pausesPlayback: Boolean get() = true      // zyadatar edit pehle playback roke
+      val coalesceKey: String? get() = null         // same key ke lagatar commands ek undo step banate hain
+      fun apply(p: Project): Project                // pure function, side effect nahi
+  }
+
+dispatch ka flow (EditorController.dispatch(cmd))
+1. Agar cmd.pausesPlayback ho to playback.pause().
+2. next = cmd.apply(current).
+3. Validator.check(next). Fail ho to reject, UI ko reason (jaise 15 minute ki limit).
+4. Undo stack mein current push (coalesceKey ho to pichle ke saath mila do).
+5. Background (Dispatchers.Default) par naya TimelineSnapshot banao.
+6. Main thread par: holder.current = snapshot, EditorUiState update (StateFlow), frameDriver.wake().
+7. 500 ms debounce ke baad project save (Dispatchers.IO, temp file likhkar rename).
+- Commands ek ke baad ek (ek hi queue) chalti hain, taaki order na bigde.
+- Undo aur Redo bhi Command hain (isi rasta se jaate hain).
+
+Live params (slider drag jaise chalte bhaav)
+- Slider drag ke dauraan project ya undo ko nahi chhuna. Feature apna LiveParams rakhta hai (jaise audio ka gains array, volatile floats).
+- Drag shuru se end tak: sirf LiveParams badalte hain, preview/mixer unhe padhte hain.
+- Drag end par: ek Command dispatch (jaise SetVolume). Wohi ek undo step banta hai.
+- LiveParams mein allocation nahi hoti (pehle se bana FloatArray).
+
+ViewModel
+- EditorUiState sirf chrome ke liye: selection, toolbar, sheet open, export state, messages.
+- Playhead, time, zoom ViewModel mein nahi.
+
+Niyam
+- Koi feature seedha Project ya state nahi badalta. Sirf Command.
+- Command ka apply() mein koi IO, thread ya Android call nahi.
+
+
+==================================================
+SECTION 10: FEATURE PLUG-IN CONTRACT
+==================================================
+
+Idea
+- Har feature ek chhota Feature object hai jo registry mein apne aap ko jodta hai. Core ko feature ka naam bhi nahi pata.
+
+Interfaces (core/feature/Feature.kt)
+
+  interface Feature {
+      val id: String
+      fun register(r: FeatureRegistry)
+  }
+
+  interface FeatureRegistry {
+      fun itemType(kind: String /* aur serializer */)          // project mein save/load
+      fun lanePainter(kind: String, p: LanePainter)            // timeline par chitra
+      fun renderContributor(c: RenderContributor)              // video (GL) par asar
+      fun audioContributor(c: AudioContributor)                // awaaz mein hissa
+      fun prefetcher(p: Prefetcher)                            // aage ka kaam pehle se
+      fun clipTool(t: ClipTool)                                // clip toolbar mein tool
+  }
+
+  interface LanePainter {                                      // UI thread, draw phase
+      fun draw(ctx: PainterCtx, laneIndex: Int, from: Int, to: Int)   // sirf visible items [from..to]
+  }
+
+  interface RenderContributor {                                // GL thread
+      val order: Int                                           // chhota pehle (video = 0, overlays baad mein)
+      val kinds: Set<String>                                   // kin lanes par chalu item ho tab hi bulana
+      fun onFrame(f: FrameCtx)                                 // f: tUs, snapshot, active, gl helpers, output size
+      fun release()
+  }
+
+  interface AudioContributor {                                 // audio thread, har 10 ms block
+      val kinds: Set<String>
+      fun render(startFrame: Long, frames: Int, out: FloatArray)   // out mein jodta hai (add), stereo interleaved
+  }
+
+  interface Prefetcher {                                       // background thread, ~10 Hz
+      fun prefetch(s: TimelineSnapshot, fromUs: Long, windowUs: Long)
+  }
+
+  interface ClipTool {                                         // clip toolbar ka tool
+      val id: String
+      fun appliesTo(clip: Clip): Boolean
+      // icon, label, aur uska sheet (Composable) yahin se
+  }
+
+Core feature ko kaise bulata hai
+- Snapshot banne par core "kind -> lane indexes" ki table bana leta hai.
+- Har frame mein core active.laneItem se dekhta hai ki kis kind ke lane par item chalu hai. Sirf unhi features ke contributors ko bulata hai (kinds ke hisaab se). Jis feature ka kuch chalu nahi, uska kharcha zero (bas ek check).
+- Built-in cheezein bhi isi contract se jodo: video renderer (order 0), clip ka audio (AudioContributor), main track ka painter.
+
+Failure isolation
+- Contributor mein exception aaye to pakad kar log karo aur us contributor ko us session ke liye band karo. App crash nahi.
+- Har contributor ka time System.nanoTime se naapo (FrameBudget, Section 11).
+
+Registration
+- Ek hi file Features.kt mein list: listOf(AudioFeature, TextFeature, ...). Naya feature = ek line.
+
+
+==================================================
+SECTION 11: THREADS AUR FRAME BUDGETS
+==================================================
+
+Thread ki zimmedari
+
+  Main thread   : gestures, FrameDriver, timeline draw, ViewModel. Koi IO, decode, JSON nahi.
+  GL thread     : PreviewRenderer, RenderContributors. updateTexImage, draw.
+  Audio thread  : mixer, AudioTrack write (V2).
+  Decode thread(s): har decoder ka apna HandlerThread (Phase 0 jaisa).
+  Default pool  : snapshot build, prefetch loop.
+  IO pool       : save, import copy, metadata.
+
+Data thread ke beech kaise jaata hai (sirf yeh tareeke)
+- Immutable snapshot (SnapshotHolder.current, volatile reference).
+- Volatile primitives (playhead.timeUs, mode, generation, LiveParams ke floats).
+- SPSC ring buffers (audio PCM, decoded frame queues).
+- Command queue (UI se EditorController tak).
+- Lock wala shared mutable state mana hai.
+
+Frame budgets (60 Hz par frame = 16.6 ms; release build, mid-range phone)
+
+  Timeline draw (poora Canvas)            : p99 4 ms se kam
+  Har LanePainter (100 dikhte items par)  : 1 ms se kam
+  GL thread poora frame (preview)         : p99 8 ms se kam
+  Audio ka 10 ms block render             : 2 ms se kam
+  Snapshot build (900 clips + 1000 items) : 50 ms se kam (background)
+  snapshot.resolve (ek baar)              : 50 microsecond se kam
+  Main thread par koi bhi akela kaam      : 4 ms se kam
+
+FrameBudget (debug build mein)
+- Har contributor aur painter ka nanosecond time pehle se bane array mein jama hota hai (allocation nahi).
+- Har 10 second par ek log line: kis ka p50, p99, max. Jo budget todta hai uska naam aata hai. Isse pakad mein aata hai ki kaun sa feature dosi hai.
+
+
+==================================================
+SECTION 12: SCALE TEST (100+ FEATURES KA SABOOT)
+==================================================
+
+Maqsad
+- Foundation ko feature aane se pehle hi test karna, nakli (dummy) features se. Aur har naye feature ke baad dobara chalana.
+
+DummyFeature (sirf debug build)
+- Ek feature jiska lane kind "dummy_N" hota hai (N = 1 se 100, yaani 100 alag registered features).
+- Item: ek rect aur ek chhota text label (TextMeasurer cache ke saath), asli text overlay ke kharche jaisa.
+- LanePainter: visible items ko rect aur text se banata hai.
+- RenderContributor: ek chhota quad draw karta hai jab uska item chalu ho.
+- AudioContributor: halka sa kaam (ek sine add).
+- Poora kaam us feature ke item ke chalu hone par hi hota hai (Section 10 ka kinds wala niyam).
+
+Presets (project generator)
+
+  S : 10 clips,   10 dummy items,   10 features registered
+  M : 200 clips,  100 dummy items,  50 features registered
+  L : 900 clips,  500 dummy items,  100 features registered
+  (Items ki density per second teeno mein barabar rakho, taaki same zoom par dikhne wale items barabar hon.)
+
+Scenario (code se chalta hai, haath se nahi, taaki baar-baar same ho)
+1. 30 second timeline ko start se end tak fling.
+2. 60 second play.
+3. 30 second aage-peeche scrub.
+4. 50 commands lagatar dispatch (add, move, delete, undo).
+- Sab PlaybackController ke API se chalta hai.
+- Chalane ka tareeka: HomeScreen ka title long-press, debug menu, "Scale test S / M / L".
+- Result: logcat tag SCALE par aur filesDir/scale_<preset>.json mein: frame p50 / p95 / p99, timeline draw p99, janky %, snapshot build time, memory, command se UI tak ka time. Screen par PASS ya FAIL.
+
+Gates (release build, mid-range phone)
+- Timeline draw p99: 4 ms se kam (L par bhi).
+- Frame p99: 16 ms se kam, janky frames 1% se kam.
+- Scaling ka saboot: timeline draw p99 (L) <= 1.5 x timeline draw p99 (S). Yehi asli test hai ki features aur items ki ginti se kharcha nahi badha.
+- Snapshot build (L): 50 ms se kam.
+- Memory (L) <= memory (S) + 30 MB.
+- Command dispatch se UI badalne tak (L): 100 ms se kam.
+- 100 features registered hone ka idle overhead: frame time mein 0.2 ms se kam extra.
+
+JVM unit tests (phone ke bina)
+- LaneIndex complexity test: 1,000,000 items ka lane banao. indexAt aur baaki search mein comparisons 25 se zyada nahi (comparison counter ke saath).
+- MainIndex: purani 7.7 table ke saare cases.
+- Snapshot immutability: snapshot banne ke baad project badle to snapshot nahi badalta.
+
+Naye feature par
+- Jab asli feature aaye, uske dummy ko hatao aur wahi scale test chalao. Gate fail ho to feature merge nahi hota.
+
+
+==================================================
+SECTION 13: NIYAM KI AUTO-CHECK (checkRules)
+==================================================
+
+Kyun
+- Agent niyam bhool jaata hai. Isliye kuch niyam build ke waqt apne aap pakde jaate hain. Check fail ho to build hi nahi banta.
+
+Kya pakda jaata hai
+
+  1. core/ mein android.* import, ya androidx.* import (sirf compose.runtime.Immutable / Stable allowed).
+  2. ui/timeline/ mein LazyRow, LazyColumn, rememberScrollState, ScrollState, horizontalScroll, scrollable(.
+  3. PlaybackController.kt ke bahar kisi bhi file mein ".timeUs =" likhna.
+  4. core/, engine/, audio/, ui/ mein Thread.sleep ya runBlocking.
+  5. features/ ke andar kisi doosre features/ package ka import (feature ek doosre ko nahi jaante).
+  6. core/ mein engine, ui, features ya audio ka import.
+
+Sample script (app/build.gradle.kts mein). Ye abhi test nahi hua hai, pehli baar chalakar dekhna, syntax error aaye to agent se sirf syntax theek karwana.
+
+  tasks.register("checkRules") {
+      doLast {
+          val src = file("src/main/java/com/flowcut/app")
+          val errors = mutableListOf<String>()
+          fun scan(dir: String, rules: List<Pair<Regex, String>>, skip: Set<String> = emptySet()) {
+              val d = File(src, dir)
+              if (!d.exists()) return
+              d.walkTopDown()
+                  .filter { it.isFile && it.extension == "kt" && it.name !in skip }
+                  .forEach { f ->
+                      f.readLines().forEachIndexed { i, line ->
+                          rules.forEach { (rx, msg) ->
+                              if (rx.containsMatchIn(line)) errors += "${f.relativeTo(src)}:${i + 1}: $msg"
+                          }
+                      }
+                  }
+          }
+          scan("core", listOf(
+              Regex("""import android\.""") to "core mein android import mana hai",
+              Regex("""import androidx\.(?!compose\.runtime\.(Immutable|Stable)\b)""") to "core mein androidx import mana hai",
+              Regex("""import com\.flowcut\.app\.(engine|ui|features|audio)""") to "core upar ki layer ko import nahi kar sakta"
+          ))
+          scan("ui/timeline", listOf(
+              Regex("""\b(LazyRow|LazyColumn|rememberScrollState|ScrollState|horizontalScroll)\b|scrollable\(""") to "timeline mein doosra scroll state mana hai"
+          ))
+          for (dir in listOf("core", "engine", "audio", "ui")) {
+              scan(dir, listOf(Regex("""Thread\.sleep|runBlocking""") to "sleep/runBlocking mana hai"))
+          }
+          for (dir in listOf("core", "engine", "audio", "ui", "features")) {
+              scan(dir, listOf(Regex("""\.timeUs\s*=[^=]""") to "playhead ka time sirf PlaybackController likhta hai"),
+                   skip = setOf("PlaybackController.kt"))
+          }
+          if (errors.isNotEmpty()) throw GradleException(errors.joinToString("\n"))
+      }
+  }
+  tasks.matching { it.name == "preBuild" }.configureEach { dependsOn("checkRules") }
+
+Niyam 5 (features ek doosre ko import nahi karte) script mein abhi nahi hai. Feature packages banne par ek aur scan add karna.
+Jo niyam grep se nahi pakde ja sakte (hot path mein allocation, composition mein playhead padhna) unhe code review mein dekho (Section 16 ka checklist) aur FrameBudget ke numbers se.
+
+
+==================================================
+SECTION 14: NAYA FEATURE KAISE JODTE HAIN (RECIPE)
+==================================================
+
+Recipe (har feature ke liye ek jaisa)
+1. features/<naam>/ naya package.
+2. Item ka data class (LaneItem) aur uska serializer register.
+3. Commands: Add, Move, Resize, Delete, Edit. Sab pure functions.
+4. LanePainter (timeline par kaise dikhe).
+5. Jo asar chahiye uske contributors: RenderContributor, AudioContributor, ya Prefetcher.
+6. UI: ClipTool (clip toolbar mein) ya lane ka tool.
+7. Features.kt mein ek line.
+8. Tests: commands ke unit tests, aur scale test mein us feature ka dummy hatakar asli lagana.
+9. Gates (Section 12) chalao.
+- Core ki koi file nahi badli. Agar badalni pade to wajah likho aur alag se review karo.
+
+Aane wale features kaise judenge
+
+  Audio (V2 ka design)
+   - Clip ka apna audio: built-in AudioContributor (mixer). Music baad mein: lane kind "music".
+   - Playback ka Clock: AudioClock (Clock interface ko implement karta hai). PlaybackController ko bas naya Clock milta hai.
+   - Volume sheet: ClipTool. Volume live: LiveParams. Commit: SetVolume command.
+   - Core ko kuch nahi chhoona.
+
+  Text
+   - Lane kind "text", TextItem (startMs, durationMs, text, style).
+   - LanePainter (timeline par chhota block), RenderContributor (GL par text ka texture).
+   - Prefetcher: text ka texture raster aage ke window ke liye background mein.
+   - Core ko kuch nahi chhoona.
+
+  Transition
+   - Junction ka type aur duration pehle se model mein hai. Rendering built-in transition renderer (RenderContributor).
+   - Naye transition types: shader ki registry mein ek ek entry.
+   - Audio crossfade: AudioContributor ka hissa, jo ActiveSet.type aur linearP padhta hai.
+
+  Speed aur Trim
+   - Sirf Clip.timeMap badalta hai (SetTimeMap command).
+   - Video decoder aur audio source pehle se clip.map().sourceUs() use karte hain (R11), isliye unka code nahi badalta.
+   - MainIndex ke liye Clip.durationMs (timeline par duration) ko timeMap.timelineDurationUs() se nikalo. Yehi ek jagah badalti hai.
+   - Core mein bas yeh ek formula, aur uske tests.
+
+  Waveform, stickers, effects, keyframes
+   - Sab isi recipe se. Naye lane kind ya naye ClipTool.
+
+
+==================================================
+SECTION 15: PURANE CODE SE MIGRATION STEPS
+==================================================
+
+Pehle safety
+- Abhi ka sab kuch commit karo (branch: before-foundation).
+- Naya branch: foundation-core.
+- Har step ke baad chhota commit aur tag.
+
+Naya core purane ke saath rahega, ek switch se chunenge
+- const val USE_NEW_CORE = false (debug flag). Jab tak naya core gate pass nahi karta, default false.
+- Purani files delete nahi karni, jab tak F2.7 na aaye.
+
+Purane aur naye ka nakshaa
+
+  ProgramTimeline.kt   -> core/timeline/MainIndex.kt (logic wahi, time ab us mein, resolve ActiveSet mein likhta hai)
+  PlayheadState.kt     -> core/playback/PlaybackController.kt + PlayheadReader
+  Clock / MasterClock  -> core/playback/Clock.kt (interface wahi, start/stop jodo)
+  PreviewEngine.kt     -> engine/FrameDriver.kt + engine/PreviewRenderer.kt (decoder pool aur FrameSource wahi rahte hain)
+  EditorViewModel.kt   -> core/edit/EditorController.kt + patla ViewModel (sirf chrome)
+  UndoStack.kt         -> core/edit/UndoStack.kt (Project snapshots, limit 30)
+  TimelineBlock.kt     -> ui/timeline/TimelineCanvas.kt (Section 8)
+  ExportEngine.kt      -> wahi, bas frame ka "kya chalu hai" snapshot.resolve se
+
+Steps (ek ke baad ek, agla tabhi jab checkpoint pass)
+
+F2.1 core ka data aur index (pure Kotlin)
+  - Time.kt, TimeMap.kt, Project mein lanes aur Clip.timeMap (default ke saath), MainIndex, LaneIndex, TimelineSnapshot, ActiveSet, Validator.
+  - Checkpoint: JVM tests: 7.7 table, delete rules, invariants, LaneIndex complexity, snapshot immutability. Purani project.json load hoti hai.
+
+F2.2 Commands aur undo
+  - Command, EditorController, UndoStack. Existing edits (import, delete, transition apply, duration, remove) Commands ban jaate hain.
+  - Checkpoint: purana behaviour bilkul waisa: delete, undo, redo, import batch ek undo step, 15 minute limit.
+
+F2.3 Playhead, controller, FrameDriver, TimelineCanvas (abhi video ke bina)
+  - Fake clips par timeline: scroll, scrub, fling, zoom, tap, selection, sab controller se.
+  - Checkpoint: scale test (timeline-only) S, M, L ke gates, 60 fps par scroll bina jitter.
+
+F2.4 Preview ko naye core par lana
+  - PreviewRenderer snapshot aur playhead padhe. FrameSource, decoder pool, prefetch wahi, bas "kya chalu hai" snapshot se.
+  - Checkpoint: Phase 0 ke tests: 1080p60 play 60 s (late frames 1% se kam), boundaries par freeze ya flash nahi, scrub 100 ms ke andar, play ke beech background aur wapas.
+
+F2.5 Feature registry, DummyFeature aur poora scale test
+  - Section 10 ke interfaces, registry, 100 dummy features, FrameBudget.
+  - Checkpoint: Section 12 ke saare gates pass (S, M, L).
+
+F2.6 checkRules
+  - Section 13 ka script on, build ke saath juda. Saare niyam pass.
+  - Checkpoint: build ke saath checkRules pass. Jaan-boojh kar ek niyam todkar dekho ki build fail hota hai.
+
+F2.7 Switch aur safai
+  - USE_NEW_CORE = true default. Do din ke baad purani files hatao.
+  - PROTECTED.txt commit (Section 16). Tag: foundation-v1.
+  - Checkpoint: Section 17 poora.
+
+
+==================================================
+SECTION 16: AGENT KE LIYE RULES (PASTE-READY)
+==================================================
+
+Isse project ki root mein AGENTS.md (ya GEMINI.md, ya jo naam aapka agent padhta hai) mein rakho.
+
+---------- yahan se copy karo ----------
+Tum FlowCut Android video editor par kaam kar rahe ho. Architecture tay hai (FlowCut_Foundation_Spec.txt). Tum use nahi badaloge.
+
+1. Sirf ek task karo, jo prompt mein likha hai. Usse bahar kuch nahi.
+2. Edit shuru karne se pehle un files ki list do jo chhuoge. List se bahar ki file mat chhuna.
+3. PROTECTED files bina "CORE-EDIT-OK" likhe prompt ke nahi chhuni:
+   core/**, ui/timeline/**, engine/FrameDriver.kt, engine/PreviewRenderer.kt, core/edit/EditorController.kt
+4. Refactor, rename, nayi library, "improvement", style badlav: mana.
+5. Architecture badalne ka sujhav mat do aur mat badlo. Agar koi niyam todna zaroori lage to ruko aur batao kaun sa niyam aur kyun.
+6. Playhead ka time sirf PlaybackController likhta hai. Timeline mein koi scroll state nahi. Time hamesha Long.
+7. Vsync, GL draw, audio block, timeline draw mein: koi allocation, lock, file, JSON, Log, sleep nahi.
+8. Naya feature = features/<naam>/ mein. Core ko nahi chhuna.
+9. Kaam ke baad ye chalao aur poora output paste karo:
+   gradlew checkRules testDebugUnitTest assembleRelease
+10. Jo nahi hua ya jis par pakka nahi ho, saaf likho. Andaza mat lagao. Jo cheez chalakar dekhi nahi, use "chalayi" mat likho.
+11. Diff chhota rakho. Ek task mein 5 se zyada file badlo to pehle ruko aur poocho.
+---------- yahan tak ----------
+
+Aapke liye (review ka checklist, har agent task ke baad)
+- git diff --stat dekho. List se bahar ki file badli ho to us file ko git checkout -- <file> se wapas karo.
+- PROTECTED file badli ho aur aapne "CORE-EDIT-OK" nahi likha tha, to wo badlav wapas.
+- checkRules aur tests ka output asli hai ya nahi (khud ek baar chalao).
+- Draw ya vsync wale code mein new, listOf, mutableListOf, string format, lambda jaisa kuch naya to nahi aaya.
+- Timeline ya preview ke kisi task ke baad Section 12 ka scale test M chalao. Numbers pehle se bure ho to badlav wapas.
+
+PROTECTED.txt (root mein, ek file ek line)
+- core/ ki saari files
+- ui/timeline/TimelineCanvas.kt
+- engine/FrameDriver.kt
+- engine/PreviewRenderer.kt
+- core/edit/EditorController.kt
+
+Agent ke liye task likhne ka tareeka (naya feature ya bug ke liye)
+- "Pehle sirf jaancho, code mat badlo. Kaaran aur sabut (file aur line) batao."
+- Aap padhkar haan bolo. Phir: "Sirf <file> mein, sirf <function> mein ye badlo. Baaki kuch mat chhuo."
+- Ek hi cheez ek task mein.
+
+
+==================================================
+SECTION 17: FOUNDATION KAB COMPLETE MAANA JAAYEGA
+==================================================
+
+1. Section 12 ka scale test S, M, L tino par saare gates pass (release build, mid-range phone).
+2. Scaling ka saboot: timeline draw p99 (L) <= 1.5 x timeline draw p99 (S).
+3. JVM tests pass: 7.7 table, delete rules, invariants, LaneIndex complexity, snapshot immutability.
+4. Phase 0 ke tests naye core par pass: 1080p60 play 60 s (late frames 1% se kam), boundaries par freeze nahi, scrub 100 ms ke andar, background aur wapas.
+5. checkRules build ke saath chalta hai aur pass hota hai. Ek niyam todkar dekha gaya ki build sach mein fail hota hai.
+6. Timeline mein koi doosra scroll state nahi. Playhead ka time sirf ek jagah likha jaata hai.
+7. USE_NEW_CORE = true, purana core hata diya, PROTECTED.txt aur AGENTS.md project mein hain, aur tag foundation-v1 laga hua hai.
+8. Uske baad hi V2 Audio ka kaam shuru hoga, plug-in ki tarah (Section 14).
