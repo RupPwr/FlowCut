@@ -14,19 +14,36 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.flowcut.app.core.playback.PlayMode
+import com.flowcut.app.core.playback.PlaybackController
+import com.flowcut.app.core.time.msToUs
+import com.flowcut.app.core.time.usToMs
+import com.flowcut.app.core.timeline.SnapshotHolder
+import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.FrameDriver
+import com.flowcut.app.engine.PreviewRenderer
+import com.flowcut.app.engine.USE_NEW_CORE
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.ProgramTimeline
 import com.flowcut.app.model.Project
 import com.flowcut.app.model.Transition
 import com.flowcut.app.model.TransitionType
+import com.flowcut.app.ui.timeline.TimelineCanvas
+import com.flowcut.app.ui.timeline.TimelineSelection
+import com.flowcut.app.ui.timeline.TimelineZoomState
 
 @Composable
 fun EditorScreen(
@@ -65,11 +82,96 @@ fun EditorScreen(
 ) {
     val context = LocalContext.current
     val colors = FlowCutTheme.colors
+    val coroutineScope = rememberCoroutineScope()
 
     val hasClips = timeline.n > 0
     val selectedTransitionName = selectedJunctionIndex?.let { j ->
         val t = timeline.project.transitions.getOrNull(j)?.type
         if (t != null && t != TransitionType.NONE) t.displayName else null
+    }
+
+    // New Core Foundation wiring (Section 8, 10, 15)
+    val coreProject = remember(timeline.project) {
+        val coreClips = timeline.project.clips.map {
+            com.flowcut.app.core.model.Clip(
+                id = it.id,
+                path = it.path,
+                durationMs = it.durationMs,
+                width = it.width,
+                height = it.height,
+                rotation = it.rotation,
+                frameRate = it.frameRate
+            )
+        }
+        val coreTransitions = timeline.project.transitions.map {
+            com.flowcut.app.core.model.Transition(
+                type = when (it.type) {
+                    TransitionType.NONE -> com.flowcut.app.core.model.TransitionType.NONE
+                    TransitionType.SLIDE -> com.flowcut.app.core.model.TransitionType.SLIDE
+                    TransitionType.CIRCLE -> com.flowcut.app.core.model.TransitionType.CIRCLE
+                    TransitionType.ZOOM -> com.flowcut.app.core.model.TransitionType.ZOOM
+                    TransitionType.FADE -> com.flowcut.app.core.model.TransitionType.FADE
+                },
+                durationMs = it.durationMs
+            )
+        }
+        com.flowcut.app.core.model.Project(coreClips, coreTransitions)
+    }
+
+    val snapshotHolder = remember { SnapshotHolder(TimelineSnapshot(1L, coreProject)) }
+    LaunchedEffect(coreProject) {
+        snapshotHolder.current = TimelineSnapshot(System.nanoTime(), coreProject)
+    }
+
+    val playbackController = remember { PlaybackController(holder = snapshotHolder) }
+    val zoomState = remember { TimelineZoomState() }
+    val frameTick = remember { mutableLongStateOf(0L) }
+
+    val previewRenderer = remember {
+        PreviewRenderer(
+            holder = snapshotHolder,
+            playhead = playbackController.playhead,
+            context = context
+        )
+    }
+
+    val frameDriver = remember(playbackController, previewRenderer) {
+        FrameDriver(
+            controller = playbackController,
+            frameTick = frameTick,
+            onRequestRender = {
+                previewRenderer.requestRender()
+                val tMs = usToMs(playbackController.playhead.timeUs)
+                if (tMs != currentMs) {
+                    onSeekScrub(tMs)
+                }
+            }
+        )
+    }
+
+    DisposableEffect(frameDriver, previewRenderer) {
+        previewRenderer.startPrefetch(coroutineScope)
+        onDispose {
+            frameDriver.stop()
+            previewRenderer.release()
+        }
+    }
+
+    LaunchedEffect(isPlaying) {
+        if (isPlaying && playbackController.playhead.mode != PlayMode.PLAYING) {
+            playbackController.play()
+            frameDriver.wake()
+        } else if (!isPlaying && playbackController.playhead.mode == PlayMode.PLAYING) {
+            playbackController.pause()
+        }
+    }
+
+    LaunchedEffect(currentMs) {
+        val targetUs = msToUs(currentMs)
+        if (kotlin.math.abs(playbackController.playhead.timeUs - targetUs) > 1000L && playbackController.playhead.mode != PlayMode.PLAYING) {
+            playbackController.seekTo(targetUs)
+            frameDriver.wake()
+        }
     }
 
     Box(
@@ -108,7 +210,7 @@ fun EditorScreen(
                     hasClips = hasClips,
                     selectedTransitionName = selectedTransitionName,
                     onAddVideoClick = onAddClipsClick,
-                    glSurfaceView = glSurfaceView,
+                    glSurfaceView = if (USE_NEW_CORE && previewRenderer.glSurfaceView != null) previewRenderer.glSurfaceView else glSurfaceView,
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 220.dp)
@@ -125,36 +227,87 @@ fun EditorScreen(
                     currentMs = currentMs,
                     totalMs = timeline.total,
                     isPlaying = isPlaying,
-                    onPlayPauseClick = onPlayPauseClick,
+                    onPlayPauseClick = {
+                        onPlayPauseClick()
+                        if (USE_NEW_CORE) frameDriver.wake()
+                    },
                     onSeekScrub = onSeekScrub
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // 4. Timeline block: 96 dp
-                TimelineBlock(
-                    timeline = timeline,
-                    currentMs = currentMs,
-                    selectedClipIndex = selectedClipIndex,
-                    selectedJunctionIndex = selectedJunctionIndex,
-                    onSelectClip = onSelectClip,
-                    onDeleteClip = onDeleteClip,
-                    onSelectJunction = onSelectJunction,
-                    onOpenDurationSheet = {
-                        selectedJunctionIndex?.let { j ->
-                            val currentT = timeline.project.transitions.getOrNull(j)
-                            if (currentT != null && currentT.type != TransitionType.NONE) {
-                                onApplyTransition(currentT.type) // open sheet
-                            }
-                        }
-                    },
-                    onDeselectAll = onDeselectAll,
-                    onScrub = onSeekScrub,
-                    onAddClipsClick = onAddClipsClick,
-                    onAudioTrackClick = {
-                        Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
+                // 4. Timeline block: 140 dp (New Core TimelineCanvas or legacy TimelineBlock)
+                if (USE_NEW_CORE) {
+                    val selection = remember(selectedClipIndex, selectedJunctionIndex) {
+                        selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
+                            ?: selectedJunctionIndex?.let { TimelineSelection.JunctionSelected(it) }
+                            ?: TimelineSelection.None
                     }
-                )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .background(colors.surface1, RoundedCornerShape(8.dp))
+                    ) {
+                        TimelineCanvas(
+                            holder = snapshotHolder,
+                            playhead = playbackController.playhead,
+                            controller = playbackController,
+                            zoomState = zoomState,
+                            frameTick = frameTick,
+                            selection = selection,
+                            onSelect = { sel ->
+                                when (sel) {
+                                    is TimelineSelection.ClipSelected -> onSelectClip(sel.index)
+                                    is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
+                                    TimelineSelection.None -> onDeselectAll()
+                                    is TimelineSelection.LaneItemSelected -> {}
+                                }
+                            },
+                            onLongPress = { sel ->
+                                when (sel) {
+                                    is TimelineSelection.JunctionSelected -> {
+                                        val j = sel.index
+                                        val currentT = timeline.project.transitions.getOrNull(j)
+                                        if (currentT != null && currentT.type != TransitionType.NONE) {
+                                            onApplyTransition(currentT.type)
+                                        }
+                                    }
+                                    is TimelineSelection.ClipSelected -> {
+                                        onDeleteClip(sel.index)
+                                    }
+                                    else -> {}
+                                }
+                            },
+                            onWakeFrameDriver = { frameDriver.wake() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                } else {
+                    TimelineBlock(
+                        timeline = timeline,
+                        currentMs = currentMs,
+                        selectedClipIndex = selectedClipIndex,
+                        selectedJunctionIndex = selectedJunctionIndex,
+                        onSelectClip = onSelectClip,
+                        onDeleteClip = onDeleteClip,
+                        onSelectJunction = onSelectJunction,
+                        onOpenDurationSheet = {
+                            selectedJunctionIndex?.let { j ->
+                                val currentT = timeline.project.transitions.getOrNull(j)
+                                if (currentT != null && currentT.type != TransitionType.NONE) {
+                                    onApplyTransition(currentT.type) // open sheet
+                                }
+                            }
+                        },
+                        onDeselectAll = onDeselectAll,
+                        onScrub = onSeekScrub,
+                        onAddClipsClick = onAddClipsClick,
+                        onAudioTrackClick = {
+                            Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -197,4 +350,3 @@ fun EditorScreen(
         }
     }
 }
-

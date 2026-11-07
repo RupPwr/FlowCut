@@ -73,3 +73,93 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
+
+tasks.register("checkRules") {
+    group = "verification"
+    description = "Enforces FlowCut architectural rules at build time (Section 13)."
+    doLast {
+        val src = file("src/main/java/com/flowcut/app")
+        val errors = mutableListOf<String>()
+
+        fun scan(dir: String, rules: List<Pair<Regex, String>>, skip: Set<String> = emptySet()) {
+            val d = File(src, dir)
+            if (!d.exists()) return
+            d.walkTopDown()
+                .filter { it.isFile && it.extension == "kt" && it.name !in skip }
+                .forEach { f ->
+                    f.readLines().forEachIndexed { i, line ->
+                        rules.forEach { (rx, msg) ->
+                            if (rx.containsMatchIn(line)) {
+                                errors += "${f.relativeTo(src)}:${i + 1}: $msg"
+                            }
+                        }
+                    }
+                }
+        }
+
+        // Rule 1: No import android.* or androidx.* (except compose.runtime.Immutable/Stable) inside core/
+        // Rule 6: No importing upper layers (engine, ui, features, audio) inside core/
+        scan(
+            "core",
+            listOf(
+                Regex("""import android\.""") to "Rule 1 Violation: core cannot import android.*",
+                Regex("""import androidx\.(?!compose\.runtime\.(Immutable|Stable)\b)""") to "Rule 1 Violation: core cannot import androidx.* except Immutable/Stable",
+                Regex("""import com\.flowcut\.app\.(engine|ui|features|audio)""") to "Rule 6 Violation: core cannot import upper layers (engine, ui, features, audio)"
+            )
+        )
+
+        // Rule 2: Zero scroll state in ui/timeline/
+        scan(
+            "ui/timeline",
+            listOf(
+                Regex("""\b(LazyRow|LazyColumn|rememberScrollState|ScrollState|horizontalScroll)\b|scrollable\(""") to "Rule 2 Violation: timeline cannot have independent scroll state"
+            )
+        )
+
+        // Rule 4: No Thread.sleep or runBlocking in core, engine, audio, ui
+        for (dir in listOf("core", "engine", "audio", "ui")) {
+            scan(
+                dir,
+                listOf(
+                    Regex("""Thread\.sleep|runBlocking""") to "Rule 4 Violation: Thread.sleep or runBlocking is forbidden in $dir"
+                )
+            )
+        }
+
+        // Rule 3: No .timeUs = assignment in any file except PlaybackController.kt
+        for (dir in listOf("core", "engine", "audio", "ui", "features")) {
+            scan(
+                dir,
+                listOf(
+                    Regex("""\.timeUs\s*=[^=]""") to "Rule 3 Violation: playhead timeUs can only be written by PlaybackController"
+                ),
+                skip = setOf("PlaybackController.kt")
+            )
+        }
+
+        // Rule 5: Inside features/<featureA>/, no importing another feature package
+        val featuresDir = File(src, "features")
+        if (featuresDir.exists()) {
+            featuresDir.listFiles()?.filter { it.isDirectory }?.forEach { featureFolder ->
+                val featureName = featureFolder.name
+                val forbiddenPattern = Regex("""import com\.flowcut\.app\.features\.(?!$featureName\b)\w+""")
+                featureFolder.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { f ->
+                    f.readLines().forEachIndexed { i, line ->
+                        if (forbiddenPattern.containsMatchIn(line)) {
+                            errors += "${f.relativeTo(src)}:${i + 1}: Rule 5 Violation: feature $featureName cannot import another feature: $line"
+                        }
+                    }
+                }
+            }
+        }
+
+        if (errors.isNotEmpty()) {
+            throw GradleException("FlowCut Architectural Guard (checkRules) Failed with ${errors.size} error(s):\n" + errors.joinToString("\n"))
+        }
+        println("checkRules: All FlowCut architectural rules passed cleanly.")
+    }
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("checkRules")
+}

@@ -19,6 +19,9 @@ import android.opengl.Matrix
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import com.flowcut.app.core.model.map
+import com.flowcut.app.core.timeline.ActiveSet
+import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.model.EXPORT_BITRATE
 import com.flowcut.app.model.EXPORT_FPS
 import com.flowcut.app.model.EXPORT_H
@@ -33,6 +36,24 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 
+private const val EGL_RECORDABLE_ANDROID = 0x3142
+
+/**
+ * Resolved frame information for export frame-by-frame loop.
+ */
+data class ExportFrameResolution(
+    val frameIndex: Int,
+    val tUs: Long,
+    val clipAIndex: Int,
+    val sourceUsA: Long,
+    val isTransition: Boolean,
+    val clipBIndex: Int,
+    val sourceUsB: Long,
+    val transitionType: TransitionType,
+    val linearP: Float,
+    val easedP: Float
+)
+
 class ExportEngine(private val context: Context) {
 
     private val isCancelled = AtomicBoolean(false)
@@ -41,7 +62,382 @@ class ExportEngine(private val context: Context) {
         isCancelled.set(true)
     }
 
+    /**
+     * Helper to resolve frame state during export using TimelineSnapshot and TimeMap (Rule R11).
+     */
+    fun resolveExportFrame(
+        snapshot: TimelineSnapshot,
+        frameIndex: Int,
+        fps: Int = EXPORT_FPS,
+        activeSet: ActiveSet = ActiveSet(snapshot.lanes.size)
+    ): ExportFrameResolution = Companion.resolveExportFrame(snapshot, frameIndex, fps, activeSet)
+
+    companion object {
+        fun resolveExportFrame(
+            snapshot: TimelineSnapshot,
+            frameIndex: Int,
+            fps: Int = EXPORT_FPS,
+            activeSet: ActiveSet = ActiveSet(snapshot.lanes.size)
+        ): ExportFrameResolution {
+            val tUs = (frameIndex * 1_000_000L) / fps
+            snapshot.resolve(tUs, activeSet)
+
+            val clipA = if (activeSet.aIndex in snapshot.project.clips.indices) {
+                snapshot.project.clips[activeSet.aIndex]
+            } else null
+            val sourceUsA = clipA?.map()?.sourceUs(activeSet.aLocalUs) ?: 0L
+
+            val isTransition = activeSet.bIndex >= 0 && activeSet.bIndex in snapshot.project.clips.indices
+            val clipB = if (isTransition) snapshot.project.clips[activeSet.bIndex] else null
+            val sourceUsB = clipB?.map()?.sourceUs(activeSet.bLocalUs) ?: 0L
+
+            val modelTransType = when (activeSet.type) {
+                com.flowcut.app.core.model.TransitionType.NONE -> TransitionType.NONE
+                com.flowcut.app.core.model.TransitionType.SLIDE -> TransitionType.SLIDE
+                com.flowcut.app.core.model.TransitionType.CIRCLE -> TransitionType.CIRCLE
+                com.flowcut.app.core.model.TransitionType.ZOOM -> TransitionType.ZOOM
+                com.flowcut.app.core.model.TransitionType.FADE -> TransitionType.FADE
+            }
+            val easedP = ProgramTimeline.ease(activeSet.linearP)
+
+            return ExportFrameResolution(
+                frameIndex = frameIndex,
+                tUs = tUs,
+                clipAIndex = activeSet.aIndex,
+                sourceUsA = sourceUsA,
+                isTransition = isTransition,
+                clipBIndex = if (isTransition) activeSet.bIndex else -1,
+                sourceUsB = sourceUsB,
+                transitionType = modelTransType,
+                linearP = activeSet.linearP,
+                easedP = easedP
+            )
+        }
+    }
+
     suspend fun export(
+        timeline: ProgramTimeline,
+        onProgress: (Float) -> Unit
+    ): Uri {
+        if (USE_NEW_CORE) {
+            val coreClips = timeline.project.clips.map {
+                com.flowcut.app.core.model.Clip(
+                    id = it.id,
+                    path = it.path,
+                    durationMs = it.durationMs,
+                    width = it.width,
+                    height = it.height,
+                    rotation = it.rotation,
+                    frameRate = it.frameRate
+                )
+            }
+            val coreTransitions = timeline.project.transitions.map {
+                com.flowcut.app.core.model.Transition(
+                    type = when (it.type) {
+                        TransitionType.NONE -> com.flowcut.app.core.model.TransitionType.NONE
+                        TransitionType.SLIDE -> com.flowcut.app.core.model.TransitionType.SLIDE
+                        TransitionType.CIRCLE -> com.flowcut.app.core.model.TransitionType.CIRCLE
+                        TransitionType.ZOOM -> com.flowcut.app.core.model.TransitionType.ZOOM
+                        TransitionType.FADE -> com.flowcut.app.core.model.TransitionType.FADE
+                    },
+                    durationMs = it.durationMs
+                )
+            }
+            val snapshot = TimelineSnapshot(1L, com.flowcut.app.core.model.Project(coreClips, coreTransitions))
+            return export(snapshot, onProgress)
+        }
+
+        return exportLegacy(timeline, onProgress)
+    }
+
+    /**
+     * Snapshot-based frame-by-frame export loop (Section 0 & Section 15).
+     * Resolves active clips, transitions, and TimeMap sourceUs using TimelineSnapshot.
+     */
+    suspend fun export(
+        snapshot: TimelineSnapshot,
+        onProgress: (Float) -> Unit
+    ): Uri = withContext(Dispatchers.IO) {
+        isCancelled.set(false)
+
+        if (snapshot.project.clips.isEmpty()) {
+            error("No clips to export")
+        }
+
+        val totalFrames = ceil(snapshot.totalMs * EXPORT_FPS / 1000.0).toInt().coerceAtLeast(1)
+
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val fileName = "FlowCut_$timestamp.mp4"
+
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/FlowCut")
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+
+        val contentResolver = context.contentResolver
+        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            ?: error("Failed to create MediaStore entry")
+
+        var pfd: ParcelFileDescriptor? = null
+        var encoder: MediaCodec? = null
+        var muxer: MediaMuxer? = null
+        var eglDisplay: EGLDisplay? = null
+        var eglContext: EGLContext? = null
+        var eglSurface: EGLSurface? = null
+        var renderer: TransitionRenderer? = null
+        var surfaceTextureA: SurfaceTexture? = null
+        var surfaceTextureB: SurfaceTexture? = null
+        var frameSourceA: FrameSource? = null
+        var frameSourceB: FrameSource? = null
+
+        try {
+            pfd = contentResolver.openFileDescriptor(uri, "w")
+                ?: error("Failed to open file descriptor")
+
+            // 1. Setup encoder
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, EXPORT_W, EXPORT_H).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, EXPORT_BITRATE)
+                setInteger(MediaFormat.KEY_FRAME_RATE, EXPORT_FPS)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            }
+
+            try {
+                format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            } catch (_: Exception) {}
+
+            val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            encoder = enc
+            enc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val inputSurface = enc.createInputSurface()
+            enc.start()
+
+            // 2. Setup muxer
+            val mux = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = mux
+
+            // 3. Setup EGL for rendering onto encoder's input surface
+            val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            eglDisplay = display
+            val version = IntArray(2)
+            EGL14.eglInitialize(display, version, 0, version, 1)
+
+            val configAttribs = intArrayOf(
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL_RECORDABLE_ANDROID, 1,
+                EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val numConfigs = IntArray(1)
+            EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+            val config = configs[0] ?: error("EGL config not found")
+
+            val contextAttribs = intArrayOf(
+                EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
+                EGL14.EGL_NONE
+            )
+            val eglCtx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+            eglContext = eglCtx
+
+            val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
+            val surf = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfaceAttribs, 0)
+            eglSurface = surf
+
+            EGL14.eglMakeCurrent(display, surf, surf, eglCtx)
+            GLES30.glViewport(0, 0, EXPORT_W, EXPORT_H)
+
+            // 4. Setup TransitionRenderer and SurfaceTextures
+            val rnd = TransitionRenderer()
+            renderer = rnd
+            rnd.init()
+
+            val stA = SurfaceTexture(rnd.textureIdA()).apply {
+                setDefaultBufferSize(EXPORT_W, EXPORT_H)
+            }
+            val stB = SurfaceTexture(rnd.textureIdB()).apply {
+                setDefaultBufferSize(EXPORT_W, EXPORT_H)
+            }
+            surfaceTextureA = stA
+            surfaceTextureB = stB
+
+            val matA = FloatArray(16)
+            val matB = FloatArray(16)
+            val cropA = FloatArray(2) { 1f }
+            val cropB = FloatArray(2) { 1f }
+            val activeSet = ActiveSet(snapshot.lanes.size)
+
+            var currentAIndex = -1
+            var currentBIndex = -1
+
+            var isMuxerStarted = false
+            var muxerTrackIndex = -1
+            val bufferInfo = MediaCodec.BufferInfo()
+
+            fun drain(endOfStream: Boolean) {
+                if (endOfStream) {
+                    enc.signalEndOfInputStream()
+                }
+                while (true) {
+                    val status = enc.dequeueOutputBuffer(bufferInfo, 10_000L)
+                    if (status == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                        if (!endOfStream) break
+                    } else if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        if (isMuxerStarted) error("Format changed twice")
+                        muxerTrackIndex = mux.addTrack(enc.outputFormat)
+                        mux.start()
+                        isMuxerStarted = true
+                    } else if (status >= 0) {
+                        val outputBuffer = enc.getOutputBuffer(status)
+                        if (outputBuffer != null && isMuxerStarted && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0)) {
+                            if (bufferInfo.size != 0) {
+                                outputBuffer.position(bufferInfo.offset)
+                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                                mux.writeSampleData(muxerTrackIndex, outputBuffer, bufferInfo)
+                            }
+                        }
+                        enc.releaseOutputBuffer(status, false)
+                        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                            break
+                        }
+                    }
+                }
+            }
+
+            // 5. Render frames loop using TimelineSnapshot + TimeMap (Rule R11)
+            for (i in 0 until totalFrames) {
+                if (isCancelled.get()) {
+                    error("Export cancelled by user")
+                }
+
+                val res = resolveExportFrame(snapshot, i, EXPORT_FPS, activeSet)
+                val clipA = snapshot.project.clips[res.clipAIndex]
+                val legacyClipA = PreviewRenderer.toLegacyClip(clipA)
+
+                if (currentAIndex != res.clipAIndex || frameSourceA == null) {
+                    frameSourceA?.release()
+                    frameSourceA = FrameSource(legacyClipA, stA).apply {
+                        prepare()
+                        seekTo(res.sourceUsA)
+                    }
+                    currentAIndex = res.clipAIndex
+                } else {
+                    frameSourceA?.frameAt(res.sourceUsA)
+                }
+
+                try {
+                    stA.updateTexImage()
+                    stA.getTransformMatrix(matA)
+                } catch (_: Exception) {}
+
+                PreviewRenderer.calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
+
+                if (res.isTransition && res.clipBIndex >= 0) {
+                    val clipB = snapshot.project.clips[res.clipBIndex]
+                    val legacyClipB = PreviewRenderer.toLegacyClip(clipB)
+                    if (currentBIndex != res.clipBIndex || frameSourceB == null) {
+                        frameSourceB?.release()
+                        frameSourceB = FrameSource(legacyClipB, stB).apply {
+                            prepare()
+                            seekTo(res.sourceUsB)
+                        }
+                        currentBIndex = res.clipBIndex
+                    } else {
+                        frameSourceB?.frameAt(res.sourceUsB)
+                    }
+
+                    try {
+                        stB.updateTexImage()
+                        stB.getTransformMatrix(matB)
+                    } catch (_: Exception) {}
+
+                    PreviewRenderer.calculateCropInto(clipB.displayWidth, clipB.displayHeight, cropB)
+                } else {
+                    if (frameSourceB != null) {
+                        frameSourceB?.release()
+                        frameSourceB = null
+                        currentBIndex = -1
+                    }
+                }
+
+                rnd.draw(
+                    DrawSpec(
+                        type = res.transitionType,
+                        easedP = res.easedP,
+                        matA = matA,
+                        matB = matB,
+                        cropA = cropA,
+                        cropB = cropB
+                    )
+                )
+
+                // Set presentation time in nanoseconds
+                val presentationTimeNs = i * 1_000_000_000L / EXPORT_FPS
+                EGLExt.eglPresentationTimeANDROID(display, surf, presentationTimeNs)
+                EGL14.eglSwapBuffers(display, surf)
+
+                drain(false)
+                onProgress((i + 1).toFloat() / totalFrames.toFloat())
+            }
+
+            // 6. Signal EOS and drain remaining
+            drain(true)
+
+            // Complete export
+            values.clear()
+            values.put(MediaStore.Video.Media.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
+
+            return@withContext uri
+
+        } catch (e: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw e
+        } finally {
+            frameSourceA?.release()
+            frameSourceB?.release()
+            surfaceTextureA?.release()
+            surfaceTextureB?.release()
+            renderer?.release()
+
+            if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
+                    EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                }
+                if (eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT) {
+                    EGL14.eglDestroyContext(eglDisplay, eglContext)
+                }
+                EGL14.eglTerminate(eglDisplay)
+            }
+
+            try {
+                encoder?.stop()
+            } catch (_: Exception) {}
+            try {
+                encoder?.release()
+            } catch (_: Exception) {}
+
+            try {
+                muxer?.stop()
+            } catch (_: Exception) {}
+            try {
+                muxer?.release()
+            } catch (_: Exception) {}
+
+            try {
+                pfd?.close()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private suspend fun exportLegacy(
         timeline: ProgramTimeline,
         onProgress: (Float) -> Unit
     ): Uri = withContext(Dispatchers.IO) {
@@ -118,6 +514,7 @@ class ExportEngine(private val context: Context) {
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8,
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL_RECORDABLE_ANDROID, 1,
                 EGL14.EGL_NONE
             )
             val configs = arrayOfNulls<EGLConfig>(1)
@@ -129,16 +526,17 @@ class ExportEngine(private val context: Context) {
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
                 EGL14.EGL_NONE
             )
-            val ctx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
-            eglContext = ctx
+            val eglCtx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+            eglContext = eglCtx
 
             val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
             val surf = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfaceAttribs, 0)
             eglSurface = surf
 
-            EGL14.eglMakeCurrent(display, surf, surf, ctx)
+            EGL14.eglMakeCurrent(display, surf, surf, eglCtx)
+            GLES30.glViewport(0, 0, EXPORT_W, EXPORT_H)
 
-            // 4. Init renderer and SurfaceTextures in EGL context
+            // 4. Setup TransitionRenderer and SurfaceTextures
             val rnd = TransitionRenderer()
             renderer = rnd
             rnd.init()
@@ -152,17 +550,15 @@ class ExportEngine(private val context: Context) {
             surfaceTextureA = stA
             surfaceTextureB = stB
 
-            GLES30.glViewport(0, 0, EXPORT_W, EXPORT_H)
+            val matA = FloatArray(16)
+            val matB = FloatArray(16)
 
             var currentAIndex = -1
             var currentBIndex = -1
 
-            val matA = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
-            val matB = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
-
-            val bufferInfo = MediaCodec.BufferInfo()
-            var muxerTrackIndex = -1
             var isMuxerStarted = false
+            var muxerTrackIndex = -1
+            val bufferInfo = MediaCodec.BufferInfo()
 
             fun drain(endOfStream: Boolean) {
                 if (endOfStream) {
@@ -323,4 +719,3 @@ class ExportEngine(private val context: Context) {
         }
     }
 }
-

@@ -1,0 +1,8 @@
+core/**
+ui/timeline/TimelineCanvas.kt
+ui/timeline/TimelineZoomState.kt
+ui/timeline/TimelineHitTester.kt
+engine/FrameDriver.kt
+engine/PreviewRenderer.kt
+core/edit/EditorController.kt
+
