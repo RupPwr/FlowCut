@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Global migration switch (Section 15).
@@ -214,6 +215,9 @@ class PreviewRenderer(
     private var contributorLaneMap: Array<IntArray> = emptyArray()
 
     private val prefetchers = mutableListOf<Prefetcher>()
+    @Volatile private var isPrefetching = false
+    private val hasPendingSurfaceFrameA = AtomicBoolean(false)
+    private val hasPendingSurfaceFrameB = AtomicBoolean(false)
 
     val prefetchCoordinator = PrefetchCoordinator(
         holder = holder,
@@ -224,14 +228,22 @@ class PreviewRenderer(
             val stB = surfaceTextureB
             val s = holder.current
             if (stB != null && clipIndex in s.project.clips.indices && activeSet.bIndex < 0) {
-                if (prefetchSource == null || prefetchClipIndex != clipIndex) {
-                    val nextClip = s.project.clips[clipIndex]
-                    prefetchSource?.release()
-                    prefetchSource = FrameSource(toLegacyClip(nextClip), stB).apply {
-                        prepare()
-                        seekTo(sourceUs)
+                if (!isPrefetching && (prefetchSource == null || prefetchClipIndex != clipIndex)) {
+                    isPrefetching = true
+                    try {
+                        prefetchClipIndex = clipIndex
+                        val nextClip = s.project.clips[clipIndex]
+                        prefetchSource?.release()
+                        prefetchSource = FrameSource(toLegacyClip(nextClip), stB).apply {
+                            prepare()
+                            seekTo(sourceUs)
+                        }
+                    } catch (_: Throwable) {
+                        prefetchSource = null
+                        prefetchClipIndex = -1
+                    } finally {
+                        isPrefetching = false
                     }
-                    prefetchClipIndex = clipIndex
                 }
             }
         }
@@ -404,14 +416,24 @@ class PreviewRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         renderer.init()
 
+        surfaceTextureA?.setOnFrameAvailableListener(null)
         surfaceTextureA?.release()
+        surfaceTextureB?.setOnFrameAvailableListener(null)
         surfaceTextureB?.release()
+        hasPendingSurfaceFrameA.set(false)
+        hasPendingSurfaceFrameB.set(false)
 
         val stA = SurfaceTexture(renderer.textureIdA()).apply {
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
+            setOnFrameAvailableListener {
+                hasPendingSurfaceFrameA.set(true)
+            }
         }
         val stB = SurfaceTexture(renderer.textureIdB()).apply {
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
+            setOnFrameAvailableListener {
+                hasPendingSurfaceFrameB.set(true)
+            }
         }
 
         surfaceTextureA = stA
@@ -436,52 +458,88 @@ class PreviewRenderer(
         val s = holder.current
         val clipA = s.project.clips.getOrNull(frame.clipAIndex) ?: return
 
-        // 1. FrameSource A
-        if (frameSourceA == null || currentClipIndexA != frame.clipAIndex) {
+        val isScrubbing = playhead.mode == PlayMode.SCRUBBING || playhead.mode == PlayMode.FLINGING
+
+        // 1. FrameSource A (Strictly bound to stA / texAId)
+        val clipAChanged = frameSourceA == null ||
+                currentClipIndexA != frame.clipAIndex ||
+                frameSourceA?.clip?.path != clipA.path
+
+        if (clipAChanged) {
+            frameSourceA?.release()
+            // If prefetchSource was on stB for this clip, release it to free hardware decoder
             if (prefetchSource != null && prefetchClipIndex == frame.clipAIndex) {
-                frameSourceA?.release()
-                frameSourceA = prefetchSource
+                prefetchSource?.release()
                 prefetchSource = null
                 prefetchClipIndex = -1
-            } else {
-                frameSourceA?.release()
-                val legacyClipA = toLegacyClip(clipA)
-                frameSourceA = FrameSource(legacyClipA, stA).apply {
-                    prepare()
-                    seekTo(frame.clipASourceUs)
-                }
+            }
+            val legacyClipA = toLegacyClip(clipA)
+            frameSourceA = FrameSource(legacyClipA, stA).apply {
+                prepare()
+                seekTo(frame.clipASourceUs, fastKeyframeOnly = isScrubbing)
             }
             currentClipIndexA = frame.clipAIndex
-        }
+            hasPendingSurfaceFrameA.set(false)
+            try {
+                stA.updateTexImage()
+                stA.getTransformMatrix(matA)
+            } catch (_: Exception) {}
+        } else {
+            val renderedA = try {
+                frameSourceA?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
+            } catch (_: Exception) { false }
 
-        frameSourceA?.frameAt(frame.clipASourceUs)
-        try {
-            stA.updateTexImage()
-            stA.getTransformMatrix(matA)
-        } catch (_: Exception) {}
+            if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
+                try {
+                    stA.updateTexImage()
+                    stA.getTransformMatrix(matA)
+                } catch (_: Exception) {}
+            }
+        }
 
         calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
 
-        // 2. Handle Transition and FrameSource B
+        // 2. Handle Transition and FrameSource B (Strictly bound to stB / texBId)
         if (frame.isTransition && frame.clipBIndex >= 0) {
             val clipB = s.project.clips.getOrNull(frame.clipBIndex)
             if (clipB != null) {
-                if (frameSourceB == null || currentClipIndexB != frame.clipBIndex) {
+                val clipBChanged = frameSourceB == null ||
+                        currentClipIndexB != frame.clipBIndex ||
+                        frameSourceB?.clip?.path != clipB.path
+
+                if (clipBChanged) {
                     frameSourceB?.release()
-                    val legacyClipB = toLegacyClip(clipB)
-                    frameSourceB = FrameSource(legacyClipB, stB).apply {
-                        prepare()
-                        seekTo(frame.clipBSourceUs)
+                    // If prefetchSource was prepared on stB for this exact clip, reuse it for frameSourceB
+                    if (prefetchSource != null && prefetchClipIndex == frame.clipBIndex) {
+                        frameSourceB = prefetchSource
+                        prefetchSource = null
+                        prefetchClipIndex = -1
+                        frameSourceB?.seekTo(frame.clipBSourceUs, fastKeyframeOnly = isScrubbing)
+                    } else {
+                        val legacyClipB = toLegacyClip(clipB)
+                        frameSourceB = FrameSource(legacyClipB, stB).apply {
+                            prepare()
+                            seekTo(frame.clipBSourceUs, fastKeyframeOnly = isScrubbing)
+                        }
                     }
                     currentClipIndexB = frame.clipBIndex
+                    hasPendingSurfaceFrameB.set(false)
+                    try {
+                        stB.updateTexImage()
+                        stB.getTransformMatrix(matB)
+                    } catch (_: Exception) {}
                 } else {
-                    frameSourceB?.frameAt(frame.clipBSourceUs)
-                }
+                    val renderedB = try {
+                        frameSourceB?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing) == true
+                    } catch (_: Exception) { false }
 
-                try {
-                    stB.updateTexImage()
-                    stB.getTransformMatrix(matB)
-                } catch (_: Exception) {}
+                    if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
+                        try {
+                            stB.updateTexImage()
+                            stB.getTransformMatrix(matB)
+                        } catch (_: Exception) {}
+                    }
+                }
 
                 calculateCropInto(clipB.displayWidth, clipB.displayHeight, cropB)
             }
@@ -503,16 +561,18 @@ class PreviewRenderer(
             TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
         }
 
-        renderer.draw(
-            DrawSpec(
-                type = legacyType,
-                easedP = easedP,
-                matA = matA,
-                matB = matB,
-                cropA = cropA,
-                cropB = cropB
+        try {
+            renderer.draw(
+                DrawSpec(
+                    type = legacyType,
+                    easedP = easedP,
+                    matA = matA,
+                    matB = matB,
+                    cropA = cropA,
+                    cropB = cropB
+                )
             )
-        )
+        } catch (_: Exception) {}
     }
 
     private fun releaseDecoders() {
@@ -532,10 +592,14 @@ class PreviewRenderer(
     fun release() {
         stopPrefetch()
         releaseDecoders()
+        surfaceTextureA?.setOnFrameAvailableListener(null)
         surfaceTextureA?.release()
         surfaceTextureA = null
+        surfaceTextureB?.setOnFrameAvailableListener(null)
         surfaceTextureB?.release()
         surfaceTextureB = null
+        hasPendingSurfaceFrameA.set(false)
+        hasPendingSurfaceFrameB.set(false)
         try {
             renderer.release()
         } catch (_: Throwable) {}

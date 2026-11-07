@@ -18,16 +18,19 @@ class FrameSource(
     private val surfaceTexture: SurfaceTexture
 ) {
     companion object {
-        private val releaseExecutor = Executors.newSingleThreadExecutor()
+        private val releaseExecutor = Executors.newCachedThreadPool()
     }
 
     private var extractor: MediaExtractor? = null
     private var codec: MediaCodec? = null
     private var surface: Surface? = null
     private var isPrepared = false
-    private var isEos = false
+    private var inputEos = false
+    private var outputEos = false
     private var currentPtsUs: Long = -1L
     private var currentMime: String = ""
+    private var lastSeekTargetUs: Long = -1L
+    private var lastKeyframePtsUs: Long = -1L
 
     fun prepare() {
         if (isPrepared) return
@@ -66,16 +69,24 @@ class FrameSource(
                 format.setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
             } catch (_: Exception) {}
 
-            val decoder = MediaCodec.createDecoderByType(mime)
             surface = Surface(surfaceTexture)
-            decoder.configure(format, surface, null, 0)
+            val decoder = MediaCodec.createDecoderByType(mime)
+            try {
+                decoder.configure(format, surface, null, 0)
+            } catch (cfgEx: Exception) {
+                // Fallback: configure without low-latency hints
+                val fallbackFormat = ext.getTrackFormat(videoTrack)
+                decoder.configure(fallbackFormat, surface, null, 0)
+            }
             decoder.start()
             codec = decoder
             isPrepared = true
-            isEos = false
+            inputEos = false
+            outputEos = false
             currentPtsUs = -1L
+            lastSeekTargetUs = -1L
+            lastKeyframePtsUs = -1L
         } catch (e: Exception) {
-            // Recreate retry once if needed
             isPrepared = false
         }
     }
@@ -87,10 +98,11 @@ class FrameSource(
         return isPrepared && codec != null && clip.width == other.width && clip.height == other.height
     }
 
-    fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false) {
-        val ext = extractor ?: return
-        val dec = codec ?: return
+    fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false): Boolean {
+        val ext = extractor ?: return false
+        val dec = codec ?: return false
         try {
+            lastSeekTargetUs = localUs
             var seekTimeUs = localUs
             if (fastKeyframeOnly) {
                 val idxPath = clip.path.replace(".mp4", ".idx")
@@ -103,20 +115,24 @@ class FrameSource(
             }
 
             ext.seekTo(seekTimeUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-            dec.flush()
-            isEos = false
+            if (currentPtsUs != -1L) {
+                try {
+                    dec.flush()
+                } catch (_: Exception) {}
+            }
+            inputEos = false
+            outputEos = false
             currentPtsUs = -1L
 
             val bufferInfo = MediaCodec.BufferInfo()
-            val timeoutUs = 10_000L
+            val timeoutUs = 1_500L
             var rendered = false
-            var feedEos = false
             var attempts = 0
-            val maxAttempts = if (fastKeyframeOnly) 25 else 120
+            val maxAttempts = if (fastKeyframeOnly) 15 else 30
 
-            while (!rendered && attempts < maxAttempts) {
+            while (!rendered && attempts < maxAttempts && !outputEos) {
                 attempts++
-                if (!feedEos) {
+                if (!inputEos) {
                     val inputIndex = dec.dequeueInputBuffer(timeoutUs)
                     if (inputIndex >= 0) {
                         val inputBuffer = dec.getInputBuffer(inputIndex)
@@ -124,7 +140,7 @@ class FrameSource(
                             val sampleSize = ext.readSampleData(inputBuffer, 0)
                             if (sampleSize < 0) {
                                 dec.queueInputBuffer(inputIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                feedEos = true
+                                inputEos = true
                             } else {
                                 dec.queueInputBuffer(inputIndex, 0, sampleSize, ext.sampleTime, 0)
                                 ext.advance()
@@ -137,93 +153,133 @@ class FrameSource(
                 if (outIndex >= 0) {
                     val pts = bufferInfo.presentationTimeUs
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        isEos = true
+                        outputEos = true
                     }
-                    if (fastKeyframeOnly || pts >= localUs - 16_000L || isEos) {
+                    if (fastKeyframeOnly || pts >= localUs - 30_000L || outputEos) {
                         dec.releaseOutputBuffer(outIndex, true)
                         currentPtsUs = pts
+                        lastKeyframePtsUs = pts
                         rendered = true
                     } else {
                         dec.releaseOutputBuffer(outIndex, false)
+                        currentPtsUs = pts
                     }
-                } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && feedEos) {
+                } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
                     break
                 }
             }
-        } catch (_: Exception) {}
+            return rendered
+        } catch (_: Exception) {
+            return false
+        }
     }
 
-    fun frameAt(localUs: Long): Boolean {
+    fun frameAt(localUs: Long, isScrubbing: Boolean = false): Boolean {
         val ext = extractor ?: return false
         val dec = codec ?: return false
 
-        // If target is behind current by more than 50ms, seek back
-        if (currentPtsUs > localUs + 50_000L) {
-            seekTo(localUs)
-            return true
-        }
+        try {
+            // Case 1: Scrubbing / Flinging mode
+            if (isScrubbing) {
+                // If we already rendered near this target, skip to avoid spamming
+                if (currentPtsUs != -1L && kotlin.math.abs(localUs - currentPtsUs) <= 30_000L) {
+                    return false
+                }
+                // Only seek if scrub target moved significantly (> 80ms)
+                if (lastSeekTargetUs != -1L && kotlin.math.abs(localUs - lastSeekTargetUs) <= 80_000L && currentPtsUs != -1L) {
+                    return false
+                }
+                return seekTo(localUs, fastKeyframeOnly = true)
+            }
 
-        // If current frame is already close enough, we can render/keep it
-        if (currentPtsUs in (localUs - 16_000L)..(localUs + 16_000L)) {
-            return true
-        }
+            // Case 2: Playback / Paused mode
+            val isInitial = currentPtsUs == -1L
+            val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 50_000L
+            // Huge forward jump (> 2.5s) outside GOP range
+            val isHugeForwardJump = currentPtsUs != -1L &&
+                    localUs > currentPtsUs + 2_500_000L &&
+                    (lastSeekTargetUs == -1L || localUs > lastSeekTargetUs + 500_000L)
 
-        val bufferInfo = MediaCodec.BufferInfo()
-        val timeoutUs = 5_000L
-        var attempts = 0
+            if (isInitial || isBackwardJump || isHugeForwardJump) {
+                return seekTo(localUs, fastKeyframeOnly = false)
+            }
 
-        while (attempts < 120) {
-            attempts++
-            if (!isEos) {
-                val inIndex = dec.dequeueInputBuffer(timeoutUs)
-                if (inIndex >= 0) {
-                    val inBuf = dec.getInputBuffer(inIndex)
-                    if (inBuf != null) {
-                        val sampleSize = ext.readSampleData(inBuf, 0)
-                        if (sampleSize < 0) {
-                            dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            isEos = true
-                        } else {
-                            dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
-                            ext.advance()
+            // If current frame is already within half a frame (16ms) of target, keep it
+            if (currentPtsUs in (localUs - 16_000L)..(localUs + 16_000L)) {
+                return false
+            }
+
+            // Catch-up / normal playback decode loop:
+            // If localUs is ahead (e.g. after a keyframe scrub or normal playback tick),
+            // decode forward. Drop intermediate frames (releaseOutputBuffer false) until pts >= localUs - 30_000L.
+            val isCatchingUp = localUs > currentPtsUs + 100_000L
+            val maxAttempts = if (isCatchingUp) 30 else 10
+            val timeoutUs = if (isCatchingUp) 500L else 1_500L
+
+            val bufferInfo = MediaCodec.BufferInfo()
+            var attempts = 0
+
+            while (attempts < maxAttempts && !outputEos) {
+                attempts++
+                if (!inputEos) {
+                    val inIndex = dec.dequeueInputBuffer(timeoutUs)
+                    if (inIndex >= 0) {
+                        val inBuf = dec.getInputBuffer(inIndex)
+                        if (inBuf != null) {
+                            val sampleSize = ext.readSampleData(inBuf, 0)
+                            if (sampleSize < 0) {
+                                dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputEos = true
+                            } else {
+                                dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
+                                ext.advance()
+                            }
                         }
                     }
                 }
-            }
 
-            val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-            if (outIndex >= 0) {
-                val pts = bufferInfo.presentationTimeUs
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    isEos = true
+                val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+                if (outIndex >= 0) {
+                    val pts = bufferInfo.presentationTimeUs
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        outputEos = true
+                    }
+                    if (pts >= localUs - 30_000L || outputEos) {
+                        dec.releaseOutputBuffer(outIndex, true)
+                        currentPtsUs = pts
+                        return true
+                    } else {
+                        // Drop intermediate frame to catch up rapidly without blocking GL
+                        dec.releaseOutputBuffer(outIndex, false)
+                        currentPtsUs = pts
+                    }
+                } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
+                    return false
                 }
-                if (pts >= localUs - 16_000L || isEos) {
-                    dec.releaseOutputBuffer(outIndex, true)
-                    currentPtsUs = pts
-                    return true
-                } else {
-                    dec.releaseOutputBuffer(outIndex, false)
-                }
-            } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && isEos) {
-                return false
             }
+        } catch (_: Exception) {
+            return false
         }
-        return true
+        return false
     }
 
     /**
      * Release decoders on background thread (Section 19.7) so GL thread is never blocked.
+     * Note: Do NOT call surface.release() here as it invalidates the underlying SurfaceTexture's connection.
      */
     fun release() {
         val oldCodec = codec
         val oldExt = extractor
-        val oldSurf = surface
 
         codec = null
         extractor = null
         surface = null
         isPrepared = false
+        inputEos = false
+        outputEos = false
         currentPtsUs = -1L
+        lastSeekTargetUs = -1L
+        lastKeyframePtsUs = -1L
 
         releaseExecutor.execute {
             try {
@@ -234,9 +290,6 @@ class FrameSource(
             } catch (_: Exception) {}
             try {
                 oldExt?.release()
-            } catch (_: Exception) {}
-            try {
-                oldSurf?.release()
             } catch (_: Exception) {}
         }
     }

@@ -66,13 +66,16 @@ class MainActivity : ComponentActivity() {
             // Best effort
         }
 
-        val engine = PreviewEngine(
-            context = this,
-            onPlayheadUpdate = { ms -> viewModel.onPlayheadUpdate(ms) },
-            onPlaybackStateChange = { playing -> viewModel.onPlaybackStateChange(playing) }
-        )
-        previewEngine = engine
-        viewModel.initPreviewEngine(engine)
+        val engine = if (!com.flowcut.app.engine.USE_NEW_CORE) {
+            PreviewEngine(
+                context = this,
+                onPlayheadUpdate = { ms -> viewModel.onPlayheadUpdate(ms) },
+                onPlaybackStateChange = { playing -> viewModel.onPlaybackStateChange(playing) }
+            ).also {
+                previewEngine = it
+                viewModel.initPreviewEngine(it)
+            }
+        } else null
 
         setContent {
             FlowCutTheme {
@@ -240,7 +243,7 @@ class MainActivity : ComponentActivity() {
                             canRedo = uiState.canRedo,
                             selectedClipIndex = uiState.selectedClipIndex,
                             selectedJunctionIndex = uiState.selectedJunctionIndex,
-                            glSurfaceView = engine.glSurfaceView,
+                            glSurfaceView = engine?.glSurfaceView,
                             exportSheetVisible = uiState.exportSheetVisible,
                             durationSheetVisible = uiState.durationSheetVisible,
                             exportState = uiState.exportState,
@@ -272,7 +275,9 @@ class MainActivity : ComponentActivity() {
                                     startActivity(Intent.createChooser(shareIntent, "Share video"))
                                 }
                             },
-                            onCloseExportSheet = { viewModel.closeExportSheet() }
+                            onCloseExportSheet = { viewModel.closeExportSheet() },
+                            onPlaybackStateChange = { playing -> viewModel.onPlaybackStateChange(playing) },
+                            onPlayheadUpdate = { ms -> viewModel.onPlayheadUpdate(ms) }
                         )
                     }
                 }

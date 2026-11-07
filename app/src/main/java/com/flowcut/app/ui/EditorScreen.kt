@@ -23,6 +23,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -78,7 +79,9 @@ fun EditorScreen(
     onCancelExport: () -> Unit,
     onShareExport: () -> Unit,
     onCloseExportSheet: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onPlaybackStateChange: (Boolean) -> Unit = {},
+    onPlayheadUpdate: (Long) -> Unit = {}
 ) {
     val context = LocalContext.current
     val colors = FlowCutTheme.colors
@@ -126,6 +129,11 @@ fun EditorScreen(
     val playbackController = remember { PlaybackController(holder = snapshotHolder) }
     val zoomState = remember { TimelineZoomState() }
     val frameTick = remember { mutableLongStateOf(0L) }
+    val displayedMs = remember { mutableLongStateOf(currentMs) }
+
+    val isPlayingState = rememberUpdatedState(isPlaying)
+    val onPlaybackStateChangeState = rememberUpdatedState(onPlaybackStateChange)
+    val onPlayheadUpdateState = rememberUpdatedState(onPlayheadUpdate)
 
     val previewRenderer = remember {
         PreviewRenderer(
@@ -140,11 +148,17 @@ fun EditorScreen(
             controller = playbackController,
             frameTick = frameTick,
             onRequestRender = {
-                previewRenderer.requestRender()
-                val tMs = usToMs(playbackController.playhead.timeUs)
-                if (tMs != currentMs) {
-                    onSeekScrub(tMs)
+                val tUs = playbackController.playhead.timeUs
+                val tMs = usToMs(tUs)
+                val curSec = tMs / 1000L
+                if (curSec != displayedMs.longValue / 1000L) {
+                    displayedMs.longValue = tMs
+                    onPlayheadUpdateState.value.invoke(tMs)
                 }
+                if (isPlayingState.value && playbackController.playhead.mode != PlayMode.PLAYING) {
+                    onPlaybackStateChangeState.value.invoke(false)
+                }
+                previewRenderer.requestRender()
             }
         )
     }
@@ -158,15 +172,25 @@ fun EditorScreen(
     }
 
     LaunchedEffect(isPlaying) {
-        if (isPlaying && playbackController.playhead.mode != PlayMode.PLAYING) {
-            playbackController.play()
-            frameDriver.wake()
-        } else if (!isPlaying && playbackController.playhead.mode == PlayMode.PLAYING) {
-            playbackController.pause()
+        if (isPlaying) {
+            if (playbackController.playhead.mode != PlayMode.PLAYING) {
+                val totalMs = snapshotHolder.current.totalMs
+                if (totalMs > 0L && playbackController.playhead.timeUs >= msToUs(totalMs)) {
+                    playbackController.seekTo(0L)
+                }
+                playbackController.play()
+                frameDriver.wake()
+            }
+        } else {
+            if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                playbackController.pause()
+                frameDriver.wake()
+            }
         }
     }
 
     LaunchedEffect(currentMs) {
+        displayedMs.longValue = currentMs
         val targetUs = msToUs(currentMs)
         if (kotlin.math.abs(playbackController.playhead.timeUs - targetUs) > 1000L && playbackController.playhead.mode != PlayMode.PLAYING) {
             playbackController.seekTo(targetUs)
@@ -224,14 +248,35 @@ fun EditorScreen(
                     canRedo = canRedo,
                     onUndoClick = onUndoClick,
                     onRedoClick = onRedoClick,
-                    currentMs = currentMs,
+                    currentMs = displayedMs.longValue,
                     totalMs = timeline.total,
                     isPlaying = isPlaying,
                     onPlayPauseClick = {
-                        onPlayPauseClick()
-                        if (USE_NEW_CORE) frameDriver.wake()
+                        if (USE_NEW_CORE) {
+                            if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                                playbackController.pause()
+                                frameDriver.wake()
+                                onPlaybackStateChange(false)
+                            } else {
+                                val totalMs = snapshotHolder.current.totalMs
+                                if (totalMs > 0L && playbackController.playhead.timeUs >= msToUs(totalMs)) {
+                                    playbackController.seekTo(0L)
+                                }
+                                playbackController.play()
+                                frameDriver.wake()
+                                onPlaybackStateChange(true)
+                            }
+                        } else {
+                            onPlayPauseClick()
+                        }
                     },
-                    onSeekScrub = onSeekScrub
+                    onSeekScrub = { ms ->
+                        onSeekScrub(ms)
+                        if (USE_NEW_CORE) {
+                            playbackController.seekTo(msToUs(ms))
+                            frameDriver.wake()
+                        }
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))

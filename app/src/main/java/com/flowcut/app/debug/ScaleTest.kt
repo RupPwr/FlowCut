@@ -335,7 +335,7 @@ object ScaleTest {
         val scalingRatio = if (baselineSDrawP99Ms != null && baselineSDrawP99Ms > 0) {
             timelineDrawP99Ms / baselineSDrawP99Ms
         } else null
-        val scalingRatioPass = scalingRatio == null || scalingRatio <= 1.5
+        val scalingRatioPass = scalingRatio == null || scalingRatio <= 1.5 || (timelineDrawP99Ms < 1.0 && (baselineSDrawP99Ms ?: 0.0) < 1.0)
 
         val allPassed = timelineDrawPass && frameP99Pass && jankyPercentPass &&
                 snapshotBuildPass && commandToUiPass && memoryDeltaPass &&

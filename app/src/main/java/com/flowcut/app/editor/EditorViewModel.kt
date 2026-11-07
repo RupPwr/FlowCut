@@ -135,39 +135,62 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playPause() {
-        val engine = previewEngine ?: return
-        if (engine.isPlaying) {
-            engine.pause()
+        val engine = previewEngine
+        if (engine != null) {
+            if (engine.isPlaying) {
+                engine.pause()
+            } else {
+                engine.play()
+            }
         } else {
-            engine.play()
+            _uiState.update { it.copy(isPlaying = !it.isPlaying) }
+        }
+    }
+
+    fun pause() {
+        val engine = previewEngine
+        if (engine != null) {
+            if (engine.isPlaying) {
+                engine.pause()
+            }
+        } else {
+            _uiState.update { it.copy(isPlaying = false) }
         }
     }
 
     private var preciseSeekJob: Job? = null
 
     fun scrubTo(ms: Long) {
-        val engine = previewEngine ?: return
-        if (engine.isPlaying) {
-            engine.pause()
-        }
-        _uiState.update { it.copy(currentMs = ms) }
-        engine.seekTo(ms, fastScrub = true)
+        val engine = previewEngine
+        if (engine != null) {
+            if (engine.isPlaying) {
+                engine.pause()
+            }
+            _uiState.update { it.copy(currentMs = ms) }
+            engine.seekTo(ms, fastScrub = true)
 
-        // Debounce precise seek by 120ms (Section 19.8)
-        preciseSeekJob?.cancel()
-        preciseSeekJob = viewModelScope.launch {
-            delay(120L)
-            engine.seekTo(ms, fastScrub = false)
+            // Debounce precise seek by 120ms (Section 19.8)
+            preciseSeekJob?.cancel()
+            preciseSeekJob = viewModelScope.launch {
+                delay(120L)
+                engine.seekTo(ms, fastScrub = false)
+            }
+        } else {
+            _uiState.update { it.copy(currentMs = ms, isPlaying = false) }
         }
     }
 
     fun seekTo(ms: Long) {
-        val engine = previewEngine ?: return
-        if (engine.isPlaying) {
-            engine.pause()
+        val engine = previewEngine
+        if (engine != null) {
+            if (engine.isPlaying) {
+                engine.pause()
+            }
+            engine.seekTo(ms)
+            _uiState.update { it.copy(currentMs = ms) }
+        } else {
+            _uiState.update { it.copy(currentMs = ms, isPlaying = false) }
         }
-        engine.seekTo(ms)
-        _uiState.update { it.copy(currentMs = ms) }
     }
 
     fun selectClip(index: Int) {

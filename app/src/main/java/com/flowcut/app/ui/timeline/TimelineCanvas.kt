@@ -204,6 +204,7 @@ fun TimelineCanvas(
                 }
             }
     ) {
+        if (size.width <= 0f || size.height <= 0f) return@Canvas
         // -----------------------------------------------------------------------------------------
         // RULE R3: Read dynamic states inside draw lambda ONLY
         // -----------------------------------------------------------------------------------------
@@ -245,12 +246,16 @@ fun TimelineCanvas(
                 )
                 if (isMajor) {
                     val label = timeStringCache.get(sec)
-                    drawText(
-                        textMeasurer = textMeasurer,
-                        text = label,
-                        topLeft = Offset(secX + 4f * density, 4f * density),
-                        style = timeTextStyle
-                    )
+                    val textX = secX + 4f * density
+                    val textY = 4f * density
+                    if (textX > -60f && textX < size.width && textY < size.height) {
+                        drawText(
+                            textMeasurer = textMeasurer,
+                            text = label,
+                            topLeft = Offset(textX, textY),
+                            style = timeTextStyle
+                        )
+                    }
                 }
             }
         }
@@ -352,12 +357,15 @@ fun TimelineCanvas(
                         }
 
                         override fun drawText(text: String, x: Float, y: Float, colorArgb: Int, fontSizeSp: Float) {
-                            this@Canvas.drawText(
-                                textMeasurer = textMeasurer,
-                                text = text,
-                                topLeft = Offset(x, lanesTop + y),
-                                style = TextStyle(fontSize = fontSizeSp.sp, color = Color(colorArgb))
-                            )
+                            val textY = lanesTop + y
+                            if (x > -60f && x < size.width && textY < size.height) {
+                                this@Canvas.drawText(
+                                    textMeasurer = textMeasurer,
+                                    text = text,
+                                    topLeft = Offset(x, textY),
+                                    style = TextStyle(fontSize = fontSizeSp.sp, color = Color(colorArgb))
+                                )
+                            }
                         }
                     }
                     painter.draw(ctx, laneIdx, from, to)
