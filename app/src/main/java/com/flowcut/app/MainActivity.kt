@@ -227,9 +227,6 @@ class MainActivity : ComponentActivity() {
                                 viewModel.resetProject {
                                     openNewProjectPicker()
                                 }
-                            },
-                            onStressTestSelected = { count ->
-                                viewModel.createStressProject(count)
                             }
                         )
                     }

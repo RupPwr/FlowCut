@@ -335,11 +335,29 @@ fun EditorScreen(
                                 resolvedViewModel?.commitClipTrim(k, inUs, outUs)
                                 onCommitTrim(k, inUs, outUs, durMs)
                             },
+                            onTrimPreview = { previewUs ->
+                                previewRenderer.trimPreviewTimeUs = previewUs
+                                frameDriver.wake()
+                            },
                             getClipNaturalDurationUs = { k ->
                                 resolvedViewModel?.getClipNaturalDurationUs(k)
-                                    ?: snapshotHolder.current.project.clips.getOrNull(k)?.timeMap?.outUs
-                                    ?: snapshotHolder.current.project.clips.getOrNull(k)?.durationMs?.let { msToUs(it) }
-                                    ?: 0L
+                                    ?: run {
+                                        val clip = snapshotHolder.current.project.clips.getOrNull(k)
+                                        clip?.let { c ->
+                                            try {
+                                                val file = java.io.File(c.path)
+                                                if (file.exists()) {
+                                                    val retriever = android.media.MediaMetadataRetriever()
+                                                    retriever.setDataSource(file.absolutePath)
+                                                    val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                                    retriever.release()
+                                                    durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(c.durationMs)
+                                                } else msToUs(c.durationMs)
+                                            } catch (_: Exception) {
+                                                msToUs(c.durationMs)
+                                            }
+                                        } ?: 0L
+                                    }
                             },
                             onWakeFrameDriver = { frameDriver.wake() },
                             modifier = Modifier.fillMaxSize()

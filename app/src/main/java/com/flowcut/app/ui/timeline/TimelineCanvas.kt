@@ -9,8 +9,10 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableLongState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -48,6 +50,7 @@ import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -205,6 +208,7 @@ fun TimelineCanvas(
     onLongPress: (TimelineSelection) -> Unit = {},
     onWakeFrameDriver: () -> Unit = {},
     onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> },
+    onTrimPreview: (trimPreviewTimeUs: Long) -> Unit = {},
     getClipNaturalDurationUs: (clipIndex: Int) -> Long = { index ->
         val c = holder.current.project.clips.getOrNull(index)
         c?.timeMap?.outUs ?: c?.durationMs?.let { msToUs(it) } ?: 0L
@@ -214,6 +218,18 @@ fun TimelineCanvas(
     val density = LocalDensity.current.density
     val textMeasurer = rememberTextMeasurer(cacheSize = 200)
     val coroutineScope = rememberCoroutineScope()
+
+    // Wrap dynamic parameters in rememberUpdatedState so pointerInput never sees stale closures (Bug #1)
+    val currentSelection by rememberUpdatedState(selection)
+    val currentOnSelect by rememberUpdatedState(onSelect)
+    val currentOnLongPress by rememberUpdatedState(onLongPress)
+    val currentOnCommitTrim by rememberUpdatedState(onCommitTrim)
+    val currentOnTrimPreview by rememberUpdatedState(onTrimPreview)
+    val currentGetClipNaturalDurationUs by rememberUpdatedState(getClipNaturalDurationUs)
+    val currentOnWakeFrameDriver by rememberUpdatedState(onWakeFrameDriver)
+
+    // Cache original untrimmed duration per clip ID so a trimmed clip can always be extended back out (Bug #4)
+    val clipNaturalDurationCache = remember { mutableMapOf<String, Long>() }
 
     // Pre-allocated styling constants (Rule R10)
     val rulerHeightPx = remember(density) { TimelineHitTester.RULER_HEIGHT_DP * density }
@@ -279,7 +295,9 @@ fun TimelineCanvas(
 
                     val wasMovingOnDown = playhead.mode == PlayMode.FLINGING || playhead.mode == PlayMode.PLAYING
 
-                    val selectedClipIndex = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
+                    // Bug #1: Read currentSelection dynamically on touch-down (never stale!)
+                    val currentSel = currentSelection
+                    val selectedClipIndex = (currentSel as? TimelineSelection.ClipSelected)?.index ?: -1
                     val snapshotOnDown = holder.current
                     val halfWidthPxOnDown = size.width / 2f
                     val trimHandleHit = if (selectedClipIndex in 0 until snapshotOnDown.main.n) {
@@ -306,29 +324,100 @@ fun TimelineCanvas(
                         } else {
                             controller.beginScrub()
                         }
-                        onWakeFrameDriver()
+                        currentOnWakeFrameDriver()
                     }
 
                     var isDragging = false
                     var isZooming = false
                     var isTrimming = false
                     var wasLongPressed = false
+                    val startTouchX = down.position.x
                     var startPos = down.position
                     val dragSlop = 4.dp.value * density // Immediate 1:1 scrub response!
                     var lastDragX = down.position.x
                     var remainderUs = 0.0
 
-                    // Initial clip state for trim drag
+                    // Capture initial snapshot/clip/playhead state ONCE at touch-down
+                    val initialPlayheadUs = playhead.timeUs
                     val curClip = if (isTrimCandidate) snapshotOnDown.project.clips.getOrNull(selectedClipIndex) else null
-                    val initialTimeMap = curClip?.map()
-                    val initialInUs = initialTimeMap?.inUs ?: 0L
-                    val initialOutUs = initialTimeMap?.outUs ?: (curClip?.let { msToUs(it.durationMs) } ?: 0L)
-                    val naturalDurationUs = if (isTrimCandidate) {
-                        maxOf(initialOutUs, getClipNaturalDurationUs(selectedClipIndex))
+                    val initialMap = curClip?.map() ?: com.flowcut.app.core.time.TimeMap(0L, 0L)
+                    val initialInUs = initialMap.inUs
+                    val initialOutUs = initialMap.outUs
+                    val pxPerUsAtStart = zoomState.pxPerUs(density)
+
+                    val untrimmedDurationUs = if (isTrimCandidate && curClip != null) {
+                        clipNaturalDurationCache.getOrPut(curClip.id) {
+                            val reported = currentGetClipNaturalDurationUs(selectedClipIndex)
+                            maxOf(reported, initialOutUs, msToUs(curClip.durationMs))
+                        }
                     } else 0L
+                    val maxSourceUs = maxOf(initialOutUs, untrimmedDurationUs, curClip?.let { msToUs(it.durationMs) } ?: 0L)
 
                     var currentInUs = initialInUs
                     var currentOutUs = initialOutUs
+                    var currentFingerX = down.position.x
+                    var accumulatedAutoScrollUs = 0L
+                    var autoScrollJob: Job? = null
+                    val maxScrollSpeedPxPerSec = 300f * density
+                    val edgeZonePx = 48f * density
+                    var scrollRemainderUs = 0.0
+
+                    fun updateTrim(fingerX: Float) {
+                        if (pxPerUsAtStart <= 0.0) return
+                        val totalDxPx = fingerX - startTouchX
+                        val dragDeltaUs = (totalDxPx / pxPerUsAtStart).roundToLong()
+                        val effectiveDeltaUs = dragDeltaUs + accumulatedAutoScrollUs
+
+                        val newInUs: Long
+                        val newOutUs: Long
+                        if (isLeftHandle) {
+                            newInUs = (initialInUs + effectiveDeltaUs).coerceIn(0L, initialOutUs - 1_000_000L)
+                            newOutUs = initialOutUs
+                        } else {
+                            newInUs = initialInUs
+                            newOutUs = (initialOutUs + effectiveDeltaUs).coerceIn(initialInUs + 1_000_000L, maxSourceUs)
+                        }
+
+                        if (newInUs != currentInUs || newOutUs != currentOutUs) {
+                            currentInUs = newInUs
+                            currentOutUs = newOutUs
+
+                            val speedNum = initialMap.speedNum
+                            val speedDen = initialMap.speedDen
+                            val newMap = TimeMap(
+                                inUs = newInUs,
+                                outUs = newOutUs,
+                                speedNum = speedNum,
+                                speedDen = speedDen
+                            )
+                            val newProject = SetTimeMapCommand(
+                                clipIndex = selectedClipIndex,
+                                timeMap = newMap
+                            ).apply(holder.current.project)
+                            holder.current = TimelineSnapshot(System.nanoTime(), newProject)
+                        }
+
+                        val totalTimelineUs = msToUs(holder.current.totalMs)
+                        val newPlayheadUs = if (isLeftHandle) {
+                            (initialPlayheadUs - (currentInUs - initialInUs) + accumulatedAutoScrollUs).coerceIn(0L, maxOf(0L, totalTimelineUs))
+                        } else {
+                            (initialPlayheadUs + accumulatedAutoScrollUs).coerceIn(0L, maxOf(0L, totalTimelineUs))
+                        }
+
+                        if (isLeftHandle || accumulatedAutoScrollUs != 0L) {
+                            controller.seekTo(newPlayheadUs)
+                        }
+
+                        val trimmedEdgeUs = if (isLeftHandle) {
+                            msToUs(holder.current.main.startMs[selectedClipIndex])
+                        } else {
+                            val endMs = holder.current.main.endMs[selectedClipIndex]
+                            val startMs = holder.current.main.startMs[selectedClipIndex]
+                            maxOf(msToUs(startMs), msToUs(endMs) - 1_000L)
+                        }
+                        currentOnTrimPreview(trimmedEdgeUs)
+                        currentOnWakeFrameDriver()
+                    }
 
                     // Asynchronous long-press timer: NEVER delays or blocks awaitPointerEvent!
                     val longPressJob = if (!wasMovingOnDown && !isTrimCandidate) {
@@ -347,7 +436,7 @@ fun TimelineCanvas(
                                     zoomState = zoomState,
                                     selectedClipIndex = selectedClipIndex
                                 )
-                                onLongPress(hit)
+                                currentOnLongPress(hit)
                             }
                         }
                     } else null
@@ -382,11 +471,13 @@ fun TimelineCanvas(
 
                             if (pressedCount >= 2) {
                                 longPressJob?.cancel()
+                                autoScrollJob?.cancel()
+                                autoScrollJob = null
                                 isZooming = true
                                 val zoomFactor = event.calculateZoom()
                                 if (zoomFactor != 1f) {
                                     zoomState.updateZoom(zoomFactor)
-                                    onWakeFrameDriver()
+                                    currentOnWakeFrameDriver()
                                 }
                                 event.changes.forEach { it.consume() }
                             } else if (pressedCount == 1) {
@@ -403,51 +494,65 @@ fun TimelineCanvas(
                                     lastUptimeMillis = change.uptimeMillis
                                     change.consume()
                                 } else if (isTrimCandidate) {
-                                    val dragDist = abs(change.position.x - startPos.x)
+                                    val totalDxPx = change.position.x - startTouchX
+                                    val dragDist = abs(totalDxPx)
                                     if (!isTrimming && dragDist > dragSlop) {
                                         isTrimming = true
                                     }
                                     if (isTrimming) {
-                                        val pxPerUs = zoomState.pxPerUs(density)
-                                        if (pxPerUs > 0.0) {
-                                            val deltaTimelineUs = ((change.position.x - startPos.x) / pxPerUs).roundToLong()
-                                            val (newInUs, newOutUs) = if (isLeftHandle) {
-                                                val clampedInUs = (initialInUs + deltaTimelineUs).coerceIn(0L, initialOutUs - 1_000_000L)
-                                                clampedInUs to initialOutUs
-                                            } else {
-                                                val clampedOutUs = (initialOutUs + deltaTimelineUs).coerceIn(initialInUs + 1_000_000L, naturalDurationUs)
-                                                initialInUs to clampedOutUs
-                                            }
+                                        currentFingerX = change.position.x
+                                        updateTrim(currentFingerX)
 
-                                            if (newInUs != currentInUs || newOutUs != currentOutUs) {
-                                                currentInUs = newInUs
-                                                currentOutUs = newOutUs
+                                        val canvasW = size.width.toFloat()
+                                        val inLeftZone = currentFingerX < edgeZonePx
+                                        val inRightZone = currentFingerX > canvasW - edgeZonePx
 
-                                                val speedNum = initialTimeMap?.speedNum ?: 1
-                                                val speedDen = initialTimeMap?.speedDen ?: 1
-                                                val newMap = TimeMap(
-                                                    inUs = newInUs,
-                                                    outUs = newOutUs,
-                                                    speedNum = speedNum,
-                                                    speedDen = speedDen
-                                                )
-                                                val newProject = SetTimeMapCommand(
-                                                    clipIndex = selectedClipIndex,
-                                                    timeMap = newMap
-                                                ).apply(holder.current.project)
-                                                holder.current = TimelineSnapshot(System.nanoTime(), newProject)
+                                        if ((inLeftZone || inRightZone) && autoScrollJob == null) {
+                                            autoScrollJob = coroutineScope.launch {
+                                                var lastNanos = System.nanoTime()
+                                                while (isActive) {
+                                                    delay(16L) // ~60 fps
+                                                    val nowNanos = System.nanoTime()
+                                                    val dtSec = ((nowNanos - lastNanos) / 1_000_000_000.0).coerceIn(0.001, 0.050)
+                                                    lastNanos = nowNanos
 
-                                                // Seek playhead to trimmed edge so preview shows exact frame live!
-                                                val trimmedEdgeUs = if (isLeftHandle) {
-                                                    msToUs(holder.current.main.startMs[selectedClipIndex])
-                                                } else {
-                                                    val endMs = holder.current.main.endMs[selectedClipIndex]
-                                                    val startMs = holder.current.main.startMs[selectedClipIndex]
-                                                    maxOf(msToUs(startMs), msToUs(endMs) - 1_000L)
+                                                    val w = size.width.toFloat()
+                                                    val fX = currentFingerX
+                                                    val speedFactor = when {
+                                                        fX < edgeZonePx -> -((edgeZonePx - fX) / edgeZonePx).coerceIn(0f, 1f)
+                                                        fX > w - edgeZonePx -> ((fX - (w - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1f)
+                                                        else -> 0f
+                                                    }
+
+                                                    if (speedFactor == 0f) {
+                                                        break
+                                                    }
+
+                                                    val deltaPx = speedFactor * maxScrollSpeedPxPerSec * dtSec
+                                                    if (pxPerUsAtStart > 0.0) {
+                                                        val rawDeltaUs = (deltaPx / pxPerUsAtStart) + scrollRemainderUs
+                                                        val deltaUs = rawDeltaUs.roundToLong()
+                                                        scrollRemainderUs = rawDeltaUs - deltaUs
+
+                                                        if (deltaUs != 0L) {
+                                                            val canScroll = if (isLeftHandle) {
+                                                                if (deltaUs < 0) currentInUs > 0L else currentInUs < initialOutUs - 1_000_000L
+                                                            } else {
+                                                                if (deltaUs > 0) currentOutUs < maxSourceUs else currentOutUs > initialInUs + 1_000_000L
+                                                            }
+
+                                                            if (canScroll) {
+                                                                accumulatedAutoScrollUs += deltaUs
+                                                                updateTrim(currentFingerX)
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                controller.seekTo(trimmedEdgeUs)
-                                                onWakeFrameDriver()
+                                                autoScrollJob = null
                                             }
+                                        } else if (!inLeftZone && !inRightZone) {
+                                            autoScrollJob?.cancel()
+                                            autoScrollJob = null
                                         }
                                     }
                                     change.consume()
@@ -462,7 +567,7 @@ fun TimelineCanvas(
                                         isDragging = true
                                         longPressJob?.cancel()
                                         controller.beginScrub()
-                                        onWakeFrameDriver()
+                                        currentOnWakeFrameDriver()
                                         lastDragX = change.position.x
                                         lastSignificantDx = 0f
                                         remainderUs = 0.0
@@ -480,7 +585,7 @@ fun TimelineCanvas(
                                             remainderUs = exactDeltaUs - deltaUsLong
                                             if (deltaUsLong != 0L) {
                                                 controller.scrubBy(deltaUsLong)
-                                                onWakeFrameDriver()
+                                                currentOnWakeFrameDriver()
                                             }
                                         }
                                         lastDragX = change.position.x
@@ -490,11 +595,19 @@ fun TimelineCanvas(
                             } else {
                                 // Pointer up (pressedCount == 0)
                                 longPressJob?.cancel()
+                                autoScrollJob?.cancel()
+                                autoScrollJob = null
                                 if (isTrimCandidate) {
+                                    currentOnTrimPreview(-1L)
                                     if (isTrimming && (currentInUs != initialInUs || currentOutUs != initialOutUs)) {
                                         val newDurationMs = usToMs(currentOutUs - currentInUs)
-                                        onCommitTrim(selectedClipIndex, currentInUs, currentOutUs, newDurationMs)
+                                        currentOnCommitTrim(selectedClipIndex, currentInUs, currentOutUs, newDurationMs)
                                     }
+                                    val totalUs = msToUs(holder.current.totalMs)
+                                    if (playhead.timeUs > totalUs) {
+                                        controller.seekTo(totalUs)
+                                    }
+                                    currentOnWakeFrameDriver()
                                 } else if (isDragging) {
                                     val pxPerUs = zoomState.pxPerUs(density)
                                     val maxVelocityPx = 8000f * density
@@ -509,7 +622,7 @@ fun TimelineCanvas(
 
                                     val velocityUsPerSec = if (pxPerUs > 0.0) (-velocityPx / pxPerUs) else 0.0
                                     controller.endScrub(velocityUsPerSec, pxPerUs)
-                                    onWakeFrameDriver()
+                                    currentOnWakeFrameDriver()
                                 } else if (!isZooming && !wasMovingOnDown && !wasLongPressed) {
                                     val halfWidthPx = size.width / 2f
                                     if (down.position.y < rulerHeightPx) {
@@ -521,7 +634,7 @@ fun TimelineCanvas(
                                             density = density
                                         )
                                         controller.seekTo(tappedTimeUs)
-                                        onWakeFrameDriver()
+                                        currentOnWakeFrameDriver()
                                     } else {
                                         val hit = TimelineHitTester.hitTest(
                                             tapX = down.position.x,
@@ -533,7 +646,7 @@ fun TimelineCanvas(
                                             zoomState = zoomState,
                                             selectedClipIndex = selectedClipIndex
                                         )
-                                        onSelect(hit)
+                                        currentOnSelect(hit)
                                     }
                                 }
                                 break
@@ -541,6 +654,11 @@ fun TimelineCanvas(
                         }
                     } finally {
                         longPressJob?.cancel()
+                        autoScrollJob?.cancel()
+                        autoScrollJob = null
+                        if (isTrimCandidate) {
+                            currentOnTrimPreview(-1L)
+                        }
                     }
                 }
             }

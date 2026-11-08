@@ -43,7 +43,9 @@ object TimelineHitTester {
     }
 
     /**
-     * Hit-tests Left or Right trim handle of a currently selected clip with a generous touch target (~28.dp).
+     * Hit-tests Left or Right trim handle of a currently selected clip with a generous touch target.
+     * Left hit zone: [leftX - handleWidthPx - 16.dp .. leftX + 12.dp]
+     * Right hit zone: [rightX - 12.dp .. rightX + handleWidthPx + 16.dp]
      */
     fun hitTestTrimHandle(
         tapX: Float,
@@ -56,7 +58,6 @@ object TimelineHitTester {
         zoomState: TimelineZoomState,
         rulerHeightDp: Float = RULER_HEIGHT_DP,
         mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
-        touchTargetDp: Float = TRIM_HANDLE_TOUCH_TARGET_DP,
         handleWidthDp: Float = TRIM_HANDLE_WIDTH_DP
     ): TrimHandleType {
         val n = snapshot.main.n
@@ -67,7 +68,7 @@ object TimelineHitTester {
         val mainTrackBottomPx = rulerHeightPx + mainTrackHeightPx
 
         // Generous vertical touch tolerance around the main track
-        val vertMarginPx = 6f * density
+        val vertMarginPx = 8f * density
         if (tapY < rulerHeightPx - vertMarginPx || tapY > mainTrackBottomPx + vertMarginPx) {
             return TrimHandleType.NONE
         }
@@ -78,21 +79,26 @@ object TimelineHitTester {
         val rightX = zoomState.timeUsToX(clipEndUs, playheadUs, halfWidthPx, density)
 
         val handleWidthPx = handleWidthDp * density
-        val halfTouchTargetPx = (touchTargetDp / 2f) * density
 
-        // Left handle tab center is attached to leftX, protruding outward to the left: [leftX - handleWidthPx, leftX]
-        val leftHandleCenterX = leftX - (handleWidthPx / 2f)
-        // Right handle tab center is attached to rightX, protruding outward to the right: [rightX, rightX + handleWidthPx]
-        val rightHandleCenterX = rightX + (handleWidthPx / 2f)
+        // Exact touch hit zones per Bug #2:
+        val leftHitMin = leftX - handleWidthPx - (16f * density)
+        val leftHitMax = leftX + (12f * density)
+        val rightHitMin = rightX - (12f * density)
+        val rightHitMax = rightX + handleWidthPx + (16f * density)
 
-        val leftDist = abs(tapX - leftHandleCenterX)
-        val rightDist = abs(tapX - rightHandleCenterX)
-
-        val hitLeft = leftDist <= halfTouchTargetPx
-        val hitRight = rightDist <= halfTouchTargetPx
+        val hitLeft = tapX in leftHitMin..leftHitMax
+        val hitRight = tapX in rightHitMin..rightHitMax
 
         return when {
-            hitLeft && hitRight -> if (leftDist <= rightDist) TrimHandleType.LEFT else TrimHandleType.RIGHT
+            hitLeft && hitRight -> {
+                val leftHandleCenterX = leftX - (handleWidthPx / 2f)
+                val rightHandleCenterX = rightX + (handleWidthPx / 2f)
+                if (abs(tapX - leftHandleCenterX) <= abs(tapX - rightHandleCenterX)) {
+                    TrimHandleType.LEFT
+                } else {
+                    TrimHandleType.RIGHT
+                }
+            }
             hitLeft -> TrimHandleType.LEFT
             hitRight -> TrimHandleType.RIGHT
             else -> TrimHandleType.NONE

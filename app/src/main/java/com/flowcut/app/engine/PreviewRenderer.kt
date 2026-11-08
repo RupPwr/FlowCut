@@ -199,6 +199,7 @@ class PreviewRenderer(
     private var prefetchClipIndex: Int = -1
 
     // Pre-allocated arrays and structures (Rule R10: Zero heap allocations on hot path)
+    @Volatile var trimPreviewTimeUs: Long = -1L
     private var activeSet: ActiveSet = ActiveSet(holder.current.lanes.size)
     private val resolvedFrame = ResolvedFrame()
     private val frameCtx = MutableFrameCtx()
@@ -308,7 +309,8 @@ class PreviewRenderer(
     ): ResolvedFrame {
         // Step 1: Read snapshot and playhead ONCE per frame
         val s = holder.current
-        val tUs = playhead.timeUs
+        val previewTimeUs = trimPreviewTimeUs
+        val tUs = if (previewTimeUs >= 0L) previewTimeUs else playhead.timeUs
         val gen = playhead.generation
 
         // Step 2: Ensure pre-allocated ActiveSet has capacity for lanes
@@ -458,7 +460,9 @@ class PreviewRenderer(
         val s = holder.current
         val clipA = s.project.clips.getOrNull(frame.clipAIndex) ?: return
 
-        val isScrubbing = playhead.mode == PlayMode.SCRUBBING || playhead.mode == PlayMode.FLINGING
+        val isScrubbing = (trimPreviewTimeUs >= 0L) ||
+                playhead.mode == PlayMode.SCRUBBING ||
+                playhead.mode == PlayMode.FLINGING
 
         // 1. FrameSource A (Strictly bound to stA / texAId)
         val clipAChanged = frameSourceA == null ||
@@ -590,6 +594,7 @@ class PreviewRenderer(
     }
 
     fun release() {
+        trimPreviewTimeUs = -1L
         stopPrefetch()
         releaseDecoders()
         surfaceTextureA?.setOnFrameAvailableListener(null)
