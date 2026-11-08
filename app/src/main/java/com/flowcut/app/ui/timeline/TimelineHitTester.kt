@@ -13,11 +13,14 @@ sealed interface TimelineSelection {
     data class ClipSelected(val index: Int) : TimelineSelection
     data class JunctionSelected(val index: Int) : TimelineSelection
     data class LaneItemSelected(val laneIndex: Int, val itemIndex: Int) : TimelineSelection
+    data class TrimHandleLeft(val index: Int) : TimelineSelection
+    data class TrimHandleRight(val index: Int) : TimelineSelection
 }
 
 /**
  * Pure O(log n) hit-tester for TimelineCanvas (Section 8).
  * Evaluates touch hits with strict priority:
+ * 0. Trim handles of currently selected clip (~28 dp touch target)
  * 1. Junction / transition nodes (48 dp touch target wins)
  * 2. Main track clips
  * 3. Feature lane items
@@ -29,6 +32,72 @@ object TimelineHitTester {
     const val MAIN_TRACK_HEIGHT_DP = 64f
     const val LANE_HEIGHT_DP = 40f
     const val LANES_PADDING_TOP_DP = 8f
+    const val TRIM_HANDLE_WIDTH_DP = 15f
+    const val TRIM_HANDLE_HEIGHT_DP = 38f
+    const val TRIM_HANDLE_TOUCH_TARGET_DP = 28f
+
+    enum class TrimHandleType {
+        NONE,
+        LEFT,
+        RIGHT
+    }
+
+    /**
+     * Hit-tests Left or Right trim handle of a currently selected clip with a generous touch target (~28.dp).
+     */
+    fun hitTestTrimHandle(
+        tapX: Float,
+        tapY: Float,
+        selectedClipIndex: Int,
+        playheadUs: Long,
+        halfWidthPx: Float,
+        density: Float,
+        snapshot: TimelineSnapshot,
+        zoomState: TimelineZoomState,
+        rulerHeightDp: Float = RULER_HEIGHT_DP,
+        mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
+        touchTargetDp: Float = TRIM_HANDLE_TOUCH_TARGET_DP,
+        handleWidthDp: Float = TRIM_HANDLE_WIDTH_DP
+    ): TrimHandleType {
+        val n = snapshot.main.n
+        if (selectedClipIndex !in 0 until n) return TrimHandleType.NONE
+
+        val rulerHeightPx = rulerHeightDp * density
+        val mainTrackHeightPx = mainTrackHeightDp * density
+        val mainTrackBottomPx = rulerHeightPx + mainTrackHeightPx
+
+        // Generous vertical touch tolerance around the main track
+        val vertMarginPx = 6f * density
+        if (tapY < rulerHeightPx - vertMarginPx || tapY > mainTrackBottomPx + vertMarginPx) {
+            return TrimHandleType.NONE
+        }
+
+        val clipStartUs = msToUs(snapshot.main.startMs[selectedClipIndex])
+        val clipEndUs = msToUs(snapshot.main.endMs[selectedClipIndex])
+        val leftX = zoomState.timeUsToX(clipStartUs, playheadUs, halfWidthPx, density)
+        val rightX = zoomState.timeUsToX(clipEndUs, playheadUs, halfWidthPx, density)
+
+        val handleWidthPx = handleWidthDp * density
+        val halfTouchTargetPx = (touchTargetDp / 2f) * density
+
+        // Left handle tab center is attached to leftX, protruding outward to the left: [leftX - handleWidthPx, leftX]
+        val leftHandleCenterX = leftX - (handleWidthPx / 2f)
+        // Right handle tab center is attached to rightX, protruding outward to the right: [rightX, rightX + handleWidthPx]
+        val rightHandleCenterX = rightX + (handleWidthPx / 2f)
+
+        val leftDist = abs(tapX - leftHandleCenterX)
+        val rightDist = abs(tapX - rightHandleCenterX)
+
+        val hitLeft = leftDist <= halfTouchTargetPx
+        val hitRight = rightDist <= halfTouchTargetPx
+
+        return when {
+            hitLeft && hitRight -> if (leftDist <= rightDist) TrimHandleType.LEFT else TrimHandleType.RIGHT
+            hitLeft -> TrimHandleType.LEFT
+            hitRight -> TrimHandleType.RIGHT
+            else -> TrimHandleType.NONE
+        }
+    }
 
     fun hitTest(
         tapX: Float,
@@ -40,10 +109,34 @@ object TimelineHitTester {
         zoomState: TimelineZoomState,
         rulerHeightDp: Float = RULER_HEIGHT_DP,
         mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
-        laneHeightDp: Float = LANE_HEIGHT_DP
+        laneHeightDp: Float = LANE_HEIGHT_DP,
+        selectedClipIndex: Int = -1
     ): TimelineSelection {
         val n = snapshot.main.n
         if (n == 0 && snapshot.lanes.isEmpty()) return TimelineSelection.None
+
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY 0: Trim Handles of Currently Selected Clip (~28 dp touch target)
+        // -----------------------------------------------------------------------------------------
+        if (selectedClipIndex in 0 until n) {
+            val handleHit = hitTestTrimHandle(
+                tapX = tapX,
+                tapY = tapY,
+                selectedClipIndex = selectedClipIndex,
+                playheadUs = playheadUs,
+                halfWidthPx = halfWidthPx,
+                density = density,
+                snapshot = snapshot,
+                zoomState = zoomState,
+                rulerHeightDp = rulerHeightDp,
+                mainTrackHeightDp = mainTrackHeightDp
+            )
+            when (handleHit) {
+                TrimHandleType.LEFT -> return TimelineSelection.TrimHandleLeft(selectedClipIndex)
+                TrimHandleType.RIGHT -> return TimelineSelection.TrimHandleRight(selectedClipIndex)
+                TrimHandleType.NONE -> { /* fall through to normal gestures */ }
+            }
+        }
 
         val rulerHeightPx = rulerHeightDp * density
         val mainTrackHeightPx = mainTrackHeightDp * density

@@ -81,7 +81,8 @@ fun EditorScreen(
     onCloseExportSheet: () -> Unit,
     modifier: Modifier = Modifier,
     onPlaybackStateChange: (Boolean) -> Unit = {},
-    onPlayheadUpdate: (Long) -> Unit = {}
+    onPlayheadUpdate: (Long) -> Unit = {},
+    onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> }
 ) {
     val context = LocalContext.current
     val colors = FlowCutTheme.colors
@@ -93,9 +94,12 @@ fun EditorScreen(
         if (t != null && t != TransitionType.NONE) t.displayName else null
     }
 
+    val resolvedViewModel = runCatching { androidx.lifecycle.viewmodel.compose.viewModel<com.flowcut.app.editor.EditorViewModel>() }.getOrNull()
+
     // New Core Foundation wiring (Section 8, 10, 15)
     val coreProject = remember(timeline.project) {
         val coreClips = timeline.project.clips.map {
+            val existingTimeMap = resolvedViewModel?.clipTimeMaps?.get(it.id)
             com.flowcut.app.core.model.Clip(
                 id = it.id,
                 path = it.path,
@@ -103,7 +107,8 @@ fun EditorScreen(
                 width = it.width,
                 height = it.height,
                 rotation = it.rotation,
-                frameRate = it.frameRate
+                frameRate = it.frameRate,
+                timeMap = existingTimeMap
             )
         }
         val coreTransitions = timeline.project.transitions.map {
@@ -307,6 +312,8 @@ fun EditorScreen(
                                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
                                     TimelineSelection.None -> onDeselectAll()
                                     is TimelineSelection.LaneItemSelected -> {}
+                                    is TimelineSelection.TrimHandleLeft -> {}
+                                    is TimelineSelection.TrimHandleRight -> {}
                                 }
                             },
                             onLongPress = { sel ->
@@ -323,6 +330,16 @@ fun EditorScreen(
                                     }
                                     else -> {}
                                 }
+                            },
+                            onCommitTrim = { k, inUs, outUs, durMs ->
+                                resolvedViewModel?.commitClipTrim(k, inUs, outUs)
+                                onCommitTrim(k, inUs, outUs, durMs)
+                            },
+                            getClipNaturalDurationUs = { k ->
+                                resolvedViewModel?.getClipNaturalDurationUs(k)
+                                    ?: snapshotHolder.current.project.clips.getOrNull(k)?.timeMap?.outUs
+                                    ?: snapshotHolder.current.project.clips.getOrNull(k)?.durationMs?.let { msToUs(it) }
+                                    ?: 0L
                             },
                             onWakeFrameDriver = { frameDriver.wake() },
                             modifier = Modifier.fillMaxSize()

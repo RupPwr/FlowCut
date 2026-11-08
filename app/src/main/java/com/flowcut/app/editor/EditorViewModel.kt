@@ -4,6 +4,9 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.flowcut.app.core.time.TimeMap
+import com.flowcut.app.core.time.msToUs
+import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.engine.ExportEngine
 import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
@@ -69,6 +72,56 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private var preDragProjectSnapshot: Project? = null
 
+    private val undoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
+    private val redoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
+    val clipTimeMaps = mutableMapOf<String, TimeMap>()
+    private val clipNaturalDurations = mutableMapOf<String, Long>()
+
+    fun getClipNaturalDurationUs(clipIndex: Int): Long {
+        val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return 0L
+        return clipNaturalDurations.getOrPut(clip.id) {
+            try {
+                val file = java.io.File(clip.path)
+                if (file.exists()) {
+                    val retriever = android.media.MediaMetadataRetriever()
+                    retriever.setDataSource(file.absolutePath)
+                    val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    retriever.release()
+                    durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(clip.durationMs)
+                } else {
+                    msToUs(clip.durationMs)
+                }
+            } catch (_: Exception) {
+                msToUs(clip.durationMs)
+            }
+        }
+    }
+
+    fun commitClipTrim(clipIndex: Int, newInUs: Long, newOutUs: Long) {
+        val currentProject = _uiState.value.project
+        if (clipIndex !in currentProject.clips.indices) return
+        val oldClip = currentProject.clips[clipIndex]
+        val newDurationMs = usToMs(newOutUs - newInUs)
+        if (newDurationMs < 1000L) return
+
+        val newClip = oldClip.copy(durationMs = newDurationMs)
+        val newClips = currentProject.clips.toMutableList()
+        newClips[clipIndex] = newClip
+
+        // Adjust adjacent transitions if needed (Section 4 invariants: transition <= min(d1, d2) / 2)
+        val newTransitions = currentProject.transitions.toMutableList()
+        for (j in maxOf(0, clipIndex - 1)..minOf(newTransitions.size - 1, clipIndex)) {
+            val maxAllowed = minOf(newClips[j].durationMs, newClips[j + 1].durationMs) / 2L
+            if (newTransitions[j].durationMs > maxAllowed) {
+                newTransitions[j] = newTransitions[j].copy(durationMs = maxAllowed)
+            }
+        }
+
+        val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
+        clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs)
+        updateProject(newProject, recordUndo = true)
+    }
+
     init {
         loadInitialProject()
     }
@@ -100,6 +153,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun updateProject(newProject: Project, recordUndo: Boolean = true) {
         if (recordUndo) {
             undoStack.push(_uiState.value.project)
+            undoTimeMaps.addLast(HashMap(clipTimeMaps))
+            redoTimeMaps.clear()
         }
         val newTimeline = ProgramTimeline(newProject)
         val clampedMs = _uiState.value.currentMs.coerceIn(0L, maxOf(0L, newTimeline.total))
@@ -221,6 +276,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteClip(index: Int) {
+        val deletedId = _uiState.value.project.clips.getOrNull(index)?.id
+        if (deletedId != null) {
+            clipTimeMaps.remove(deletedId)
+            clipNaturalDurations.remove(deletedId)
+        }
         val newProject = ProgramTimeline.deleteClip(_uiState.value.project, index)
         updateProject(newProject, recordUndo = true)
         _uiState.update {
@@ -244,6 +304,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             projectStore.clearAll()
             undoStack.clear()
+            undoTimeMaps.clear()
+            redoTimeMaps.clear()
+            clipTimeMaps.clear()
+            clipNaturalDurations.clear()
             _uiState.update {
                 it.copy(
                     project = Project(),
@@ -493,11 +557,23 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun undo() {
         val previous = undoStack.undo(_uiState.value.project) ?: return
+        if (undoTimeMaps.isNotEmpty()) {
+            val prevMaps = undoTimeMaps.removeLast()
+            redoTimeMaps.addLast(HashMap(clipTimeMaps))
+            clipTimeMaps.clear()
+            clipTimeMaps.putAll(prevMaps)
+        }
         updateProject(previous, recordUndo = false)
     }
 
     fun redo() {
         val next = undoStack.redo(_uiState.value.project) ?: return
+        if (redoTimeMaps.isNotEmpty()) {
+            val nextMaps = redoTimeMaps.removeLast()
+            undoTimeMaps.addLast(HashMap(clipTimeMaps))
+            clipTimeMaps.clear()
+            clipTimeMaps.putAll(nextMaps)
+        }
         updateProject(next, recordUndo = false)
     }
 
