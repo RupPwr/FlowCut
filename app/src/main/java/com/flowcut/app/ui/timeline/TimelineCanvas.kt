@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -234,12 +236,20 @@ fun TimelineCanvas(
     // Pre-allocated styling constants (Rule R10)
     val rulerHeightPx = remember(density) { TimelineHitTester.RULER_HEIGHT_DP * density }
     val mainTrackHeightPx = remember(density) { TimelineHitTester.MAIN_TRACK_HEIGHT_DP * density }
-    val junctionRadiusPx = remember(density) { 12.dp.value * density }
-    val junctionDiameterPx = remember(density) { 24.dp.value * density }
     val cornerRadiusPx = remember(density) { 6.dp.value * density }
     val selectionStroke = remember(density) { Stroke(width = 2.5f * density) }
     val unselectedStroke = remember(density) { Stroke(width = 1f * density) }
     val playheadStrokeWidth = remember(density) { 2.5f * density }
+
+    // Pre-allocated styling constants for CapCut-style transition junction icon (Rule R10)
+    val junctionBoxSizePx = remember(density) { TimelineHitTester.JUNCTION_BOX_SIZE_DP * density }
+    val junctionHalfBoxPx = remember(density) { junctionBoxSizePx / 2f }
+    val junctionCornerRadius = remember(density) { CornerRadius(4.5f * density, 4.5f * density) }
+    val junctionBoxSize = remember(density) { Size(junctionBoxSizePx, junctionBoxSizePx) }
+    val junctionBoxBorderStroke = remember(density) { Stroke(width = 1f * density) }
+    val junctionSelectedBorderStroke = remember(density) { Stroke(width = 2f * density) }
+    val slashStrokeWidthPx = remember(density) { 2f * density }
+    val slashInsetPx = remember(density) { 5.5f * density }
 
     // Pre-allocated styling constants for CapCut-style selection & chevron handles (Rule R10)
     val whiteSelectionStroke = remember(density) { Stroke(width = 2.5f * density) }
@@ -267,6 +277,8 @@ fun TimelineCanvas(
     val playheadColor = remember { Color(0xFFFF2D55) }
     val whiteColor = remember { Color.White }
     val chevronColor = remember { Color(0xFF141414) }
+    val junctionBoxBorderColor = remember { Color(0x33000000) }
+    val slashColor = remember { Color(0xFF141414) }
     val timeTextStyle = remember { TextStyle(fontSize = 9.sp, color = Color(0xFF8E8E93)) }
     val clipLabelStyle = remember { TextStyle(fontSize = 9.sp, color = Color(0x99FFFFFF)) }
     val timeStringCache = remember { TimeStringCache(maxEntries = 200) }
@@ -280,6 +292,9 @@ fun TimelineCanvas(
     val rightHandlePath = remember { Path() }
     val leftChevronPath = remember { Path() }
     val rightChevronPath = remember { Path() }
+
+    // Unclamped virtual playhead for smooth, wall-free trim dragging (Rule R10)
+    val activeTrimPlayheadUs = remember { mutableLongStateOf(Long.MIN_VALUE) }
 
     Canvas(
         modifier = modifier
@@ -371,11 +386,11 @@ fun TimelineCanvas(
                         val newInUs: Long
                         val newOutUs: Long
                         if (isLeftHandle) {
-                            newInUs = (initialInUs + effectiveDeltaUs).coerceIn(0L, initialOutUs - 1_000_000L)
+                            newInUs = (initialInUs + effectiveDeltaUs).coerceIn(0L, initialOutUs - 200_000L)
                             newOutUs = initialOutUs
                         } else {
                             newInUs = initialInUs
-                            newOutUs = (initialOutUs + effectiveDeltaUs).coerceIn(initialInUs + 1_000_000L, maxSourceUs)
+                            newOutUs = (initialOutUs + effectiveDeltaUs).coerceIn(initialInUs + 200_000L, maxSourceUs)
                         }
 
                         if (newInUs != currentInUs || newOutUs != currentOutUs) {
@@ -397,15 +412,19 @@ fun TimelineCanvas(
                             holder.current = TimelineSnapshot(System.nanoTime(), newProject)
                         }
 
-                        val totalTimelineUs = msToUs(holder.current.totalMs)
-                        val newPlayheadUs = if (isLeftHandle) {
-                            (initialPlayheadUs - (currentInUs - initialInUs) + accumulatedAutoScrollUs).coerceIn(0L, maxOf(0L, totalTimelineUs))
+                        // Unclamped virtual playhead for drawing so Left Handle can freely cross playhead to the right screen edge
+                        val virtualPlayheadUs = if (isLeftHandle) {
+                            initialPlayheadUs - (currentInUs - initialInUs) + accumulatedAutoScrollUs
                         } else {
-                            (initialPlayheadUs + accumulatedAutoScrollUs).coerceIn(0L, maxOf(0L, totalTimelineUs))
+                            initialPlayheadUs + accumulatedAutoScrollUs
                         }
+                        activeTrimPlayheadUs.longValue = virtualPlayheadUs
+
+                        val totalTimelineUs = msToUs(holder.current.totalMs)
+                        val clampedPlayheadUs = virtualPlayheadUs.coerceIn(0L, maxOf(0L, totalTimelineUs))
 
                         if (isLeftHandle || accumulatedAutoScrollUs != 0L) {
-                            controller.seekTo(newPlayheadUs)
+                            controller.seekTo(clampedPlayheadUs)
                         }
 
                         val trimmedEdgeUs = if (isLeftHandle) {
@@ -473,6 +492,7 @@ fun TimelineCanvas(
                                 longPressJob?.cancel()
                                 autoScrollJob?.cancel()
                                 autoScrollJob = null
+                                activeTrimPlayheadUs.longValue = Long.MIN_VALUE
                                 isZooming = true
                                 val zoomFactor = event.calculateZoom()
                                 if (zoomFactor != 1f) {
@@ -536,9 +556,9 @@ fun TimelineCanvas(
 
                                                         if (deltaUs != 0L) {
                                                             val canScroll = if (isLeftHandle) {
-                                                                if (deltaUs < 0) currentInUs > 0L else currentInUs < initialOutUs - 1_000_000L
+                                                                if (deltaUs < 0) currentInUs > 0L else currentInUs < initialOutUs - 200_000L
                                                             } else {
-                                                                if (deltaUs > 0) currentOutUs < maxSourceUs else currentOutUs > initialInUs + 1_000_000L
+                                                                if (deltaUs > 0) currentOutUs < maxSourceUs else currentOutUs > initialInUs + 200_000L
                                                             }
 
                                                             if (canScroll) {
@@ -597,6 +617,7 @@ fun TimelineCanvas(
                                 longPressJob?.cancel()
                                 autoScrollJob?.cancel()
                                 autoScrollJob = null
+                                activeTrimPlayheadUs.longValue = Long.MIN_VALUE
                                 if (isTrimCandidate) {
                                     currentOnTrimPreview(-1L)
                                     if (isTrimming && (currentInUs != initialInUs || currentOutUs != initialOutUs)) {
@@ -656,6 +677,7 @@ fun TimelineCanvas(
                         longPressJob?.cancel()
                         autoScrollJob?.cancel()
                         autoScrollJob = null
+                        activeTrimPlayheadUs.longValue = Long.MIN_VALUE
                         if (isTrimCandidate) {
                             currentOnTrimPreview(-1L)
                         }
@@ -668,7 +690,8 @@ fun TimelineCanvas(
         // RULE R3: Read dynamic states inside draw lambda ONLY
         // -----------------------------------------------------------------------------------------
         val tick = frameTick.longValue
-        val tUs = playhead.timeUs
+        val virtualUs = activeTrimPlayheadUs.longValue
+        val tUs = if (virtualUs != Long.MIN_VALUE) virtualUs else playhead.timeUs
         val snapshot = holder.current
         val pxPerUs = zoomState.pxPerUs(density)
         val halfWidthInt = (size.width / 2f).toInt()
@@ -682,7 +705,7 @@ fun TimelineCanvas(
         // 2. Visible Range Culling (Rule R7)
         val spanUs = if (pxPerUs > 0.0) (halfWidthPx / pxPerUs).roundToLong() else 0L
         val leftMs = usToMs(maxOf(0L, tUs - spanUs))
-        val rightMs = usToMs(tUs + spanUs)
+        val rightMs = usToMs(maxOf(0L, tUs + spanUs))
 
         // 3. Draw Minimal Time Ruler (Compact & Micro Dots/Ticks)
         val labelStepSec = when {
@@ -930,40 +953,60 @@ fun TimelineCanvas(
                 }
             }
 
-            // Draw Junction Badges
+            // Draw Transition Junction White Rounded-Square "/" Icon
             val junctionCenterY = mainTop + mainTrackHeightPx / 2f
+            val selectedK = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
             for (j in k0 until minOf(k1 + 1, n - 1)) {
+                // Auto-hide junctions attached to currently selected clip
+                if (selectedK >= 0 && (j == selectedK - 1 || j == selectedK)) {
+                    continue
+                }
                 val centerMs = (snapshot.main.startMs[j + 1] + snapshot.main.endMs[j]) / 2L
                 val jx = zoomState.timeUsToX(msToUs(centerMs), offsetPx, halfWidthInt, pxPerUs)
                 if (jx in -50f..size.width + 50f) {
+                    val boxLeft = jx - junctionHalfBoxPx
+                    val boxTop = junctionCenterY - junctionHalfBoxPx
+                    val isJunctionSelected = selection == TimelineSelection.JunctionSelected(j)
                     val isTransition = snapshot.main.types[j] != TransitionType.NONE
-                    val jColor = if (selection == TimelineSelection.JunctionSelected(j)) {
+
+                    // 1. White rounded-square box fill
+                    drawRoundRect(
+                        color = whiteColor,
+                        topLeft = Offset(boxLeft, boxTop),
+                        size = junctionBoxSize,
+                        cornerRadius = junctionCornerRadius
+                    )
+
+                    // 2. Subtle dark border (or accent border if selected)
+                    val borderColor = if (isJunctionSelected) {
                         junctionSelectedColor
                     } else if (isTransition) {
                         junctionBgColor
                     } else {
-                        junctionNoneColor
+                        junctionBoxBorderColor
                     }
-
-                    drawCircle(
-                        color = jColor,
-                        radius = junctionRadiusPx,
-                        center = Offset(jx, junctionCenterY)
+                    val borderStroke = if (isJunctionSelected) junctionSelectedBorderStroke else junctionBoxBorderStroke
+                    drawRoundRect(
+                        color = borderColor,
+                        topLeft = Offset(boxLeft, boxTop),
+                        size = junctionBoxSize,
+                        cornerRadius = junctionCornerRadius,
+                        style = borderStroke
                     )
-                    if (selection == TimelineSelection.JunctionSelected(j)) {
-                        drawCircle(
-                            color = Color.White,
-                            radius = junctionRadiusPx,
-                            center = Offset(jx, junctionCenterY),
-                            style = selectionStroke
-                        )
-                    }
+
+                    // 3. Crisp black diagonal slash line (/) from bottom-left to top-right
+                    drawLine(
+                        color = slashColor,
+                        start = Offset(boxLeft + slashInsetPx, boxTop + junctionBoxSizePx - slashInsetPx),
+                        end = Offset(boxLeft + junctionBoxSizePx - slashInsetPx, boxTop + slashInsetPx),
+                        strokeWidth = slashStrokeWidthPx,
+                        cap = StrokeCap.Round
+                    )
                 }
             }
 
             // Dedicated Pass: Selected Clip Crisp White Rounded Border & Left/Right Chevron Handles
             // Drawn on top of unselected clips and junction badges so handles are never covered
-            val selectedK = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
             if (selectedK in 0 until n) {
                 val selClipStartUs = msToUs(snapshot.main.startMs[selectedK])
                 val selClipEndUs = msToUs(snapshot.main.endMs[selectedK])

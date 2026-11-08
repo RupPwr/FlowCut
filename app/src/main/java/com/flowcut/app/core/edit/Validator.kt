@@ -11,7 +11,7 @@ sealed class ValidationResult {
 
 object Validator {
     const val MAX_PROJECT_DURATION_MS: Long = 15 * 60_000L       // 15 minutes = 900,000 ms
-    const val MIN_CLIP_DURATION_MS: Long = 1_000L              // 1 second = 1,000 ms
+    const val MIN_CLIP_DURATION_MS: Long = 200L                 // 0.2 seconds = 200 ms
 
     fun validate(project: Project): ValidationResult {
         // 1. Transition count invariant
@@ -22,7 +22,7 @@ object Validator {
             )
         }
 
-        // 2. Clip duration invariants: minimum 1 second (1000 ms)
+        // 2. Clip duration invariants: minimum 0.2 seconds (200 ms)
         for (i in project.clips.indices) {
             val clip = project.clips[i]
             if (clip.durationMs < MIN_CLIP_DURATION_MS) {
@@ -43,13 +43,21 @@ object Validator {
             }
         }
 
-        // 4. Transitions non-negative duration
+        // 4. Transitions non-negative duration and <= adjacent clips
         for (i in project.transitions.indices) {
             val trans = project.transitions[i]
             if (trans.durationMs < 0L) {
                 return ValidationResult.Invalid(
                     "Transition at index $i has negative duration: ${trans.durationMs}ms"
                 )
+            }
+            if (i < project.clips.size - 1) {
+                val maxAllowed = minOf(project.clips[i].durationMs, project.clips[i + 1].durationMs)
+                if (trans.durationMs > maxAllowed) {
+                    return ValidationResult.Invalid(
+                        "Transition at index $i duration ${trans.durationMs}ms exceeds adjacent clip duration ${maxAllowed}ms"
+                    )
+                }
             }
         }
 

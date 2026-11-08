@@ -28,6 +28,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.flowcut.app.ALL_FEATURES
+import com.flowcut.app.audio.AudioEngine
+import com.flowcut.app.audio.AudioFeature
+import com.flowcut.app.audio.ClipAudioContributor
+import com.flowcut.app.core.feature.DefaultFeatureRegistry
 import com.flowcut.app.core.playback.PlayMode
 import com.flowcut.app.core.playback.PlaybackController
 import com.flowcut.app.core.time.msToUs
@@ -131,7 +139,26 @@ fun EditorScreen(
         snapshotHolder.current = TimelineSnapshot(System.nanoTime(), coreProject)
     }
 
-    val playbackController = remember { PlaybackController(holder = snapshotHolder) }
+    val audioContributor = remember(snapshotHolder) { ClipAudioContributor(snapshotHolder) }
+    val featureRegistry = remember(audioContributor) {
+        DefaultFeatureRegistry().apply {
+            ALL_FEATURES.forEach { feature ->
+                if (feature is AudioFeature) {
+                    feature.contributor = audioContributor
+                }
+                feature.register(this)
+            }
+        }
+    }
+    val audioEngine = remember(featureRegistry) {
+        AudioEngine(featureRegistry).apply {
+            onPlaybackStopped = { audioContributor.onPlaybackStopped() }
+        }
+    }
+
+    val playbackController = remember(audioEngine, snapshotHolder) {
+        PlaybackController(clock = audioEngine.clock, holder = snapshotHolder)
+    }
     val zoomState = remember { TimelineZoomState() }
     val frameTick = remember { mutableLongStateOf(0L) }
     val displayedMs = remember { mutableLongStateOf(currentMs) }
@@ -181,11 +208,28 @@ fun EditorScreen(
         )
     }
 
-    DisposableEffect(frameDriver, previewRenderer) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, playbackController) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                    playbackController.pause()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    DisposableEffect(frameDriver, previewRenderer, audioEngine, audioContributor) {
         previewRenderer.startPrefetch(coroutineScope)
         onDispose {
             frameDriver.stop()
             previewRenderer.release()
+            audioEngine.release()
+            audioContributor.release()
         }
     }
 
