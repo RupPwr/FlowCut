@@ -14,8 +14,8 @@ import com.flowcut.app.core.time.usToAudioFrames
  *
  * Enforces:
  * - Rule R10: Zero heap allocations in the hot audio render and timeUsAt loops.
- * - Safeguard 2: Latency-compensated AudioTrack.getTimestamp tracking with seamless
- *   monotonic wall-clock warmup fallback so playhead never jumps backward.
+ * - Safeguard 2 & Fix 2: Latency-compensated AudioTrack.getTimestamp tracking with seamless
+ *   vsync-continuous interpolation so the timeline playhead NEVER freezes across clip handovers.
  * - Safeguard 4: Clean pause/flush and lifecycle release.
  */
 class AudioEngine(
@@ -96,11 +96,13 @@ class AudioEngine(
             // Zero-allocation: fill pre-allocated buffer with 0.0f
             outBlock.fill(0f)
 
-            // Render all registered audio contributors
+            // Render all registered audio contributors with failure isolation
             val contributors = featureRegistry.getAudioContributors()
             val count = contributors.size
             for (i in 0 until count) {
-                contributors[i].render(currentTimelineFrame, BLOCK_FRAMES, outBlock)
+                try {
+                    contributors[i].render(currentTimelineFrame, BLOCK_FRAMES, outBlock)
+                } catch (_: Throwable) {}
             }
 
             // Write blocking to AudioTrack; naturally paces the loop to audio rate (10 ms)
@@ -139,6 +141,7 @@ class AudioEngine(
         @Volatile private var startMediaUs: Long = 0L
         @Volatile private var startWallNanos: Long = 0L
         @Volatile private var lastReportedTimeUs: Long = 0L
+        @Volatile private var lastFrameTimeNanos: Long = 0L
         @Volatile private var sessionBaseFramePos: Long = -1L
         @Volatile private var hasValidHardwareTimestamp: Boolean = false
 
@@ -155,6 +158,7 @@ class AudioEngine(
                 startMediaUs = fromUs
                 startWallNanos = System.nanoTime()
                 lastReportedTimeUs = fromUs
+                lastFrameTimeNanos = 0L
                 sessionBaseFramePos = -1L
                 hasValidHardwareTimestamp = false
 
@@ -189,6 +193,15 @@ class AudioEngine(
                 return lastReportedTimeUs
             }
 
+            // Continuous monotonic vsync pacing
+            val dtNanos = if (lastFrameTimeNanos > 0L) {
+                (frameTimeNanos - lastFrameTimeNanos).coerceIn(0L, 50_000_000L)
+            } else {
+                16_666_667L
+            }
+            lastFrameTimeNanos = frameTimeNanos
+            val vsyncExpectedTimeUs = lastReportedTimeUs + (dtNanos / 1000L)
+
             // Query hardware presentation timestamp
             val hasTs = try {
                 audioTrack.getTimestamp(audioTimestamp)
@@ -208,8 +221,13 @@ class AudioEngine(
                     val currentHardwareFrames = playedFrames + (elapsedNanosSinceTs * SAMPLE_RATE / NANOS_PER_SECOND)
                     val hardwareTimeUs = startMediaUs + (currentHardwareFrames * US_PER_SECOND / SAMPLE_RATE)
 
-                    // Guarantee strictly monotonic progression: no backward jitters
-                    val computedTimeUs = maxOf(lastReportedTimeUs, hardwareTimeUs)
+                    // Fix 2: If AudioTrack momentarily waits or underruns at a cut boundary,
+                    // keep advancing smoothly at vsync rate rather than freezing the playhead!
+                    val computedTimeUs = if (hardwareTimeUs >= lastReportedTimeUs) {
+                        maxOf(vsyncExpectedTimeUs, hardwareTimeUs)
+                    } else {
+                        vsyncExpectedTimeUs
+                    }
                     lastReportedTimeUs = computedTimeUs
                     hasValidHardwareTimestamp = true
                     return computedTimeUs
@@ -219,7 +237,7 @@ class AudioEngine(
             // Warmup fallback: monotonic wall-clock extrapolation until AudioTrack stabilizes
             val elapsedWallNanos = maxOf(0L, frameTimeNanos - startWallNanos)
             val wallTimeUs = startMediaUs + (elapsedWallNanos / 1000L)
-            val computedTimeUs = maxOf(lastReportedTimeUs, wallTimeUs)
+            val computedTimeUs = maxOf(vsyncExpectedTimeUs, maxOf(lastReportedTimeUs, wallTimeUs))
             lastReportedTimeUs = computedTimeUs
             return computedTimeUs
         }

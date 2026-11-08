@@ -192,11 +192,11 @@ class PreviewRenderer(
 
     private var frameSourceA: FrameSource? = null
     private var frameSourceB: FrameSource? = null
-    private var prefetchSource: FrameSource? = null
 
     private var currentClipIndexA: Int = -1
     private var currentClipIndexB: Int = -1
-    private var prefetchClipIndex: Int = -1
+    private var primarySlot: Int = 0 // 0 = Slot A (stA / texAId), 1 = Slot B (stB / texBId)
+    private var standbySlotReadyForClipId: String? = null
 
     // Pre-allocated arrays and structures (Rule R10: Zero heap allocations on hot path)
     @Volatile var trimPreviewTimeUs: Long = -1L
@@ -216,7 +216,6 @@ class PreviewRenderer(
     private var contributorLaneMap: Array<IntArray> = emptyArray()
 
     private val prefetchers = mutableListOf<Prefetcher>()
-    @Volatile private var isPrefetching = false
     private val hasPendingSurfaceFrameA = AtomicBoolean(false)
     private val hasPendingSurfaceFrameB = AtomicBoolean(false)
 
@@ -226,27 +225,6 @@ class PreviewRenderer(
         prefetchersProvider = { prefetchers },
         onVideoDecoderPrefetch = { clipIndex, sourceUs ->
             onVideoDecoderPrefetch?.invoke(clipIndex, sourceUs)
-            val stB = surfaceTextureB
-            val s = holder.current
-            if (stB != null && clipIndex in s.project.clips.indices && activeSet.bIndex < 0) {
-                if (!isPrefetching && (prefetchSource == null || prefetchClipIndex != clipIndex)) {
-                    isPrefetching = true
-                    try {
-                        prefetchClipIndex = clipIndex
-                        val nextClip = s.project.clips[clipIndex]
-                        prefetchSource?.release()
-                        prefetchSource = FrameSource(toLegacyClip(nextClip), stB).apply {
-                            prepare()
-                            seekTo(sourceUs)
-                        }
-                    } catch (_: Throwable) {
-                        prefetchSource = null
-                        prefetchClipIndex = -1
-                    } finally {
-                        isPrefetching = false
-                    }
-                }
-            }
         }
     )
 
@@ -464,67 +442,56 @@ class PreviewRenderer(
                 playhead.mode == PlayMode.SCRUBBING ||
                 playhead.mode == PlayMode.FLINGING
 
-        // 1. FrameSource A (Strictly bound to stA / texAId)
-        val clipAChanged = frameSourceA == null ||
-                currentClipIndexA != frame.clipAIndex ||
-                frameSourceA?.clip?.path != clipA.path
-
-        if (clipAChanged) {
-            frameSourceA?.release()
-            // If prefetchSource was on stB for this clip, release it to free hardware decoder
-            if (prefetchSource != null && prefetchClipIndex == frame.clipAIndex) {
-                prefetchSource?.release()
-                prefetchSource = null
-                prefetchClipIndex = -1
-            }
-            val legacyClipA = toLegacyClip(clipA)
-            frameSourceA = FrameSource(legacyClipA, stA).apply {
-                prepare()
-                seekTo(frame.clipASourceUs, fastKeyframeOnly = isScrubbing)
-            }
-            currentClipIndexA = frame.clipAIndex
-            hasPendingSurfaceFrameA.set(false)
-            try {
-                stA.updateTexImage()
-                stA.getTransformMatrix(matA)
-            } catch (_: Exception) {}
-        } else {
-            val renderedA = try {
-                frameSourceA?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
-            } catch (_: Exception) { false }
-
-            if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
-                try {
-                    stA.updateTexImage()
-                    stA.getTransformMatrix(matA)
-                } catch (_: Exception) {}
-            }
+        if (isScrubbing) {
+            standbySlotReadyForClipId = null
         }
 
-        calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
-
-        // 2. Handle Transition and FrameSource B (Strictly bound to stB / texBId)
+        // Case 1: Active transition between Clip A and Clip B
         if (frame.isTransition && frame.clipBIndex >= 0) {
             val clipB = s.project.clips.getOrNull(frame.clipBIndex)
             if (clipB != null) {
+                // Ensure Clip A is on Slot A
+                val clipAChanged = frameSourceA == null ||
+                        currentClipIndexA != frame.clipAIndex ||
+                        frameSourceA?.clip?.path != clipA.path
+
+                if (clipAChanged) {
+                    frameSourceA?.release()
+                    val legacyClipA = toLegacyClip(clipA)
+                    frameSourceA = FrameSource(legacyClipA, stA).apply {
+                        prepare()
+                        seekTo(frame.clipASourceUs, fastKeyframeOnly = isScrubbing)
+                    }
+                    currentClipIndexA = frame.clipAIndex
+                    hasPendingSurfaceFrameA.set(false)
+                    try {
+                        stA.updateTexImage()
+                        stA.getTransformMatrix(matA)
+                    } catch (_: Exception) {}
+                } else {
+                    val renderedA = try {
+                        frameSourceA?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
+                    } catch (_: Exception) { false }
+                    if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
+                        try {
+                            stA.updateTexImage()
+                            stA.getTransformMatrix(matA)
+                        } catch (_: Exception) {}
+                    }
+                }
+                calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
+
+                // Ensure Clip B is on Slot B
                 val clipBChanged = frameSourceB == null ||
                         currentClipIndexB != frame.clipBIndex ||
                         frameSourceB?.clip?.path != clipB.path
 
                 if (clipBChanged) {
                     frameSourceB?.release()
-                    // If prefetchSource was prepared on stB for this exact clip, reuse it for frameSourceB
-                    if (prefetchSource != null && prefetchClipIndex == frame.clipBIndex) {
-                        frameSourceB = prefetchSource
-                        prefetchSource = null
-                        prefetchClipIndex = -1
-                        frameSourceB?.seekTo(frame.clipBSourceUs, fastKeyframeOnly = isScrubbing)
-                    } else {
-                        val legacyClipB = toLegacyClip(clipB)
-                        frameSourceB = FrameSource(legacyClipB, stB).apply {
-                            prepare()
-                            seekTo(frame.clipBSourceUs, fastKeyframeOnly = isScrubbing)
-                        }
+                    val legacyClipB = toLegacyClip(clipB)
+                    frameSourceB = FrameSource(legacyClipB, stB).apply {
+                        prepare()
+                        seekTo(frame.clipBSourceUs, fastKeyframeOnly = isScrubbing)
                     }
                     currentClipIndexB = frame.clipBIndex
                     hasPendingSurfaceFrameB.set(false)
@@ -536,7 +503,6 @@ class PreviewRenderer(
                     val renderedB = try {
                         frameSourceB?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing) == true
                     } catch (_: Exception) { false }
-
                     if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
                         try {
                             stB.updateTexImage()
@@ -544,39 +510,232 @@ class PreviewRenderer(
                         } catch (_: Exception) {}
                     }
                 }
-
                 calculateCropInto(clipB.displayWidth, clipB.displayHeight, cropB)
+
+                val easedP = ProgramTimeline.ease(frame.linearP)
+                val legacyType = when (frame.transitionType) {
+                    TransitionType.NONE -> com.flowcut.app.model.TransitionType.NONE
+                    TransitionType.SLIDE -> com.flowcut.app.model.TransitionType.SLIDE
+                    TransitionType.CIRCLE -> com.flowcut.app.model.TransitionType.CIRCLE
+                    TransitionType.ZOOM -> com.flowcut.app.model.TransitionType.ZOOM
+                    TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
+                }
+
+                try {
+                    renderer.draw(
+                        DrawSpec(
+                            type = legacyType,
+                            easedP = easedP,
+                            matA = matA,
+                            matB = matB,
+                            cropA = cropA,
+                            cropB = cropB
+                        )
+                    )
+                } catch (_: Exception) {}
+
+                // Transition completes into Slot B as primary
+                primarySlot = 1
+                standbySlotReadyForClipId = null
+                return
+            }
+        }
+
+        // Case 2: Single clip playback with Ping-Pong Primary & Standby Slots (Hard Cut)
+        // 0ms Instant Cut Handover at the Boundary:
+        if (primarySlot == 0) {
+            if (standbySlotReadyForClipId == clipA.id && frameSourceB != null && currentClipIndexB == frame.clipAIndex) {
+                primarySlot = 1
+                standbySlotReadyForClipId = null
+                frameSourceA?.release()
+                frameSourceA = null
+                currentClipIndexA = -1
             }
         } else {
-            if (frameSourceB != null) {
+            if (standbySlotReadyForClipId == clipA.id && frameSourceA != null && currentClipIndexA == frame.clipAIndex) {
+                primarySlot = 0
+                standbySlotReadyForClipId = null
                 frameSourceB?.release()
                 frameSourceB = null
                 currentClipIndexB = -1
             }
         }
 
-        // 3. Draw with TransitionRenderer
-        val easedP = ProgramTimeline.ease(frame.linearP)
-        val legacyType = when (frame.transitionType) {
-            TransitionType.NONE -> com.flowcut.app.model.TransitionType.NONE
-            TransitionType.SLIDE -> com.flowcut.app.model.TransitionType.SLIDE
-            TransitionType.CIRCLE -> com.flowcut.app.model.TransitionType.CIRCLE
-            TransitionType.ZOOM -> com.flowcut.app.model.TransitionType.ZOOM
-            TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
-        }
+        val nextIndex = frame.clipAIndex + 1
 
-        try {
-            renderer.draw(
-                DrawSpec(
-                    type = legacyType,
-                    easedP = easedP,
-                    matA = matA,
-                    matB = matB,
-                    cropA = cropA,
-                    cropB = cropB
+        if (primarySlot == 0) {
+            // --- Slot A is Primary (stA / texAId) ---
+            val clipAChanged = frameSourceA == null ||
+                    currentClipIndexA != frame.clipAIndex ||
+                    frameSourceA?.clip?.path != clipA.path
+
+            if (clipAChanged) {
+                frameSourceA?.release()
+                val legacyClipA = toLegacyClip(clipA)
+                frameSourceA = FrameSource(legacyClipA, stA).apply {
+                    prepare()
+                    seekTo(frame.clipASourceUs, fastKeyframeOnly = isScrubbing)
+                }
+                currentClipIndexA = frame.clipAIndex
+                hasPendingSurfaceFrameA.set(false)
+                try {
+                    stA.updateTexImage()
+                    stA.getTransformMatrix(matA)
+                } catch (_: Exception) {}
+            } else {
+                val renderedA = try {
+                    frameSourceA?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
+                } catch (_: Exception) { false }
+
+                if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
+                    try {
+                        stA.updateTexImage()
+                        stA.getTransformMatrix(matA)
+                    } catch (_: Exception) {}
+                }
+            }
+            calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
+
+            // Standby Slot B: 3-Stage Incremental Pre-warm of next clip within 600ms
+            if (nextIndex in s.project.clips.indices && !isScrubbing && playhead.mode == PlayMode.PLAYING) {
+                val clipEndUs = msToUs(s.main.endMs[frame.clipAIndex])
+                val remainingUs = clipEndUs - frame.tUs
+                if (remainingUs in 0L..600_000L) {
+                    val nextClip = s.project.clips[nextIndex]
+                    if (standbySlotReadyForClipId != nextClip.id) {
+                        if (frameSourceB == null || currentClipIndexB != nextIndex || frameSourceB?.clip?.path != nextClip.path) {
+                            frameSourceB?.release()
+                            frameSourceB = FrameSource(toLegacyClip(nextClip), stB)
+                            currentClipIndexB = nextIndex
+                        }
+                        val fsB = frameSourceB
+                        if (fsB != null) {
+                            val nextClipInUs = nextClip.map().inUs
+                            when (fsB.prewarmStage) {
+                                0 -> fsB.prepareExtractorOnly()
+                                1 -> fsB.startCodecAndSeek(nextClipInUs)
+                                2 -> {
+                                    val ready = fsB.stepPrewarmTo(nextClipInUs)
+                                    if (ready) {
+                                        hasPendingSurfaceFrameB.set(false)
+                                        try {
+                                            stB.updateTexImage()
+                                            stB.getTransformMatrix(matB)
+                                        } catch (_: Exception) {}
+                                        calculateCropInto(nextClip.displayWidth, nextClip.displayHeight, cropB)
+                                        standbySlotReadyForClipId = nextClip.id
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (!isScrubbing && standbySlotReadyForClipId != null && nextIndex !in s.project.clips.indices) {
+                frameSourceB?.release()
+                frameSourceB = null
+                currentClipIndexB = -1
+                standbySlotReadyForClipId = null
+            }
+
+            try {
+                renderer.draw(
+                    DrawSpec(
+                        type = com.flowcut.app.model.TransitionType.NONE,
+                        easedP = 0.0f,
+                        matA = matA,
+                        matB = matB,
+                        cropA = cropA,
+                        cropB = cropB
+                    )
                 )
-            )
-        } catch (_: Exception) {}
+            } catch (_: Exception) {}
+        } else {
+            // --- Slot B is Primary (stB / texBId) ---
+            val clipBChanged = frameSourceB == null ||
+                    currentClipIndexB != frame.clipAIndex ||
+                    frameSourceB?.clip?.path != clipA.path
+
+            if (clipBChanged) {
+                frameSourceB?.release()
+                val legacyClipA = toLegacyClip(clipA)
+                frameSourceB = FrameSource(legacyClipA, stB).apply {
+                    prepare()
+                    seekTo(frame.clipASourceUs, fastKeyframeOnly = isScrubbing)
+                }
+                currentClipIndexB = frame.clipAIndex
+                hasPendingSurfaceFrameB.set(false)
+                try {
+                    stB.updateTexImage()
+                    stB.getTransformMatrix(matB)
+                } catch (_: Exception) {}
+            } else {
+                val renderedB = try {
+                    frameSourceB?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
+                } catch (_: Exception) { false }
+
+                if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
+                    try {
+                        stB.updateTexImage()
+                        stB.getTransformMatrix(matB)
+                    } catch (_: Exception) {}
+                }
+            }
+            calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropB)
+
+            // Standby Slot A: 3-Stage Incremental Pre-warm of next clip within 600ms
+            if (nextIndex in s.project.clips.indices && !isScrubbing && playhead.mode == PlayMode.PLAYING) {
+                val clipEndUs = msToUs(s.main.endMs[frame.clipAIndex])
+                val remainingUs = clipEndUs - frame.tUs
+                if (remainingUs in 0L..600_000L) {
+                    val nextClip = s.project.clips[nextIndex]
+                    if (standbySlotReadyForClipId != nextClip.id) {
+                        if (frameSourceA == null || currentClipIndexA != nextIndex || frameSourceA?.clip?.path != nextClip.path) {
+                            frameSourceA?.release()
+                            frameSourceA = FrameSource(toLegacyClip(nextClip), stA)
+                            currentClipIndexA = nextIndex
+                        }
+                        val fsA = frameSourceA
+                        if (fsA != null) {
+                            val nextClipInUs = nextClip.map().inUs
+                            when (fsA.prewarmStage) {
+                                0 -> fsA.prepareExtractorOnly()
+                                1 -> fsA.startCodecAndSeek(nextClipInUs)
+                                2 -> {
+                                    val ready = fsA.stepPrewarmTo(nextClipInUs)
+                                    if (ready) {
+                                        hasPendingSurfaceFrameA.set(false)
+                                        try {
+                                            stA.updateTexImage()
+                                            stA.getTransformMatrix(matA)
+                                        } catch (_: Exception) {}
+                                        calculateCropInto(nextClip.displayWidth, nextClip.displayHeight, cropA)
+                                        standbySlotReadyForClipId = nextClip.id
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (!isScrubbing && standbySlotReadyForClipId != null && nextIndex !in s.project.clips.indices) {
+                frameSourceA?.release()
+                frameSourceA = null
+                currentClipIndexA = -1
+                standbySlotReadyForClipId = null
+            }
+
+            try {
+                renderer.draw(
+                    DrawSpec(
+                        type = com.flowcut.app.model.TransitionType.FADE,
+                        easedP = 1.0f,
+                        matA = matA,
+                        matB = matB,
+                        cropA = cropA,
+                        cropB = cropB
+                    )
+                )
+            } catch (_: Exception) {}
+        }
     }
 
     private fun releaseDecoders() {
@@ -588,9 +747,8 @@ class PreviewRenderer(
         frameSourceB = null
         currentClipIndexB = -1
 
-        prefetchSource?.release()
-        prefetchSource = null
-        prefetchClipIndex = -1
+        primarySlot = 0
+        standbySlotReadyForClipId = null
     }
 
     fun release() {
