@@ -165,8 +165,8 @@ class PlaybackControllerTest {
 
         // --- Part D: Velocity below threshold transitions directly to PAUSED ---
         controller.beginScrub()
-        // 10 px/s is below threshold 20 px/s
-        controller.endScrub(velocityUsPerSec = 10.0, pxPerUs = 1.0)
+        // 2 px/s is below threshold 4.0 px/s
+        controller.endScrub(velocityUsPerSec = 2.0, pxPerUs = 1.0)
         assertEquals("Low velocity must not fling; transitions to PAUSED", PlayMode.PAUSED, controller.playhead.mode)
     }
 

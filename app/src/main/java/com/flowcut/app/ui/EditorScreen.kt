@@ -144,6 +144,9 @@ fun EditorScreen(
     }
 
     val frameDriver = remember(playbackController, previewRenderer) {
+        var lastReportedSec = -1L
+        var lastReportedMode = PlayMode.PAUSED
+
         FrameDriver(
             controller = playbackController,
             frameTick = frameTick,
@@ -151,11 +154,21 @@ fun EditorScreen(
                 val tUs = playbackController.playhead.timeUs
                 val tMs = usToMs(tUs)
                 val curSec = tMs / 1000L
-                if (curSec != displayedMs.longValue / 1000L) {
-                    displayedMs.longValue = tMs
+                val mode = playbackController.playhead.mode
+
+                // 1. Local fast state: updates on every frame for instant timecode display
+                displayedMs.longValue = tMs
+
+                // 2. ViewModel state: throttle to whole seconds, or emit when scrubbing/flinging completes.
+                // Prevents full-screen Compose recomposition storms at 60-120fps during drag!
+                val stoppedMoving = (lastReportedMode == PlayMode.SCRUBBING || lastReportedMode == PlayMode.FLINGING) && mode == PlayMode.PAUSED
+                if (curSec != lastReportedSec || stoppedMoving) {
+                    lastReportedSec = curSec
                     onPlayheadUpdateState.value.invoke(tMs)
                 }
-                if (isPlayingState.value && playbackController.playhead.mode != PlayMode.PLAYING) {
+                lastReportedMode = mode
+
+                if (isPlayingState.value && mode != PlayMode.PLAYING) {
                     onPlaybackStateChangeState.value.invoke(false)
                 }
                 previewRenderer.requestRender()
@@ -174,10 +187,6 @@ fun EditorScreen(
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             if (playbackController.playhead.mode != PlayMode.PLAYING) {
-                val totalMs = snapshotHolder.current.totalMs
-                if (totalMs > 0L && playbackController.playhead.timeUs >= msToUs(totalMs)) {
-                    playbackController.seekTo(0L)
-                }
                 playbackController.play()
                 frameDriver.wake()
             }
@@ -186,15 +195,6 @@ fun EditorScreen(
                 playbackController.pause()
                 frameDriver.wake()
             }
-        }
-    }
-
-    LaunchedEffect(currentMs) {
-        displayedMs.longValue = currentMs
-        val targetUs = msToUs(currentMs)
-        if (kotlin.math.abs(playbackController.playhead.timeUs - targetUs) > 1000L && playbackController.playhead.mode != PlayMode.PLAYING) {
-            playbackController.seekTo(targetUs)
-            frameDriver.wake()
         }
     }
 
@@ -281,7 +281,7 @@ fun EditorScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // 4. Timeline block: 140 dp (New Core TimelineCanvas or legacy TimelineBlock)
+                // 4. Timeline block: 240 dp (New Core TimelineCanvas or legacy TimelineBlock)
                 if (USE_NEW_CORE) {
                     val selection = remember(selectedClipIndex, selectedJunctionIndex) {
                         selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
@@ -291,7 +291,7 @@ fun EditorScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(140.dp)
+                            .height(240.dp)
                             .background(colors.surface1, RoundedCornerShape(8.dp))
                     ) {
                         TimelineCanvas(

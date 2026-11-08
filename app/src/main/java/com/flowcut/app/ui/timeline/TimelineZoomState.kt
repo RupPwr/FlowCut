@@ -14,7 +14,7 @@ class TimelineZoomState(
     companion object {
         const val MIN_DP_PER_SECOND = 0.4    // Fits 15 min (900s) on screen
         const val MAX_DP_PER_SECOND = 400.0  // Maximum zoom
-        const val DEFAULT_DP_PER_SECOND = 50.0
+        const val DEFAULT_DP_PER_SECOND = 75.0
         private val US_PER_SECOND = TimeUnit.SECONDS.toMicros(1L).toDouble()
     }
 
@@ -28,6 +28,25 @@ class TimelineZoomState(
     fun pxPerSecond(density: Float): Double = dpPerSecond * density
 
     fun pxPerUs(density: Float): Double = pxPerSecond(density) / US_PER_SECOND
+
+    /**
+     * Converts time (us) to Canvas X pixel position using precomputed offsetPx and integer halfWidthPx.
+     * Prevents redundant recalculations on the hot path (Rule R10 & Section 8).
+     */
+    fun timeUsToX(tUs: Long, offsetPx: Long, halfWidthPx: Int, pxUs: Double): Float {
+        val itemPx = Math.round(tUs * pxUs)
+        return (itemPx - offsetPx + halfWidthPx).toFloat()
+    }
+
+    /**
+     * Converts Canvas X pixel position to timeline time (us) using precomputed offsetPx and integer halfWidthPx.
+     */
+    fun xToTimeUs(x: Float, offsetPx: Long, halfWidthPx: Int, pxUs: Double): Long {
+        if (pxUs <= 0.0) return 0L
+        val targetPx = x - halfWidthPx + offsetPx
+        val targetUs = Math.round(targetPx / pxUs)
+        return targetUs.coerceAtLeast(0L)
+    }
 
     /**
      * Converts time (us) to Canvas X pixel position.

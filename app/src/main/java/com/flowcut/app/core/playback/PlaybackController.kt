@@ -2,7 +2,6 @@ package com.flowcut.app.core.playback
 
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.timeline.SnapshotHolder
-import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.exp
 
@@ -16,8 +15,8 @@ class PlaybackController(
     private val holder: SnapshotHolder = SnapshotHolder()
 ) {
     companion object {
-        const val FLING_DECAY = 3.0
-        const val MIN_FLING_VELOCITY_PX_PER_SEC = 20.0
+        const val FLING_DECAY = 1.8
+        const val MIN_FLING_VELOCITY_PX_PER_SEC = 4.0
         private const val MAX_DT_SECONDS = 0.05
     }
 
@@ -35,7 +34,8 @@ class PlaybackController(
 
     private var flingVelocityUsPerSec: Double = 0.0
     private var flingPxPerUs: Double = 1.0
-    private var lastFrameTimeNanos: Long = -1L
+    private var lastFlingFrameNanos: Long = 0L
+    private var flingRemainderUs: Double = 0.0
 
     val totalUs: Long get() = msToUs(holder.current.totalMs)
 
@@ -55,12 +55,20 @@ class PlaybackController(
             state.mode = PlayMode.PAUSED
             state.generation++
             flingVelocityUsPerSec = 0.0
-            lastFrameTimeNanos = -1L
+            lastFlingFrameNanos = 0L
+            flingRemainderUs = 0.0
         }
     }
 
     fun seekTo(us: Long) {
         pendingSeekUs = us
+        if (state.mode == PlayMode.FLINGING) {
+            state.mode = PlayMode.PAUSED
+            state.generation++
+            flingVelocityUsPerSec = 0.0
+            lastFlingFrameNanos = 0L
+            flingRemainderUs = 0.0
+        }
     }
 
     fun beginScrub() {
@@ -69,9 +77,11 @@ class PlaybackController(
         }
         state.mode = PlayMode.SCRUBBING
         state.generation++
+        pendingSeekUs = null
         accumulatedScrubDeltaUs = 0L
         flingVelocityUsPerSec = 0.0
-        lastFrameTimeNanos = -1L
+        lastFlingFrameNanos = 0L
+        flingRemainderUs = 0.0
     }
 
     fun scrubBy(deltaUs: Long) {
@@ -82,14 +92,16 @@ class PlaybackController(
         if (abs(velocityUsPerSec) * pxPerUs >= MIN_FLING_VELOCITY_PX_PER_SEC) {
             flingVelocityUsPerSec = velocityUsPerSec
             flingPxPerUs = pxPerUs
-            lastFrameTimeNanos = -1L
+            lastFlingFrameNanos = 0L
+            flingRemainderUs = 0.0
             state.mode = PlayMode.FLINGING
             state.generation++
         } else {
             state.mode = PlayMode.PAUSED
             state.generation++
             flingVelocityUsPerSec = 0.0
-            lastFrameTimeNanos = -1L
+            lastFlingFrameNanos = 0L
+            flingRemainderUs = 0.0
         }
     }
 
@@ -113,20 +125,24 @@ class PlaybackController(
             state.generation++
             if (state.mode == PlayMode.PLAYING) {
                 clock.start(clampedSeek)
-            } else if (state.mode == PlayMode.FLINGING) {
+            } else {
                 state.mode = PlayMode.PAUSED
                 flingVelocityUsPerSec = 0.0
-                lastFrameTimeNanos = -1L
+                lastFlingFrameNanos = 0L
+                flingRemainderUs = 0.0
             }
         }
 
         // 2. Mode updates
         when (state.mode) {
             PlayMode.PAUSED -> {
-                lastFrameTimeNanos = -1L
+                lastFlingFrameNanos = 0L
+                flingRemainderUs = 0.0
             }
 
             PlayMode.PLAYING -> {
+                lastFlingFrameNanos = 0L
+                flingRemainderUs = 0.0
                 val newTimeUs = clock.timeUsAt(frameTimeNanos).coerceIn(0L, currentTotal)
                 state.timeUs = newTimeUs
                 if (newTimeUs >= currentTotal) {
@@ -134,34 +150,35 @@ class PlaybackController(
                     state.mode = PlayMode.PAUSED
                     state.generation++
                 }
-                lastFrameTimeNanos = -1L
             }
 
             PlayMode.SCRUBBING -> {
+                lastFlingFrameNanos = 0L
+                flingRemainderUs = 0.0
                 val delta = accumulatedScrubDeltaUs
                 if (delta != 0L) {
                     accumulatedScrubDeltaUs = 0L
                     state.timeUs = (state.timeUs + delta).coerceIn(0L, currentTotal)
                 }
-                lastFrameTimeNanos = -1L
             }
 
             PlayMode.FLINGING -> {
-                if (lastFrameTimeNanos < 0L) {
-                    lastFrameTimeNanos = frameTimeNanos
-                    return
+                // Bug #1 fix: First frame uses standard 1/60s dt, subsequent frames clamp dt to [0.001..0.050]
+                val dtSeconds: Double = if (lastFlingFrameNanos == 0L) {
+                    lastFlingFrameNanos = frameTimeNanos
+                    1.0 / 60.0
+                } else {
+                    val dt = (frameTimeNanos - lastFlingFrameNanos).toDouble() / 1_000_000_000.0
+                    lastFlingFrameNanos = frameTimeNanos
+                    dt.coerceIn(0.001, MAX_DT_SECONDS)
                 }
 
-                val dtNanos = frameTimeNanos - lastFrameTimeNanos
-                lastFrameTimeNanos = frameTimeNanos
-                if (dtNanos <= 0L) return
-
-                val dtSeconds = dtNanos.toDouble() / TimeUnit.SECONDS.toNanos(1L).toDouble()
-                val clampedDt = if (dtSeconds > MAX_DT_SECONDS) MAX_DT_SECONDS else dtSeconds
-
-                val decay = exp(-FLING_DECAY * clampedDt)
+                val decay = exp(-FLING_DECAY * dtSeconds)
                 flingVelocityUsPerSec *= decay
-                val deltaUs = (flingVelocityUsPerSec * clampedDt).toLong()
+
+                val rawDeltaUs = (flingVelocityUsPerSec * dtSeconds) + flingRemainderUs
+                val deltaUs = Math.round(rawDeltaUs)
+                flingRemainderUs = rawDeltaUs - deltaUs
                 val nextTimeUs = state.timeUs + deltaUs
 
                 if (nextTimeUs <= 0L) {
@@ -169,24 +186,26 @@ class PlaybackController(
                     state.mode = PlayMode.PAUSED
                     state.generation++
                     flingVelocityUsPerSec = 0.0
-                    lastFrameTimeNanos = -1L
+                    lastFlingFrameNanos = 0L
+                    flingRemainderUs = 0.0
                 } else if (nextTimeUs >= currentTotal) {
                     state.timeUs = currentTotal
                     state.mode = PlayMode.PAUSED
                     state.generation++
                     flingVelocityUsPerSec = 0.0
-                    lastFrameTimeNanos = -1L
+                    lastFlingFrameNanos = 0L
+                    flingRemainderUs = 0.0
                 } else {
                     state.timeUs = nextTimeUs
                     if (abs(flingVelocityUsPerSec) * flingPxPerUs < MIN_FLING_VELOCITY_PX_PER_SEC) {
                         state.mode = PlayMode.PAUSED
                         state.generation++
                         flingVelocityUsPerSec = 0.0
-                        lastFrameTimeNanos = -1L
+                        lastFlingFrameNanos = 0L
+                        flingRemainderUs = 0.0
                     }
                 }
             }
         }
     }
 }
-

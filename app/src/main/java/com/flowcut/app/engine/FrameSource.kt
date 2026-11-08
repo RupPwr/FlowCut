@@ -31,6 +31,8 @@ class FrameSource(
     private var currentMime: String = ""
     private var lastSeekTargetUs: Long = -1L
     private var lastKeyframePtsUs: Long = -1L
+    private var lastRenderedLocalUs: Long = -1L
+    private var isAccuratePausedFrameLatched: Boolean = false
 
     fun prepare() {
         if (isPrepared) return
@@ -86,6 +88,8 @@ class FrameSource(
             currentPtsUs = -1L
             lastSeekTargetUs = -1L
             lastKeyframePtsUs = -1L
+            lastRenderedLocalUs = -1L
+            isAccuratePausedFrameLatched = false
         } catch (e: Exception) {
             isPrepared = false
         }
@@ -160,6 +164,10 @@ class FrameSource(
                         currentPtsUs = pts
                         lastKeyframePtsUs = pts
                         rendered = true
+                        lastRenderedLocalUs = localUs
+                        if (!fastKeyframeOnly) {
+                            isAccuratePausedFrameLatched = true
+                        }
                     } else {
                         dec.releaseOutputBuffer(outIndex, false)
                         currentPtsUs = pts
@@ -181,6 +189,7 @@ class FrameSource(
         try {
             // Case 1: Scrubbing / Flinging mode
             if (isScrubbing) {
+                isAccuratePausedFrameLatched = false
                 // If we already rendered near this target, skip to avoid spamming
                 if (currentPtsUs != -1L && kotlin.math.abs(localUs - currentPtsUs) <= 30_000L) {
                     return false
@@ -189,10 +198,19 @@ class FrameSource(
                 if (lastSeekTargetUs != -1L && kotlin.math.abs(localUs - lastSeekTargetUs) <= 80_000L && currentPtsUs != -1L) {
                     return false
                 }
-                return seekTo(localUs, fastKeyframeOnly = true)
+                val didRender = seekTo(localUs, fastKeyframeOnly = true)
+                if (didRender) {
+                    lastRenderedLocalUs = localUs
+                }
+                return didRender
             }
 
             // Case 2: Playback / Paused mode
+            // If already accurately latched on this target in PAUSED mode, do zero work!
+            if (isAccuratePausedFrameLatched && localUs == lastRenderedLocalUs) {
+                return false
+            }
+
             val isInitial = currentPtsUs == -1L
             val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 50_000L
             // Huge forward jump (> 2.5s) outside GOP range
@@ -201,11 +219,18 @@ class FrameSource(
                     (lastSeekTargetUs == -1L || localUs > lastSeekTargetUs + 500_000L)
 
             if (isInitial || isBackwardJump || isHugeForwardJump) {
-                return seekTo(localUs, fastKeyframeOnly = false)
+                val didRender = seekTo(localUs, fastKeyframeOnly = false)
+                if (didRender) {
+                    lastRenderedLocalUs = localUs
+                    isAccuratePausedFrameLatched = true
+                }
+                return didRender
             }
 
-            // If current frame is already within half a frame (16ms) of target, keep it
+            // If current frame is already within half a frame (16ms) of target, latch it and keep it
             if (currentPtsUs in (localUs - 16_000L)..(localUs + 16_000L)) {
+                lastRenderedLocalUs = localUs
+                isAccuratePausedFrameLatched = true
                 return false
             }
 
@@ -247,6 +272,8 @@ class FrameSource(
                     if (pts >= localUs - 30_000L || outputEos) {
                         dec.releaseOutputBuffer(outIndex, true)
                         currentPtsUs = pts
+                        lastRenderedLocalUs = localUs
+                        isAccuratePausedFrameLatched = true
                         return true
                     } else {
                         // Drop intermediate frame to catch up rapidly without blocking GL
@@ -280,6 +307,8 @@ class FrameSource(
         currentPtsUs = -1L
         lastSeekTargetUs = -1L
         lastKeyframePtsUs = -1L
+        lastRenderedLocalUs = -1L
+        isAccuratePausedFrameLatched = false
 
         releaseExecutor.execute {
             try {

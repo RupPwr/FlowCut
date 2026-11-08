@@ -25,7 +25,7 @@ sealed interface TimelineSelection {
 object TimelineHitTester {
 
     const val JUNCTION_TOUCH_TARGET_DP = 48f
-    const val RULER_HEIGHT_DP = 32f
+    const val RULER_HEIGHT_DP = 22f
     const val MAIN_TRACK_HEIGHT_DP = 64f
     const val LANE_HEIGHT_DP = 40f
     const val LANES_PADDING_TOP_DP = 8f
