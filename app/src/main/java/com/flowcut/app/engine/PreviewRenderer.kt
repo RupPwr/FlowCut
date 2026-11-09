@@ -148,13 +148,15 @@ class PrefetchCoordinator(
             val tMs = usToMs(tUs)
             val currentClipIndex = s.main.lastStartAtOrBefore(tMs)
             val nextClipIndex = currentClipIndex + 1
-            if (nextClipIndex < s.main.n) {
-                val nextStartUs = msToUs(s.main.startMs[nextClipIndex])
-                if (tUs + windowUs >= nextStartUs) {
-                    val nextClip = s.project.clips[nextClipIndex]
-                    // Rule R11: compute source timestamp for next clip's start
-                    val sourceUs = nextClip.map().sourceUs(0L)
-                    onVideoDecoderPrefetch(nextClipIndex, sourceUs)
+            if (nextClipIndex < s.main.n && currentClipIndex in s.project.clips.indices) {
+                val currentClip = s.project.clips[currentClipIndex]
+                val nextClip = s.project.clips[nextClipIndex]
+                if (nextClip.path != currentClip.path) {
+                    val nextStartUs = msToUs(s.main.startMs[nextClipIndex])
+                    if (tUs + windowUs >= nextStartUs) {
+                        val sourceUs = nextClip.map().sourceUs(0L)
+                        onVideoDecoderPrefetch(nextClipIndex, sourceUs)
+                    }
                 }
             }
         }
@@ -197,6 +199,8 @@ class PreviewRenderer(
     private var currentClipIndexB: Int = -1
     private var primarySlot: Int = 0 // 0 = Slot A (stA / texAId), 1 = Slot B (stB / texBId)
     private var standbySlotReadyForClipId: String? = null
+    private var standbyPreparedPath: String? = null
+    private var standbyPreparedInUs: Long = -1L
 
     // Pre-allocated arrays and structures (Rule R10: Zero heap allocations on hot path)
     @Volatile var trimPreviewTimeUs: Long = -1L
@@ -261,15 +265,15 @@ class PreviewRenderer(
     }
 
     fun startPrefetch(scope: CoroutineScope) {
-        prefetchCoordinator.start(scope)
+        // Disabled: Standby slot in onDrawFrame handles pre-warming safely without extra decoders.
     }
 
     fun stopPrefetch() {
-        prefetchCoordinator.stop()
+        // Disabled
     }
 
     fun triggerPrefetch(windowUs: Long = 2_000_000L) {
-        prefetchCoordinator.triggerPrefetch(windowUs)
+        // Disabled
     }
 
     fun requestRender() {
@@ -444,6 +448,8 @@ class PreviewRenderer(
 
         if (isScrubbing) {
             standbySlotReadyForClipId = null
+            standbyPreparedPath = null
+            standbyPreparedInUs = -1L
         }
 
         // Case 1: Active transition between Clip A and Clip B
@@ -544,30 +550,30 @@ class PreviewRenderer(
         // Case 2: Single clip playback with Ping-Pong Primary & Standby Slots (Hard Cut)
         // 0ms Instant Cut Handover at the Boundary:
         if (primarySlot == 0) {
-            if (standbySlotReadyForClipId == clipA.id && frameSourceB != null && currentClipIndexB == frame.clipAIndex) {
+            if ((standbySlotReadyForClipId == clipA.id || standbyPreparedPath == clipA.path) && frameSourceB != null && frameSourceB?.currentPath == clipA.path) {
                 primarySlot = 1
                 standbySlotReadyForClipId = null
+                standbyPreparedPath = null
+                standbyPreparedInUs = -1L
                 frameSourceA?.release()
                 frameSourceA = null
                 currentClipIndexA = -1
             }
         } else {
-            if (standbySlotReadyForClipId == clipA.id && frameSourceA != null && currentClipIndexA == frame.clipAIndex) {
+            if ((standbySlotReadyForClipId == clipA.id || standbyPreparedPath == clipA.path) && frameSourceA != null && frameSourceA?.currentPath == clipA.path) {
                 primarySlot = 0
                 standbySlotReadyForClipId = null
+                standbyPreparedPath = null
+                standbyPreparedInUs = -1L
                 frameSourceB?.release()
                 frameSourceB = null
                 currentClipIndexB = -1
             }
         }
 
-        val nextIndex = frame.clipAIndex + 1
-
         if (primarySlot == 0) {
             // --- Slot A is Primary (stA / texAId) ---
-            val clipAChanged = frameSourceA == null ||
-                    currentClipIndexA != frame.clipAIndex ||
-                    frameSourceA?.clip?.path != clipA.path
+            val clipAChanged = frameSourceA == null || frameSourceA?.currentPath != clipA.path
 
             if (clipAChanged) {
                 frameSourceA?.release()
@@ -583,6 +589,7 @@ class PreviewRenderer(
                     stA.getTransformMatrix(matA)
                 } catch (_: Exception) {}
             } else {
+                currentClipIndexA = frame.clipAIndex
                 val renderedA = try {
                     frameSourceA?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
                 } catch (_: Exception) { false }
@@ -596,21 +603,28 @@ class PreviewRenderer(
             }
             calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
 
-            // Standby Slot B: 3-Stage Incremental Pre-warm of next clip within 600ms
-            if (nextIndex in s.project.clips.indices && !isScrubbing && playhead.mode == PlayMode.PLAYING) {
-                val clipEndUs = msToUs(s.main.endMs[frame.clipAIndex])
-                val remainingUs = clipEndUs - frame.tUs
-                if (remainingUs in 0L..600_000L) {
-                    val nextClip = s.project.clips[nextIndex]
-                    if (standbySlotReadyForClipId != nextClip.id) {
-                        if (frameSourceB == null || currentClipIndexB != nextIndex || frameSourceB?.clip?.path != nextClip.path) {
+            // Standby Slot B: 3-Stage Incremental Pre-warm of upcoming different-path clip within 500ms
+            var m = frame.clipAIndex + 1
+            while (m < s.project.clips.size && s.project.clips[m].path == clipA.path) {
+                m++
+            }
+
+            if (m in s.project.clips.indices && !isScrubbing && playhead.mode == PlayMode.PLAYING) {
+                val nextClip = s.project.clips[m]
+                val nextStartUs = msToUs(s.main.startMs[m])
+                val timeUntilClipMUs = nextStartUs - frame.tUs
+                if (timeUntilClipMUs in 1L..500_000L) {
+                    val nextClipInUs = nextClip.map().inUs
+                    val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
+                            (standbySlotReadyForClipId == nextClip.id)
+                    if (!alreadyPrepared) {
+                        if (frameSourceB == null || frameSourceB?.currentPath != nextClip.path) {
                             frameSourceB?.release()
                             frameSourceB = FrameSource(toLegacyClip(nextClip), stB)
-                            currentClipIndexB = nextIndex
+                            currentClipIndexB = m
                         }
                         val fsB = frameSourceB
                         if (fsB != null) {
-                            val nextClipInUs = nextClip.map().inUs
                             when (fsB.prewarmStage) {
                                 0 -> fsB.prepareExtractorOnly()
                                 1 -> fsB.startCodecAndSeek(nextClipInUs)
@@ -624,17 +638,21 @@ class PreviewRenderer(
                                         } catch (_: Exception) {}
                                         calculateCropInto(nextClip.displayWidth, nextClip.displayHeight, cropB)
                                         standbySlotReadyForClipId = nextClip.id
+                                        standbyPreparedPath = nextClip.path
+                                        standbyPreparedInUs = nextClipInUs
                                     }
                                 }
                             }
                         }
                     }
                 }
-            } else if (!isScrubbing && standbySlotReadyForClipId != null && nextIndex !in s.project.clips.indices) {
+            } else if (!isScrubbing && standbySlotReadyForClipId != null && m !in s.project.clips.indices) {
                 frameSourceB?.release()
                 frameSourceB = null
                 currentClipIndexB = -1
                 standbySlotReadyForClipId = null
+                standbyPreparedPath = null
+                standbyPreparedInUs = -1L
             }
 
             try {
@@ -651,9 +669,7 @@ class PreviewRenderer(
             } catch (_: Exception) {}
         } else {
             // --- Slot B is Primary (stB / texBId) ---
-            val clipBChanged = frameSourceB == null ||
-                    currentClipIndexB != frame.clipAIndex ||
-                    frameSourceB?.clip?.path != clipA.path
+            val clipBChanged = frameSourceB == null || frameSourceB?.currentPath != clipA.path
 
             if (clipBChanged) {
                 frameSourceB?.release()
@@ -669,6 +685,7 @@ class PreviewRenderer(
                     stB.getTransformMatrix(matB)
                 } catch (_: Exception) {}
             } else {
+                currentClipIndexB = frame.clipAIndex
                 val renderedB = try {
                     frameSourceB?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) == true
                 } catch (_: Exception) { false }
@@ -682,21 +699,28 @@ class PreviewRenderer(
             }
             calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropB)
 
-            // Standby Slot A: 3-Stage Incremental Pre-warm of next clip within 600ms
-            if (nextIndex in s.project.clips.indices && !isScrubbing && playhead.mode == PlayMode.PLAYING) {
-                val clipEndUs = msToUs(s.main.endMs[frame.clipAIndex])
-                val remainingUs = clipEndUs - frame.tUs
-                if (remainingUs in 0L..600_000L) {
-                    val nextClip = s.project.clips[nextIndex]
-                    if (standbySlotReadyForClipId != nextClip.id) {
-                        if (frameSourceA == null || currentClipIndexA != nextIndex || frameSourceA?.clip?.path != nextClip.path) {
+            // Standby Slot A: 3-Stage Incremental Pre-warm of upcoming different-path clip within 500ms
+            var m = frame.clipAIndex + 1
+            while (m < s.project.clips.size && s.project.clips[m].path == clipA.path) {
+                m++
+            }
+
+            if (m in s.project.clips.indices && !isScrubbing && playhead.mode == PlayMode.PLAYING) {
+                val nextClip = s.project.clips[m]
+                val nextStartUs = msToUs(s.main.startMs[m])
+                val timeUntilClipMUs = nextStartUs - frame.tUs
+                if (timeUntilClipMUs in 1L..500_000L) {
+                    val nextClipInUs = nextClip.map().inUs
+                    val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
+                            (standbySlotReadyForClipId == nextClip.id)
+                    if (!alreadyPrepared) {
+                        if (frameSourceA == null || frameSourceA?.currentPath != nextClip.path) {
                             frameSourceA?.release()
                             frameSourceA = FrameSource(toLegacyClip(nextClip), stA)
-                            currentClipIndexA = nextIndex
+                            currentClipIndexA = m
                         }
                         val fsA = frameSourceA
                         if (fsA != null) {
-                            val nextClipInUs = nextClip.map().inUs
                             when (fsA.prewarmStage) {
                                 0 -> fsA.prepareExtractorOnly()
                                 1 -> fsA.startCodecAndSeek(nextClipInUs)
@@ -710,17 +734,21 @@ class PreviewRenderer(
                                         } catch (_: Exception) {}
                                         calculateCropInto(nextClip.displayWidth, nextClip.displayHeight, cropA)
                                         standbySlotReadyForClipId = nextClip.id
+                                        standbyPreparedPath = nextClip.path
+                                        standbyPreparedInUs = nextClipInUs
                                     }
                                 }
                             }
                         }
                     }
                 }
-            } else if (!isScrubbing && standbySlotReadyForClipId != null && nextIndex !in s.project.clips.indices) {
+            } else if (!isScrubbing && standbySlotReadyForClipId != null && m !in s.project.clips.indices) {
                 frameSourceA?.release()
                 frameSourceA = null
                 currentClipIndexA = -1
                 standbySlotReadyForClipId = null
+                standbyPreparedPath = null
+                standbyPreparedInUs = -1L
             }
 
             try {

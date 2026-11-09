@@ -44,10 +44,11 @@ class ClipAudioContributor(
     private var isFirstBlockAfterStop: Boolean = true
     private var lastAIndex: Int = -1
     private var lastBIndex: Int = -1
+    private var lastPrewarmedKey: String? = null
 
     companion object {
         const val DECLICK_RAMP_FRAMES = 144 // 3 ms at 48,000 Hz
-        const val LOOKAHEAD_PREWARM_US = 2_000_000L // 2 seconds lookahead
+        const val LOOKAHEAD_PREWARM_US = 1_000_000L // 1 second lookahead
     }
 
     override fun render(startFrame: Long, frames: Int, out: FloatArray) {
@@ -70,60 +71,83 @@ class ClipAudioContributor(
                 return
             }
 
-            // Lookahead Pre-Warming: Trigger background decoding of next clip ahead of time
             val nextIndex = aIndex + 1
-            if (nextIndex in clips.indices) {
-                val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
-                val remainingUs = clipEndUs - startTimelineUs
-                if (remainingUs <= LOOKAHEAD_PREWARM_US) {
-                    val nextClip = clips[nextIndex]
-                    if (!decoders.containsKey(nextClip.path)) {
-                        prewarmClip(nextClip, nextClip.map().inUs)
+            val clipA = clips[aIndex]
+
+            // Lookahead Pre-Warming: Trigger background decoding of upcoming different-path clip within 1s
+            var m = aIndex + 1
+            while (m < clips.size && clips[m].path == clipA.path) {
+                m++
+            }
+            if (m in clips.indices) {
+                val nextClip = clips[m]
+                val nextStartUs = msToUs(snapshot.main.startMs[m])
+                val remainingUs = nextStartUs - startTimelineUs
+                if (remainingUs in 0L..LOOKAHEAD_PREWARM_US) {
+                    val targetInUs = nextClip.map().inUs
+                    val prewarmKey = "${nextClip.path}:$targetInUs"
+                    if (lastPrewarmedKey != prewarmKey) {
+                        lastPrewarmedKey = prewarmKey
+                        prewarmClip(nextClip, targetInUs)
                     }
                 }
             }
+
+            // Prune excess decoders to prevent hardware codec exhaustion (keep active + upcoming <= 3)
+            val activePaths = HashSet<String>(4)
+            activePaths.add(clipA.path)
+            if (bIndex in clips.indices) activePaths.add(clips[bIndex].path)
+            if (m in clips.indices) activePaths.add(clips[m].path)
+            pruneDecoders(activePaths)
 
             // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
             if (bIndex == -1 && nextIndex in clips.indices) {
-                val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
-                val blockDurationUs = (frames * 1000L) / 48L
-                val blockEndTimelineUs = startTimelineUs + blockDurationUs
+                val nextClip = clips[nextIndex]
+                val isSamePathContiguous = nextClip.path == clipA.path &&
+                        kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 5_000L
 
-                if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
-                    val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
-                    val framesAfterCut = frames - framesBeforeCut
+                if (!isSamePathContiguous) {
+                    val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
+                    val blockDurationUs = (frames * 1000L) / 48L
+                    val blockEndTimelineUs = startTimelineUs + blockDurationUs
 
-                    // 1. Render first N frames from Clip k
-                    if (framesBeforeCut > 0) {
-                        val clipA = clips[aIndex]
-                        val decoderA = decoders[clipA.path]
-                        if (decoderA != null) {
-                            val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
-                            val srcFrameA = usToAudioFrames(srcUsA)
-                            decoderA.read(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                    if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
+                        val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
+                        val framesAfterCut = frames - framesBeforeCut
+
+                        // 1. Render first N frames from Clip k
+                        if (framesBeforeCut > 0) {
+                            val decoderA = decoders[clipA.path]
+                            if (decoderA != null) {
+                                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                                val srcFrameA = usToAudioFrames(srcUsA)
+                                decoderA.read(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                            }
                         }
-                    }
 
-                    // 2. Render remaining (frames - N) frames from Clip k + 1
-                    if (framesAfterCut > 0) {
-                        val nextClip = clips[nextIndex]
-                        val decoderNext = decoders[nextClip.path]
-                        if (decoderNext != null) {
-                            val srcUsNext = nextClip.map().sourceUs(0L)
-                            val srcFrameNext = usToAudioFrames(srcUsNext)
-                            decoderNext.read(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
+                        // 2. Render remaining (frames - N) frames from Clip k + 1
+                        if (framesAfterCut > 0) {
+                            val decoderNext = decoders[nextClip.path]
+                            if (decoderNext != null) {
+                                val srcUsNext = nextClip.map().sourceUs(0L)
+                                val srcFrameNext = usToAudioFrames(srcUsNext)
+                                decoderNext.read(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
+                            }
                         }
-                    }
 
-                    lastAIndex = nextIndex
-                    lastBIndex = -1
-                    isFirstBlockAfterStop = false
-                    return
+                        lastAIndex = nextIndex
+                        lastBIndex = -1
+                        isFirstBlockAfterStop = false
+                        return
+                    }
                 }
             }
 
-            val clipA = clips[aIndex]
-            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1)
+            val isSamePathContiguous = lastAIndex in clips.indices && aIndex in clips.indices &&
+                    clips[lastAIndex].path == clipA.path &&
+                    kotlin.math.abs(clipA.map().inUs - clips[lastAIndex].map().outUs) <= 5_000L
+
+            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1 && !isSamePathContiguous)
             val needsDeclick = isFirstBlockAfterStop || isCutTransition
 
             if (bIndex == -1) {
@@ -190,42 +214,50 @@ class ClipAudioContributor(
             }
 
             val nextIndex = aIndex + 1
+            val clipA = clips[aIndex]
 
             // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
             if (bIndex == -1 && nextIndex in clips.indices) {
-                val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
-                val blockDurationUs = (frames * 1000L) / 48L
-                val blockEndTimelineUs = startTimelineUs + blockDurationUs
+                val nextClip = clips[nextIndex]
+                val isSamePathContiguous = nextClip.path == clipA.path &&
+                        kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 5_000L
 
-                if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
-                    val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
-                    val framesAfterCut = frames - framesBeforeCut
+                if (!isSamePathContiguous) {
+                    val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
+                    val blockDurationUs = (frames * 1000L) / 48L
+                    val blockEndTimelineUs = startTimelineUs + blockDurationUs
 
-                    if (framesBeforeCut > 0) {
-                        val clipA = clips[aIndex]
-                        val decoderA = getOrCreateDecoder(clipA)
-                        val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
-                        val srcFrameA = usToAudioFrames(srcUsA)
-                        decoderA.readSynchronous(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                    if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
+                        val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
+                        val framesAfterCut = frames - framesBeforeCut
+
+                        if (framesBeforeCut > 0) {
+                            val decoderA = getOrCreateDecoder(clipA)
+                            val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                            val srcFrameA = usToAudioFrames(srcUsA)
+                            decoderA.readSynchronous(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                        }
+
+                        if (framesAfterCut > 0) {
+                            val decoderNext = getOrCreateDecoder(nextClip)
+                            val srcUsNext = nextClip.map().sourceUs(0L)
+                            val srcFrameNext = usToAudioFrames(srcUsNext)
+                            decoderNext.readSynchronous(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
+                        }
+
+                        lastAIndex = nextIndex
+                        lastBIndex = -1
+                        isFirstBlockAfterStop = false
+                        return
                     }
-
-                    if (framesAfterCut > 0) {
-                        val nextClip = clips[nextIndex]
-                        val decoderNext = getOrCreateDecoder(nextClip)
-                        val srcUsNext = nextClip.map().sourceUs(0L)
-                        val srcFrameNext = usToAudioFrames(srcUsNext)
-                        decoderNext.readSynchronous(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
-                    }
-
-                    lastAIndex = nextIndex
-                    lastBIndex = -1
-                    isFirstBlockAfterStop = false
-                    return
                 }
             }
 
-            val clipA = clips[aIndex]
-            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1)
+            val isSamePathContiguous = lastAIndex in clips.indices && aIndex in clips.indices &&
+                    clips[lastAIndex].path == clipA.path &&
+                    kotlin.math.abs(clipA.map().inUs - clips[lastAIndex].map().outUs) <= 5_000L
+
+            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1 && !isSamePathContiguous)
             val needsDeclick = isFirstBlockAfterStop || isCutTransition
 
             if (bIndex == -1) {
@@ -284,6 +316,25 @@ class ClipAudioContributor(
         isFirstBlockAfterStop = true
         lastAIndex = -1
         lastBIndex = -1
+        lastPrewarmedKey = null
+    }
+
+    private fun pruneDecoders(activePaths: Set<String>) {
+        if (decoders.size > 3) {
+            val iterator = decoders.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (!activePaths.contains(entry.key)) {
+                    val oldDec = entry.value
+                    iterator.remove()
+                    prewarmExecutor.execute {
+                        try {
+                            oldDec.release()
+                        } catch (_: Throwable) {}
+                    }
+                }
+            }
+        }
     }
 
     private fun prewarmClip(clip: Clip, targetSourceUs: Long) {
@@ -319,6 +370,7 @@ class ClipAudioContributor(
         decoders.clear()
         lastAIndex = -1
         lastBIndex = -1
+        lastPrewarmedKey = null
         isFirstBlockAfterStop = true
     }
 }

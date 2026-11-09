@@ -199,7 +199,12 @@ class FrameSource(
         return isPrepared && codec != null && clip.width == other.width && clip.height == other.height
     }
 
+    val currentPath: String get() = clip.path
+
     fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false): Boolean {
+        if (fastKeyframeOnly && isPrepared && lastSeekTargetUs != -1L && kotlin.math.abs(localUs - lastSeekTargetUs) < 60_000L) {
+            return false
+        }
         val ext = extractor ?: return false
         val dec = codec ?: return false
         try {
@@ -336,11 +341,10 @@ class FrameSource(
             val isInitial = currentPtsUs == -1L
             // Backward jump > 500ms
             val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 500_000L
-            // If we are significantly behind (> 80ms) when starting play, seek with silent preroll instead of playing GOP forward!
-            val isFarBehind = currentPtsUs != -1L && localUs > currentPtsUs + 80_000L && !isCatchingUpFromSeek
+            // Only seek forward on massive jumps (> 2.5s). Never seek/flush on small lags (< 2.5s) during playback!
             val isHugeForwardJump = currentPtsUs != -1L && localUs > currentPtsUs + 2_500_000L
 
-            if (isInitial || isBackwardJump || isHugeForwardJump || isFarBehind) {
+            if (isInitial || isBackwardJump || isHugeForwardJump) {
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)
                 if (didRender) {
                     lastRenderedLocalUs = localUs
@@ -351,6 +355,7 @@ class FrameSource(
 
             // Catch-up / normal playback decode loop:
             var hasDequeuedAnyOutput = false
+            var skippedCount = 0
             val maxAttempts = 15
             var attempts = 0
             val bufferInfo = MediaCodec.BufferInfo()
@@ -389,7 +394,8 @@ class FrameSource(
                         outputEos = true
                     }
 
-                    val isTargetReached = pts >= localUs - 12_000L || outputEos
+                    // Render if target reached OR after skipping up to 4 late frames so display keeps updating smoothly
+                    val isTargetReached = (skippedCount >= 4) || (pts >= localUs - 12_000L) || outputEos
 
                     if (isTargetReached) {
                         dec.releaseOutputBuffer(outIndex, true)
@@ -404,6 +410,7 @@ class FrameSource(
                         // Drop intermediate frame silently without ever force-rendering early GOP frames
                         dec.releaseOutputBuffer(outIndex, false)
                         currentPtsUs = pts
+                        skippedCount++
                     }
                 } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     if (inputEos || hasDequeuedAnyOutput) {

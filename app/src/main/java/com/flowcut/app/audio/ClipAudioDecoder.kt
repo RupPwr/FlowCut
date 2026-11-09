@@ -189,7 +189,9 @@ class ClipAudioDecoder(private val clip: Clip) {
         // Check if requested range is outside buffer
         val start = bufferStartFrame
         val countBuffered = bufferedFrames
-        if (sourceFrame < start || sourceFrame + count > start + countBuffered) {
+        if (sourceFrame < start || sourceFrame > start + countBuffered + 24_000L) {
+            seekToFrame(sourceFrame)
+        } else if (sourceFrame + count > start + countBuffered) {
             decodeChunk()
         } else {
             val remaining = (start + countBuffered) - (sourceFrame + count)

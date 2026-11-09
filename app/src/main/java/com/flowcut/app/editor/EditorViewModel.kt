@@ -52,6 +52,11 @@ data class EditorUiState(
     val toastMessage: String? = null
 )
 
+data class SplitResult(
+    val newSnapshot: TimelineSnapshot,
+    val newRightClipIndex: Int
+)
+
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
 
     private val projectStore = ProjectStore(application)
@@ -76,7 +81,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val undoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
     private val redoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
     val clipTimeMaps = mutableMapOf<String, TimeMap>()
-    private val clipNaturalDurations = mutableMapOf<String, Long>()
+    val clipNaturalDurations = mutableMapOf<String, Long>()
 
     fun getClipNaturalDurationUs(clipIndex: Int): Long {
         val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return 0L
@@ -107,7 +112,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (clipIndex !in currentProject.clips.indices) return
         val oldClip = currentProject.clips[clipIndex]
         val newDurationMs = usToMs(newOutUs - newInUs)
-        if (newDurationMs < 1000L) return
+        if (newDurationMs < 200L) return
 
         val newClip = oldClip.copy(durationMs = newDurationMs)
         val newClips = currentProject.clips.toMutableList()
@@ -123,8 +128,134 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        redoTimeMaps.clear()
         clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs)
-        updateProject(newProject, recordUndo = true)
+        updateProject(newProject, recordUndo = false)
+    }
+
+    fun splitAtPlayhead(playheadUs: Long, preferredClipIndex: Int? = null): SplitResult? {
+        val currentProject = _uiState.value.project
+        val tl = ProgramTimeline(currentProject)
+        if (tl.n == 0) {
+            showToast("No clips to split")
+            return null
+        }
+
+        val tMs = usToMs(playheadUs)
+
+        // 1. Exact Target Clip & Local Cut Position at playhead.timeUs
+        val targetK: Int = if (preferredClipIndex != null && preferredClipIndex in 0 until tl.n) {
+            val clipStartUs = msToUs(tl.startMs[preferredClipIndex])
+            val clipEndUs = msToUs(tl.endMs[preferredClipIndex])
+            if (playheadUs > clipStartUs && playheadUs < clipEndUs) {
+                preferredClipIndex
+            } else {
+                val candidate = tl.lastStartAtOrBefore(tMs)
+                if (candidate in 0 until tl.n && tMs >= tl.startMs[candidate] && tMs < tl.endMs[candidate]) {
+                    candidate
+                } else -1
+            }
+        } else {
+            val candidate = tl.lastStartAtOrBefore(tMs)
+            if (candidate in 0 until tl.n && tMs >= tl.startMs[candidate] && tMs < tl.endMs[candidate]) {
+                candidate
+            } else -1
+        }
+
+        if (targetK !in 0 until tl.n) {
+            showToast("No clip under playhead to split")
+            return null
+        }
+
+        // 2. Enforce 0.2s (200 ms / 200_000L us) Minimum Clip Duration Rule
+        val startUs = msToUs(tl.startMs[targetK])
+        val localCutUs = playheadUs - startUs
+        val clipDurationUs = msToUs(tl.durMs[targetK])
+
+        if (localCutUs < 200_000L || (clipDurationUs - localCutUs) < 200_000L) {
+            showToast("Cannot split: clips must be at least 0.2s")
+            return null
+        }
+
+        // 3. Frame-Accurate TimeMap Split & Natural Duration Preservation
+        val oldClip = currentProject.clips[targetK]
+        val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
+
+        val leftDurMs = usToMs(localCutUs)
+        val alignedLocalCutUs = msToUs(leftDurMs)
+        val splitSourceUs = msToUs(usToMs(oldMap.sourceUs(alignedLocalCutUs)))
+        val rightDurMs = oldClip.durationMs - leftDurMs
+
+        val leftMap = TimeMap(
+            inUs = oldMap.inUs,
+            outUs = splitSourceUs,
+            speedNum = oldMap.speedNum,
+            speedDen = oldMap.speedDen
+        )
+        val rightClipId = java.util.UUID.randomUUID().toString()
+        val rightMap = TimeMap(
+            inUs = splitSourceUs,
+            outUs = oldMap.outUs,
+            speedNum = oldMap.speedNum,
+            speedDen = oldMap.speedDen
+        )
+
+        val leftClip = oldClip.copy(durationMs = leftDurMs)
+        val rightClip = oldClip.copy(id = rightClipId, durationMs = rightDurMs)
+
+        val newClips = currentProject.clips.toMutableList()
+        newClips[targetK] = leftClip
+        newClips.add(targetK + 1, rightClip)
+
+        // 4. Transitions: insert NONE at junction targetK and preserve existing transitions
+        val newTransitions = ArrayList<Transition>(currentProject.transitions.size + 1)
+        for (i in 0 until targetK) {
+            newTransitions.add(currentProject.transitions[i])
+        }
+        newTransitions.add(Transition(TransitionType.NONE, 0L))
+        for (i in targetK until currentProject.transitions.size) {
+            newTransitions.add(currentProject.transitions[i])
+        }
+
+        // Adjust adjacent transitions if needed (duration <= min(d1, d2) / 2)
+        for (j in maxOf(0, targetK - 1)..minOf(newTransitions.size - 1, targetK + 1)) {
+            if (j < newTransitions.size && j + 1 < newClips.size) {
+                val maxAllowed = minOf(newClips[j].durationMs, newClips[j + 1].durationMs) / 2L
+                if (newTransitions[j].durationMs > maxAllowed) {
+                    newTransitions[j] = newTransitions[j].copy(durationMs = maxAllowed)
+                }
+            }
+        }
+
+        val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
+
+        // Push current state onto Undo stack BEFORE applying the split
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        redoTimeMaps.clear()
+
+        // Register natural duration for both halves
+        val naturalDur = clipNaturalDurations[oldClip.id] ?: getMediaFileDurationUs(oldClip)
+        clipNaturalDurations[oldClip.id] = naturalDur
+        clipNaturalDurations[rightClipId] = naturalDur
+
+        // Update clipTimeMaps
+        clipTimeMaps[oldClip.id] = leftMap
+        clipTimeMaps[rightClipId] = rightMap
+
+        // Update project and select the new Right Clip (targetK + 1)
+        updateProject(newProject, recordUndo = false)
+        _uiState.update {
+            it.copy(
+                selectedClipIndex = targetK + 1,
+                selectedJunctionIndex = null
+            )
+        }
+
+        val newSnapshot = getSnapshot()
+        return SplitResult(newSnapshot, targetK + 1)
     }
 
     init {
@@ -530,6 +661,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipTimeMaps.putAll(prevMaps)
         }
         updateProject(previous, recordUndo = false)
+        _uiState.update {
+            it.copy(
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
     }
 
     fun redo() {
@@ -541,6 +678,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipTimeMaps.putAll(nextMaps)
         }
         updateProject(next, recordUndo = false)
+        _uiState.update {
+            it.copy(
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
     }
 
     fun openExportSheet() {

@@ -90,7 +90,8 @@ fun EditorScreen(
     modifier: Modifier = Modifier,
     onPlaybackStateChange: (Boolean) -> Unit = {},
     onPlayheadUpdate: (Long) -> Unit = {},
-    onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> }
+    onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> },
+    onSplitClick: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val colors = FlowCutTheme.colors
@@ -247,6 +248,24 @@ fun EditorScreen(
         }
     }
 
+    val handleSplit: () -> Unit = {
+        if (playbackController.playhead.mode == PlayMode.PLAYING) {
+            playbackController.pause()
+            frameDriver.wake()
+            onPlaybackStateChange(false)
+        }
+        val currentPlayheadUs = playbackController.playhead.timeUs
+        val result = resolvedViewModel?.splitAtPlayhead(
+            playheadUs = currentPlayheadUs,
+            preferredClipIndex = selectedClipIndex
+        )
+        if (result != null) {
+            snapshotHolder.current = result.newSnapshot
+            playbackController.seekTo(currentPlayheadUs)
+            frameDriver.wake()
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -295,8 +314,24 @@ fun EditorScreen(
                 PlaybackRow(
                     canUndo = canUndo,
                     canRedo = canRedo,
-                    onUndoClick = onUndoClick,
-                    onRedoClick = onRedoClick,
+                    onUndoClick = {
+                        onUndoClick()
+                        if (USE_NEW_CORE) {
+                            resolvedViewModel?.let { vm ->
+                                snapshotHolder.current = vm.getSnapshot()
+                                frameDriver.wake()
+                            }
+                        }
+                    },
+                    onRedoClick = {
+                        onRedoClick()
+                        if (USE_NEW_CORE) {
+                            resolvedViewModel?.let { vm ->
+                                snapshotHolder.current = vm.getSnapshot()
+                                frameDriver.wake()
+                            }
+                        }
+                    },
                     currentMs = displayedMs.longValue,
                     totalMs = timeline.total,
                     isPlaying = isPlaying,
@@ -436,8 +471,22 @@ fun EditorScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 7. Bottom toolbar: 64 dp + navigation bar inset
+            // 7. Bottom toolbar: 64 dp + navigation bar inset (Contextual Main vs Clip toolbar)
             BottomToolbar(
+                isClipSelected = selectedClipIndex != null,
+                onSplitClick = onSplitClick ?: handleSplit,
+                onDeleteClipClick = selectedClipIndex?.let { k ->
+                    {
+                        onDeleteClip(k)
+                        if (USE_NEW_CORE) {
+                            resolvedViewModel?.let { vm ->
+                                snapshotHolder.current = vm.getSnapshot()
+                                frameDriver.wake()
+                            }
+                        }
+                    }
+                },
+                onClearSelection = onDeselectAll,
                 onLockedItemClick = {
                     Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
                 }
