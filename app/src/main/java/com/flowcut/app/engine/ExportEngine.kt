@@ -304,6 +304,8 @@ class ExportEngine(private val context: Context) {
 
             val matA = FloatArray(16)
             val matB = FloatArray(16)
+            val rawMatA = FloatArray(16)
+            val rawMatB = FloatArray(16)
             val cropA = FloatArray(2) { 1f }
             val cropB = FloatArray(2) { 1f }
             val activeSet = ActiveSet(snapshot.lanes.size)
@@ -518,10 +520,13 @@ class ExportEngine(private val context: Context) {
 
                 try {
                     stA.updateTexImage()
-                    stA.getTransformMatrix(matA)
+                    stA.getTransformMatrix(rawMatA)
                 } catch (_: Exception) {}
 
-                PreviewRenderer.calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
+                val transformA = PreviewRenderer.getClipTransform(clipA.id)
+                System.arraycopy(rawMatA, 0, matA, 0, 16)
+                PreviewRenderer.applyTransformMatrix(matA, transformA)
+                PreviewRenderer.calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
                 if (res.isTransition && res.clipBIndex >= 0) {
                     val clipB = snapshot.project.clips[res.clipBIndex]
@@ -555,10 +560,13 @@ class ExportEngine(private val context: Context) {
 
                     try {
                         stB.updateTexImage()
-                        stB.getTransformMatrix(matB)
+                        stB.getTransformMatrix(rawMatB)
                     } catch (_: Exception) {}
 
-                    PreviewRenderer.calculateCropInto(clipB.displayWidth, clipB.displayHeight, cropB)
+                    val transformB = PreviewRenderer.getClipTransform(clipB.id)
+                    System.arraycopy(rawMatB, 0, matB, 0, 16)
+                    PreviewRenderer.applyTransformMatrix(matB, transformB)
+                    PreviewRenderer.calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
                 } else {
                     if (frameSourceB != null) {
                         frameSourceB?.release()

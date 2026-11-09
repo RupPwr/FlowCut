@@ -2,6 +2,8 @@ package com.flowcut.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,10 +20,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -42,6 +46,8 @@ fun BottomToolbar(
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
     onVolumeClick: () -> Unit = {},
+    onRotateClick: () -> Unit = {},
+    onFlipClick: () -> Unit = {},
     onDeleteClipClick: (() -> Unit)? = null,
     onClearSelection: () -> Unit = {},
     onLockedItemClick: () -> Unit = {},
@@ -92,11 +98,12 @@ fun BottomToolbar(
                         .background(colors.border)
                 )
 
-                // Actions: SPLIT, TRIM, VOLUME, and DELETE
+                // Actions: SPLIT, TRIM, VOLUME, ROTATE, FLIP, and DELETE
                 Row(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -167,6 +174,54 @@ fun BottomToolbar(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "VOLUME",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Rotate Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onRotateClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.RotateRight,
+                            contentDescription = "ROTATE",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ROTATE",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Flip Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onFlipClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Flip,
+                            contentDescription = "FLIP",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "FLIP",
                             color = colors.textPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold

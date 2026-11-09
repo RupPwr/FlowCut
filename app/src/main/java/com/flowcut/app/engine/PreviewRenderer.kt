@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -164,6 +165,19 @@ class PrefetchCoordinator(
 }
 
 /**
+ * Per-clip transform state: rotation in degrees (0, 90, 180, 270 clockwise)
+ * and horizontal mirror (isFlippedH).
+ */
+data class ClipTransform(
+    val rotationDeg: Int = 0, // 0, 90, 180, 270
+    val isFlippedH: Boolean = false
+) {
+    companion object {
+        val DEFAULT = ClipTransform(0, false)
+    }
+}
+
+/**
  * PreviewRenderer on the new core architecture (Sections 5, 7, 10, 11 & 15).
  * - Reads `val s = holder.current` and `val tUs = playhead.timeUs` ONCE per frame on the render path.
  * - Reuses a single pre-allocated `ActiveSet` (resized only if `s.lanes.size` grows) and calls `s.resolve(tUs, activeSet)`.
@@ -210,6 +224,8 @@ class PreviewRenderer(
 
     private val matA = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
     private val matB = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
+    private val rawMatA = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
+    private val rawMatB = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
     private val cropA = FloatArray(2) { 1f }
     private val cropB = FloatArray(2) { 1f }
 
@@ -472,7 +488,7 @@ class PreviewRenderer(
                     hasPendingSurfaceFrameA.set(false)
                     try {
                         stA.updateTexImage()
-                        stA.getTransformMatrix(matA)
+                        stA.getTransformMatrix(rawMatA)
                     } catch (_: Exception) {}
                 } else {
                     val renderedA = try {
@@ -481,11 +497,14 @@ class PreviewRenderer(
                     if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
                         try {
                             stA.updateTexImage()
-                            stA.getTransformMatrix(matA)
+                            stA.getTransformMatrix(rawMatA)
                         } catch (_: Exception) {}
                     }
                 }
-                calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
+                val transformA = getClipTransform(clipA.id)
+                System.arraycopy(rawMatA, 0, matA, 0, 16)
+                applyTransformMatrix(matA, transformA)
+                calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
                 // Ensure Clip B is on Slot B
                 val clipBChanged = frameSourceB == null ||
@@ -503,7 +522,7 @@ class PreviewRenderer(
                     hasPendingSurfaceFrameB.set(false)
                     try {
                         stB.updateTexImage()
-                        stB.getTransformMatrix(matB)
+                        stB.getTransformMatrix(rawMatB)
                     } catch (_: Exception) {}
                 } else {
                     val renderedB = try {
@@ -512,11 +531,14 @@ class PreviewRenderer(
                     if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
                         try {
                             stB.updateTexImage()
-                            stB.getTransformMatrix(matB)
+                            stB.getTransformMatrix(rawMatB)
                         } catch (_: Exception) {}
                     }
                 }
-                calculateCropInto(clipB.displayWidth, clipB.displayHeight, cropB)
+                val transformB = getClipTransform(clipB.id)
+                System.arraycopy(rawMatB, 0, matB, 0, 16)
+                applyTransformMatrix(matB, transformB)
+                calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
 
                 val easedP = ProgramTimeline.ease(frame.linearP)
                 val legacyType = when (frame.transitionType) {
@@ -586,7 +608,7 @@ class PreviewRenderer(
                 hasPendingSurfaceFrameA.set(false)
                 try {
                     stA.updateTexImage()
-                    stA.getTransformMatrix(matA)
+                    stA.getTransformMatrix(rawMatA)
                 } catch (_: Exception) {}
             } else {
                 currentClipIndexA = frame.clipAIndex
@@ -597,11 +619,14 @@ class PreviewRenderer(
                 if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
                     try {
                         stA.updateTexImage()
-                        stA.getTransformMatrix(matA)
+                        stA.getTransformMatrix(rawMatA)
                     } catch (_: Exception) {}
                 }
             }
-            calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropA)
+            val transformA = getClipTransform(clipA.id)
+            System.arraycopy(rawMatA, 0, matA, 0, 16)
+            applyTransformMatrix(matA, transformA)
+            calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
             // Standby Slot B: 3-Stage Incremental Pre-warm of upcoming different-path clip within 500ms
             var m = frame.clipAIndex + 1
@@ -634,9 +659,12 @@ class PreviewRenderer(
                                         hasPendingSurfaceFrameB.set(false)
                                         try {
                                             stB.updateTexImage()
-                                            stB.getTransformMatrix(matB)
+                                            stB.getTransformMatrix(rawMatB)
                                         } catch (_: Exception) {}
-                                        calculateCropInto(nextClip.displayWidth, nextClip.displayHeight, cropB)
+                                        val nextTransform = getClipTransform(nextClip.id)
+                                        System.arraycopy(rawMatB, 0, matB, 0, 16)
+                                        applyTransformMatrix(matB, nextTransform)
+                                        calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropB)
                                         standbySlotReadyForClipId = nextClip.id
                                         standbyPreparedPath = nextClip.path
                                         standbyPreparedInUs = nextClipInUs
@@ -682,7 +710,7 @@ class PreviewRenderer(
                 hasPendingSurfaceFrameB.set(false)
                 try {
                     stB.updateTexImage()
-                    stB.getTransformMatrix(matB)
+                    stB.getTransformMatrix(rawMatB)
                 } catch (_: Exception) {}
             } else {
                 currentClipIndexB = frame.clipAIndex
@@ -693,11 +721,14 @@ class PreviewRenderer(
                 if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
                     try {
                         stB.updateTexImage()
-                        stB.getTransformMatrix(matB)
+                        stB.getTransformMatrix(rawMatB)
                     } catch (_: Exception) {}
                 }
             }
-            calculateCropInto(clipA.displayWidth, clipA.displayHeight, cropB)
+            val transformB = getClipTransform(clipA.id)
+            System.arraycopy(rawMatB, 0, matB, 0, 16)
+            applyTransformMatrix(matB, transformB)
+            calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformB, cropB)
 
             // Standby Slot A: 3-Stage Incremental Pre-warm of upcoming different-path clip within 500ms
             var m = frame.clipAIndex + 1
@@ -730,9 +761,12 @@ class PreviewRenderer(
                                         hasPendingSurfaceFrameA.set(false)
                                         try {
                                             stA.updateTexImage()
-                                            stA.getTransformMatrix(matA)
+                                            stA.getTransformMatrix(rawMatA)
                                         } catch (_: Exception) {}
-                                        calculateCropInto(nextClip.displayWidth, nextClip.displayHeight, cropA)
+                                        val nextTransform = getClipTransform(nextClip.id)
+                                        System.arraycopy(rawMatA, 0, matA, 0, 16)
+                                        applyTransformMatrix(matA, nextTransform)
+                                        calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropA)
                                         standbySlotReadyForClipId = nextClip.id
                                         standbyPreparedPath = nextClip.path
                                         standbyPreparedInUs = nextClipInUs
@@ -777,6 +811,8 @@ class PreviewRenderer(
 
         primarySlot = 0
         standbySlotReadyForClipId = null
+        Matrix.setIdentityM(rawMatA, 0)
+        Matrix.setIdentityM(rawMatB, 0)
     }
 
     fun release() {
@@ -802,6 +838,29 @@ class PreviewRenderer(
     }
 
     companion object {
+        val clipTransforms = ConcurrentHashMap<String, ClipTransform>()
+
+        fun getClipTransform(clipId: String?): ClipTransform {
+            if (clipId == null) return ClipTransform.DEFAULT
+            return clipTransforms[clipId] ?: ClipTransform.DEFAULT
+        }
+
+        fun setClipTransform(clipId: String, transform: ClipTransform) {
+            clipTransforms[clipId] = transform
+        }
+
+        fun syncTransforms(transforms: Map<String, ClipTransform>) {
+            clipTransforms.clear()
+            clipTransforms.putAll(transforms)
+        }
+
+        fun calculateClipCrop(displayWidth: Int, displayHeight: Int, transform: ClipTransform, out: FloatArray) {
+            val isRotated90or270 = transform.rotationDeg == 90 || transform.rotationDeg == 270
+            val effectiveW = if (isRotated90or270) displayHeight else displayWidth
+            val effectiveH = if (isRotated90or270) displayWidth else displayHeight
+            calculateCropInto(effectiveW, effectiveH, out)
+        }
+
         fun calculateCropInto(displayWidth: Int, displayHeight: Int, out: FloatArray) {
             val aspect = displayWidth.toFloat() / displayHeight.toFloat()
             val target = 9f / 16f
@@ -812,6 +871,23 @@ class PreviewRenderer(
                 out[0] = 1.0f
                 out[1] = aspect / target
             }
+        }
+
+        fun applyTransformMatrix(
+            mat: FloatArray,
+            transform: ClipTransform
+        ) {
+            if (transform.rotationDeg == 0 && !transform.isFlippedH) {
+                return
+            }
+            Matrix.translateM(mat, 0, 0.5f, 0.5f, 0f)
+            if (transform.rotationDeg != 0) {
+                Matrix.rotateM(mat, 0, transform.rotationDeg.toFloat(), 0f, 0f, 1f)
+            }
+            if (transform.isFlippedH) {
+                Matrix.scaleM(mat, 0, -1f, 1f, 1f)
+            }
+            Matrix.translateM(mat, 0, -0.5f, -0.5f, 0f)
         }
 
         fun toLegacyClip(clip: Clip): com.flowcut.app.model.Clip {

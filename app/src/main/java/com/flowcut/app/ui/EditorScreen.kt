@@ -92,7 +92,9 @@ fun EditorScreen(
     onPlaybackStateChange: (Boolean) -> Unit = {},
     onPlayheadUpdate: (Long) -> Unit = {},
     onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> },
-    onSplitClick: (() -> Unit)? = null
+    onSplitClick: (() -> Unit)? = null,
+    onRotateClip: (() -> Unit)? = null,
+    onFlipClip: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val colors = FlowCutTheme.colors
@@ -352,6 +354,7 @@ fun EditorScreen(
                             resolvedViewModel?.let { vm ->
                                 snapshotHolder.current = vm.getSnapshot()
                                 frameDriver.wake()
+                                previewRenderer.requestRender()
                             }
                         }
                     },
@@ -361,6 +364,7 @@ fun EditorScreen(
                             resolvedViewModel?.let { vm ->
                                 snapshotHolder.current = vm.getSnapshot()
                                 frameDriver.wake()
+                                previewRenderer.requestRender()
                             }
                         }
                     },
@@ -514,6 +518,26 @@ fun EditorScreen(
                 onSplitClick = onSplitClick ?: handleSplit,
                 onTrimClick = handleOpenTrim,
                 onVolumeClick = { isVolumeSheetVisible = true },
+                onRotateClick = onRotateClip ?: {
+                    resolvedViewModel?.rotateSelectedClip()
+                    if (USE_NEW_CORE) {
+                        resolvedViewModel?.let { vm ->
+                            snapshotHolder.current = vm.getSnapshot()
+                        }
+                    }
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onFlipClick = onFlipClip ?: {
+                    resolvedViewModel?.flipSelectedClip()
+                    if (USE_NEW_CORE) {
+                        resolvedViewModel?.let { vm ->
+                            snapshotHolder.current = vm.getSnapshot()
+                        }
+                    }
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
                 onDeleteClipClick = selectedClipIndex?.let { k ->
                     {
                         onDeleteClip(k)

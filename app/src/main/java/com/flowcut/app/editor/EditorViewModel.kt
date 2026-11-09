@@ -9,8 +9,10 @@ import com.flowcut.app.core.time.TimeMap
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.ClipTransform
 import com.flowcut.app.engine.ExportEngine
 import com.flowcut.app.engine.PreviewEngine
+import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.MAX_CLIPS
@@ -91,6 +93,59 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val clipVolumes = mutableMapOf<String, Float>()
     val savedPreMuteVolumes = mutableMapOf<String, Float>()
 
+    // Per-clip transform (rotation: 0/90/180/270, isFlippedH: Boolean) and undo/redo stacks
+    private val undoTransforms = ArrayDeque<Map<String, ClipTransform>>()
+    private val redoTransforms = ArrayDeque<Map<String, ClipTransform>>()
+    val clipTransforms = mutableMapOf<String, ClipTransform>()
+
+    fun getClipTransform(clipId: String): ClipTransform =
+        clipTransforms[clipId] ?: ClipTransform.DEFAULT
+
+    fun rotateSelectedClip(): ClipTransform? {
+        val selectedIndex = _uiState.value.selectedClipIndex ?: return null
+        val clip = _uiState.value.project.clips.getOrNull(selectedIndex) ?: return null
+        val current = clipTransforms[clip.id] ?: ClipTransform.DEFAULT
+        val nextDeg = (current.rotationDeg + 90) % 360
+        val newTransform = current.copy(rotationDeg = nextDeg)
+
+        val currentProject = _uiState.value.project
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+
+        clipTransforms[clip.id] = newTransform
+        PreviewRenderer.setClipTransform(clip.id, newTransform)
+
+        updateProject(currentProject, recordUndo = false)
+        return newTransform
+    }
+
+    fun flipSelectedClip(): ClipTransform? {
+        val selectedIndex = _uiState.value.selectedClipIndex ?: return null
+        val clip = _uiState.value.project.clips.getOrNull(selectedIndex) ?: return null
+        val current = clipTransforms[clip.id] ?: ClipTransform.DEFAULT
+        val newTransform = current.copy(isFlippedH = !current.isFlippedH)
+
+        val currentProject = _uiState.value.project
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+
+        clipTransforms[clip.id] = newTransform
+        PreviewRenderer.setClipTransform(clip.id, newTransform)
+
+        updateProject(currentProject, recordUndo = false)
+        return newTransform
+    }
+
     fun getClipVolume(clipId: String): Float = clipVolumes[clipId] ?: 1.0f
 
     fun getPreMuteVolume(clipId: String): Float = savedPreMuteVolumes[clipId] ?: 1.0f
@@ -115,8 +170,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
         undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
         redoTimeMaps.clear()
         redoVolumes.clear()
+        redoTransforms.clear()
 
         if (!currentlyAllMuted) {
             // Mute everything: save current non-zero volumes
@@ -152,8 +209,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
         undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
         redoTimeMaps.clear()
         redoVolumes.clear()
+        redoTransforms.clear()
 
         clipVolumes[clip.id] = clampedVol
         ClipAudioContributor.setClipVolume(clip.id, clampedVol)
@@ -175,8 +234,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
         undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
         redoTimeMaps.clear()
         redoVolumes.clear()
+        redoTransforms.clear()
 
         for (c in currentProject.clips) {
             clipVolumes[c.id] = clampedVol
@@ -241,8 +302,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
         undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
         redoTimeMaps.clear()
         redoVolumes.clear()
+        redoTransforms.clear()
         clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs)
         updateProject(newProject, recordUndo = false)
     }
@@ -347,8 +410,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
         undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
         redoTimeMaps.clear()
         redoVolumes.clear()
+        redoTransforms.clear()
 
         // Register natural duration for both halves
         val naturalDur = clipNaturalDurations[oldClip.id] ?: getMediaFileDurationUs(oldClip)
@@ -366,6 +431,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         savedPreMuteVolumes[oldClip.id]?.let { savedPreMuteVolumes[rightClipId] = it }
         ClipAudioContributor.setClipVolume(oldClip.id, origVol)
         ClipAudioContributor.setClipVolume(rightClipId, origVol)
+
+        // Inherit transform for both halves
+        val origTransform = clipTransforms[oldClip.id] ?: ClipTransform.DEFAULT
+        clipTransforms[oldClip.id] = origTransform
+        clipTransforms[rightClipId] = origTransform
+        PreviewRenderer.setClipTransform(oldClip.id, origTransform)
+        PreviewRenderer.setClipTransform(rightClipId, origTransform)
 
         // Update project and select the new Right Clip (targetK + 1)
         updateProject(newProject, recordUndo = false)
@@ -418,8 +490,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             undoStack.push(_uiState.value.project)
             undoTimeMaps.addLast(HashMap(clipTimeMaps))
             undoVolumes.addLast(HashMap(clipVolumes))
+            undoTransforms.addLast(HashMap(clipTransforms))
             redoTimeMaps.clear()
             redoVolumes.clear()
+            redoTransforms.clear()
         }
         val newTimeline = ProgramTimeline(newProject)
         val clampedMs = _uiState.value.currentMs.coerceIn(0L, maxOf(0L, newTimeline.total))
@@ -548,6 +622,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipVolumes.remove(deletedId)
             savedPreMuteVolumes.remove(deletedId)
             ClipAudioContributor.clipVolumes.remove(deletedId)
+            clipTransforms.remove(deletedId)
+            PreviewRenderer.clipTransforms.remove(deletedId)
         }
         val newProject = ProgramTimeline.deleteClip(_uiState.value.project, index)
         val isAllMuted = newProject.clips.isNotEmpty() && newProject.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
@@ -585,6 +661,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             savedPreMuteVolumes.clear()
             ClipAudioContributor.clipVolumes.clear()
             ClipAudioContributor.isMainTrackMuted = false
+            undoTransforms.clear()
+            redoTransforms.clear()
+            clipTransforms.clear()
+            PreviewRenderer.clipTransforms.clear()
             _uiState.update {
                 it.copy(
                     project = Project(),
@@ -804,6 +884,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipVolumes.putAll(prevVols)
             ClipAudioContributor.syncVolumes(clipVolumes)
         }
+        if (undoTransforms.isNotEmpty()) {
+            val prevTransforms = undoTransforms.removeLast()
+            redoTransforms.addLast(HashMap(clipTransforms))
+            clipTransforms.clear()
+            clipTransforms.putAll(prevTransforms)
+            PreviewRenderer.syncTransforms(clipTransforms)
+        }
         val isAllMuted = previous.clips.isNotEmpty() && previous.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(previous, recordUndo = false)
@@ -830,6 +917,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipVolumes.clear()
             clipVolumes.putAll(nextVols)
             ClipAudioContributor.syncVolumes(clipVolumes)
+        }
+        if (redoTransforms.isNotEmpty()) {
+            val nextTransforms = redoTransforms.removeLast()
+            undoTransforms.addLast(HashMap(clipTransforms))
+            clipTransforms.clear()
+            clipTransforms.putAll(nextTransforms)
+            PreviewRenderer.syncTransforms(clipTransforms)
         }
         val isAllMuted = next.clips.isNotEmpty() && next.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
