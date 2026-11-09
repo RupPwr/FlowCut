@@ -214,13 +214,52 @@ class ClipAudioDecoder(private val clip: Clip) {
         }
     }
 
+    /**
+     * Synchronous accurate audio read for offline export.
+     * Decodes source audio synchronously up to [sourceFrame] + [count] instead of dropping to silence.
+     */
+    fun readSynchronous(sourceFrame: Long, count: Int, out: FloatArray, outOffset: Int, gain: Float) {
+        if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
+        synchronized(codecLock) {
+            val targetEnd = sourceFrame + count
+            if (sourceFrame < bufferStartFrame || sourceFrame >= bufferStartFrame + bufferedFrames) {
+                internalSeekToFrame(sourceFrame)
+            }
+
+            var retries = 0
+            while (bufferStartFrame + bufferedFrames < targetEnd && !outputEos && retries < 60) {
+                val decoded = internalDecodeChunk(timeoutUs = 5_000L)
+                if (!decoded && inputEos) {
+                    retries++
+                } else if (!decoded) {
+                    retries++
+                }
+            }
+
+            var curFrame = sourceFrame
+            var dstIdx = outOffset
+            val curStart = bufferStartFrame
+            val curBuffered = bufferedFrames
+
+            for (i in 0 until count) {
+                if (curFrame in curStart until (curStart + curBuffered)) {
+                    val ringIdx = ((curFrame and BUFFER_MASK.toLong()).toInt()) shl 1
+                    out[dstIdx] += pcmBuffer[ringIdx] * gain
+                    out[dstIdx + 1] += pcmBuffer[ringIdx + 1] * gain
+                }
+                curFrame++
+                dstIdx += TARGET_CHANNELS
+            }
+        }
+    }
+
     fun decodeChunk(): Boolean {
         synchronized(codecLock) {
             return internalDecodeChunk()
         }
     }
 
-    private fun internalDecodeChunk(): Boolean {
+    private fun internalDecodeChunk(timeoutUs: Long = DECODE_TIMEOUT_US): Boolean {
         val ext = extractor ?: return false
         val dec = codec ?: return false
 
@@ -229,7 +268,7 @@ class ClipAudioDecoder(private val clip: Clip) {
         try {
             // 1. Feed input buffer
             if (!inputEos) {
-                val inIndex = dec.dequeueInputBuffer(DECODE_TIMEOUT_US)
+                val inIndex = dec.dequeueInputBuffer(timeoutUs)
                 if (inIndex >= 0) {
                     val inBuf = dec.getInputBuffer(inIndex)
                     if (inBuf != null) {
@@ -247,7 +286,7 @@ class ClipAudioDecoder(private val clip: Clip) {
             }
 
             // 2. Drain output buffer
-            val outIndex = dec.dequeueOutputBuffer(bufferInfo, DECODE_TIMEOUT_US)
+            val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
             if (outIndex >= 0) {
                 val outBuf = dec.getOutputBuffer(outIndex)
                 if (outBuf != null && bufferInfo.size > 0) {

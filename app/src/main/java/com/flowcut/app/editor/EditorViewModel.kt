@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.flowcut.app.core.time.TimeMap
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
+import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.ExportEngine
 import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
@@ -556,13 +557,44 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(exportSheetVisible = false) }
     }
 
+    fun getSnapshot(): TimelineSnapshot {
+        val project = _uiState.value.project
+        val coreClips = project.clips.map { clip ->
+            val timeMap = clipTimeMaps[clip.id]
+            com.flowcut.app.core.model.Clip(
+                id = clip.id,
+                path = clip.path,
+                durationMs = clip.durationMs,
+                width = clip.width,
+                height = clip.height,
+                rotation = clip.rotation,
+                frameRate = clip.frameRate,
+                timeMap = timeMap
+            )
+        }
+        val coreTransitions = project.transitions.map { trans ->
+            com.flowcut.app.core.model.Transition(
+                type = when (trans.type) {
+                    TransitionType.NONE -> com.flowcut.app.core.model.TransitionType.NONE
+                    TransitionType.SLIDE -> com.flowcut.app.core.model.TransitionType.SLIDE
+                    TransitionType.CIRCLE -> com.flowcut.app.core.model.TransitionType.CIRCLE
+                    TransitionType.ZOOM -> com.flowcut.app.core.model.TransitionType.ZOOM
+                    TransitionType.FADE -> com.flowcut.app.core.model.TransitionType.FADE
+                },
+                durationMs = trans.durationMs
+            )
+        }
+        return TimelineSnapshot(System.nanoTime(), com.flowcut.app.core.model.Project(coreClips, coreTransitions))
+    }
+
     fun startExport() {
         exportJob?.cancel()
         _uiState.update { it.copy(exportState = ExportState.Exporting(0f)) }
 
+        val snapshot = getSnapshot()
         exportJob = viewModelScope.launch {
             try {
-                val uri = exportEngine.export(timeline) { progress ->
+                val uri = exportEngine.export(snapshot) { progress ->
                     _uiState.update { it.copy(exportState = ExportState.Exporting(progress)) }
                 }
                 _uiState.update {

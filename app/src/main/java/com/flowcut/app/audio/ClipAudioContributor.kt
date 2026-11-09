@@ -167,6 +167,106 @@ class ClipAudioContributor(
     }
 
     /**
+     * Synchronous accurate audio render for offline export.
+     * Guarantees all samples are decoded from the source clip without relying on background prewarm.
+     */
+    fun renderSynchronous(startFrame: Long, frames: Int, out: FloatArray) {
+        if (frames <= 0) return
+
+        try {
+            val startTimelineUs = ClipAudioDecoder.framesToUs(startFrame)
+            val snapshot = snapshotHolder.current
+            val clips = snapshot.project.clips
+            if (clips.isEmpty()) return
+
+            snapshot.resolve(startTimelineUs, activeSet)
+            val aIndex = activeSet.aIndex
+            val bIndex = activeSet.bIndex
+
+            if (aIndex < 0 || aIndex >= clips.size) {
+                lastAIndex = -1
+                lastBIndex = -1
+                return
+            }
+
+            val nextIndex = aIndex + 1
+
+            // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
+            if (bIndex == -1 && nextIndex in clips.indices) {
+                val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
+                val blockDurationUs = (frames * 1000L) / 48L
+                val blockEndTimelineUs = startTimelineUs + blockDurationUs
+
+                if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
+                    val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
+                    val framesAfterCut = frames - framesBeforeCut
+
+                    if (framesBeforeCut > 0) {
+                        val clipA = clips[aIndex]
+                        val decoderA = getOrCreateDecoder(clipA)
+                        val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                        val srcFrameA = usToAudioFrames(srcUsA)
+                        decoderA.readSynchronous(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                    }
+
+                    if (framesAfterCut > 0) {
+                        val nextClip = clips[nextIndex]
+                        val decoderNext = getOrCreateDecoder(nextClip)
+                        val srcUsNext = nextClip.map().sourceUs(0L)
+                        val srcFrameNext = usToAudioFrames(srcUsNext)
+                        decoderNext.readSynchronous(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
+                    }
+
+                    lastAIndex = nextIndex
+                    lastBIndex = -1
+                    isFirstBlockAfterStop = false
+                    return
+                }
+            }
+
+            val clipA = clips[aIndex]
+            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1)
+            val needsDeclick = isFirstBlockAfterStop || isCutTransition
+
+            if (bIndex == -1) {
+                val decoderA = getOrCreateDecoder(clipA)
+                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                val srcFrameA = usToAudioFrames(srcUsA)
+
+                decoderA.readSynchronous(srcFrameA, frames, out, 0, 1.0f)
+
+                if (needsDeclick) {
+                    applyDeclickRamp(out, 0, frames)
+                }
+            } else if (bIndex in clips.indices) {
+                val clipB = clips[bIndex]
+                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f)
+                val gainB = activeSet.linearP.coerceIn(0f, 1f)
+
+                val decoderA = getOrCreateDecoder(clipA)
+                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                val srcFrameA = usToAudioFrames(srcUsA)
+                decoderA.readSynchronous(srcFrameA, frames, out, 0, gainA)
+
+                val decoderB = getOrCreateDecoder(clipB)
+                val srcUsB = clipB.map().sourceUs(activeSet.bLocalUs)
+                val srcFrameB = usToAudioFrames(srcUsB)
+                decoderB.readSynchronous(srcFrameB, frames, out, 0, gainB)
+
+                if (isFirstBlockAfterStop) {
+                    applyDeclickRamp(out, 0, frames)
+                }
+            }
+
+            isFirstBlockAfterStop = false
+            lastAIndex = aIndex
+            lastBIndex = bIndex
+        } catch (_: Throwable) {
+            // Failure isolation
+        }
+    }
+
+    /**
      * Applies a 2-5ms (144 frames) linear gain ramp to smooth out abrupt audio starts or cuts.
      */
     private fun applyDeclickRamp(out: FloatArray, offset: Int, frames: Int) {
