@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -293,6 +294,10 @@ fun EditorScreen(
         }
     }
 
+    val vmUiState = resolvedViewModel?.uiState?.collectAsState()?.value
+    val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
+    var isVolumeSheetVisible by remember { mutableStateOf(false) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -420,6 +425,9 @@ fun EditorScreen(
                                     is TimelineSelection.LaneItemSelected -> {}
                                     is TimelineSelection.TrimHandleLeft -> {}
                                     is TimelineSelection.TrimHandleRight -> {}
+                                    TimelineSelection.TrackMuteClicked -> {
+                                        resolvedViewModel?.toggleTrackMute()
+                                    }
                                 }
                             },
                             onLongPress = { sel ->
@@ -466,6 +474,8 @@ fun EditorScreen(
                                     }
                             },
                             onWakeFrameDriver = { frameDriver.wake() },
+                            isMainTrackMuted = isMainTrackMuted,
+                            onToggleTrackMute = { resolvedViewModel?.toggleTrackMute() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -503,6 +513,7 @@ fun EditorScreen(
                 isClipSelected = selectedClipIndex != null,
                 onSplitClick = onSplitClick ?: handleSplit,
                 onTrimClick = handleOpenTrim,
+                onVolumeClick = { isVolumeSheetVisible = true },
                 onDeleteClipClick = selectedClipIndex?.let { k ->
                     {
                         onDeleteClip(k)
@@ -589,6 +600,20 @@ fun EditorScreen(
                 onDismiss = {
                     isTrimSheetVisible = false
                 }
+            )
+        }
+
+        // Volume BottomSheet (0% to 200%) for selected clip
+        if (isVolumeSheetVisible && selectedClipIndex != null) {
+            VolumeSheet(
+                clipIndex = selectedClipIndex,
+                snapshotHolder = snapshotHolder,
+                getClipVolume = { id -> resolvedViewModel?.getClipVolume(id) ?: 1.0f },
+                getPreMuteVolume = { id -> resolvedViewModel?.getPreMuteVolume(id) ?: 1.0f },
+                onSetLiveVolume = { id, vol -> ClipAudioContributor.setClipVolume(id, vol) },
+                onCommitSingleVolume = { idx, vol -> resolvedViewModel?.commitClipVolume(idx, vol) },
+                onCommitApplyAllVolume = { vol -> resolvedViewModel?.commitApplyVolumeToAll(vol) },
+                onDismiss = { isVolumeSheetVisible = false }
             )
         }
     }

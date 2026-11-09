@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.flowcut.app.audio.ClipAudioContributor
 import com.flowcut.app.core.time.TimeMap
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
@@ -49,7 +50,8 @@ data class EditorUiState(
     val exportSheetVisible: Boolean = false,
     val exportState: ExportState = ExportState.Ready,
     val exportedUri: Uri? = null,
-    val toastMessage: String? = null
+    val toastMessage: String? = null,
+    val isMainTrackMuted: Boolean = false
 )
 
 data class SplitResult(
@@ -82,6 +84,114 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val redoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
     val clipTimeMaps = mutableMapOf<String, TimeMap>()
     val clipNaturalDurations = mutableMapOf<String, Long>()
+
+    // Per-clip volume (0.0f to 2.0f, default 1.0f), pre-mute memory, and undo/redo stacks
+    private val undoVolumes = ArrayDeque<Map<String, Float>>()
+    private val redoVolumes = ArrayDeque<Map<String, Float>>()
+    val clipVolumes = mutableMapOf<String, Float>()
+    val savedPreMuteVolumes = mutableMapOf<String, Float>()
+
+    fun getClipVolume(clipId: String): Float = clipVolumes[clipId] ?: 1.0f
+
+    fun getPreMuteVolume(clipId: String): Float = savedPreMuteVolumes[clipId] ?: 1.0f
+
+    fun isAllClipsMuted(): Boolean {
+        val clips = _uiState.value.project.clips
+        return clips.isNotEmpty() && clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
+    }
+
+    /**
+     * Toggles timeline track-level mute state with 100% bidirectional sync:
+     * - If any clip is currently unmuted (> 0f): saves non-zero volumes and mutes all clips to 0f.
+     * - If all clips are currently muted (<= 0.0001f): restores each clip to its saved pre-mute volume (or 1.0f).
+     */
+    fun toggleTrackMute() {
+        val currentProject = _uiState.value.project
+        val clips = currentProject.clips
+        if (clips.isEmpty()) return
+
+        val currentlyAllMuted = isAllClipsMuted()
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+
+        if (!currentlyAllMuted) {
+            // Mute everything: save current non-zero volumes
+            for (c in clips) {
+                val currentVol = clipVolumes[c.id] ?: 1.0f
+                if (currentVol > 0.0001f) {
+                    savedPreMuteVolumes[c.id] = currentVol
+                }
+                clipVolumes[c.id] = 0.0f
+                ClipAudioContributor.setClipVolume(c.id, 0.0f)
+            }
+            ClipAudioContributor.isMainTrackMuted = true
+            _uiState.update { it.copy(isMainTrackMuted = true) }
+        } else {
+            // Unmute everything: restore saved pre-mute volumes or default to 1.0f
+            for (c in clips) {
+                val restored = savedPreMuteVolumes[c.id]?.takeIf { it > 0.0001f } ?: 1.0f
+                clipVolumes[c.id] = restored
+                ClipAudioContributor.setClipVolume(c.id, restored)
+            }
+            ClipAudioContributor.isMainTrackMuted = false
+            _uiState.update { it.copy(isMainTrackMuted = false) }
+        }
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitClipVolume(clipIndex: Int, volume: Float) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+        val clampedVol = volume.coerceIn(0.0f, 2.0f)
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+
+        clipVolumes[clip.id] = clampedVol
+        ClipAudioContributor.setClipVolume(clip.id, clampedVol)
+        if (clampedVol > 0.0001f) {
+            savedPreMuteVolumes[clip.id] = clampedVol
+        }
+
+        val isAllMuted = isAllClipsMuted()
+        ClipAudioContributor.isMainTrackMuted = isAllMuted
+        _uiState.update { it.copy(isMainTrackMuted = isAllMuted) }
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitApplyVolumeToAll(volume: Float) {
+        val currentProject = _uiState.value.project
+        val clampedVol = volume.coerceIn(0.0f, 2.0f)
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+
+        for (c in currentProject.clips) {
+            clipVolumes[c.id] = clampedVol
+            ClipAudioContributor.setClipVolume(c.id, clampedVol)
+            if (clampedVol > 0.0001f) {
+                savedPreMuteVolumes[c.id] = clampedVol
+            }
+        }
+
+        val isAllMuted = clampedVol <= 0.0001f
+        ClipAudioContributor.isMainTrackMuted = isAllMuted
+        _uiState.update { it.copy(isMainTrackMuted = isAllMuted) }
+
+        updateProject(currentProject, recordUndo = false)
+    }
 
     fun getClipNaturalDurationUs(clipIndex: Int): Long {
         val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return 0L
@@ -130,7 +240,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
         redoTimeMaps.clear()
+        redoVolumes.clear()
         clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs)
         updateProject(newProject, recordUndo = false)
     }
@@ -234,7 +346,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         // Push current state onto Undo stack BEFORE applying the split
         undoStack.push(currentProject)
         undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
         redoTimeMaps.clear()
+        redoVolumes.clear()
 
         // Register natural duration for both halves
         val naturalDur = clipNaturalDurations[oldClip.id] ?: getMediaFileDurationUs(oldClip)
@@ -244,6 +358,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         // Update clipTimeMaps
         clipTimeMaps[oldClip.id] = leftMap
         clipTimeMaps[rightClipId] = rightMap
+
+        // Inherit volume and pre-mute memory for both halves
+        val origVol = clipVolumes[oldClip.id] ?: 1.0f
+        clipVolumes[oldClip.id] = origVol
+        clipVolumes[rightClipId] = origVol
+        savedPreMuteVolumes[oldClip.id]?.let { savedPreMuteVolumes[rightClipId] = it }
+        ClipAudioContributor.setClipVolume(oldClip.id, origVol)
+        ClipAudioContributor.setClipVolume(rightClipId, origVol)
 
         // Update project and select the new Right Clip (targetK + 1)
         updateProject(newProject, recordUndo = false)
@@ -295,7 +417,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (recordUndo) {
             undoStack.push(_uiState.value.project)
             undoTimeMaps.addLast(HashMap(clipTimeMaps))
+            undoVolumes.addLast(HashMap(clipVolumes))
             redoTimeMaps.clear()
+            redoVolumes.clear()
         }
         val newTimeline = ProgramTimeline(newProject)
         val clampedMs = _uiState.value.currentMs.coerceIn(0L, maxOf(0L, newTimeline.total))
@@ -421,13 +545,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (deletedId != null) {
             clipTimeMaps.remove(deletedId)
             clipNaturalDurations.remove(deletedId)
+            clipVolumes.remove(deletedId)
+            savedPreMuteVolumes.remove(deletedId)
+            ClipAudioContributor.clipVolumes.remove(deletedId)
         }
         val newProject = ProgramTimeline.deleteClip(_uiState.value.project, index)
+        val isAllMuted = newProject.clips.isNotEmpty() && newProject.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
+        ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(newProject, recordUndo = true)
         _uiState.update {
             it.copy(
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                isMainTrackMuted = isAllMuted
             )
         }
     }
@@ -449,12 +579,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             redoTimeMaps.clear()
             clipTimeMaps.clear()
             clipNaturalDurations.clear()
+            undoVolumes.clear()
+            redoVolumes.clear()
+            clipVolumes.clear()
+            savedPreMuteVolumes.clear()
+            ClipAudioContributor.clipVolumes.clear()
+            ClipAudioContributor.isMainTrackMuted = false
             _uiState.update {
                 it.copy(
                     project = Project(),
                     currentMs = 0L,
                     selectedClipIndex = null,
                     selectedJunctionIndex = null,
+                    isMainTrackMuted = false,
                     canUndo = false,
                     canRedo = false
                 )
@@ -660,11 +797,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipTimeMaps.clear()
             clipTimeMaps.putAll(prevMaps)
         }
+        if (undoVolumes.isNotEmpty()) {
+            val prevVols = undoVolumes.removeLast()
+            redoVolumes.addLast(HashMap(clipVolumes))
+            clipVolumes.clear()
+            clipVolumes.putAll(prevVols)
+            ClipAudioContributor.syncVolumes(clipVolumes)
+        }
+        val isAllMuted = previous.clips.isNotEmpty() && previous.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
+        ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(previous, recordUndo = false)
         _uiState.update {
             it.copy(
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                isMainTrackMuted = isAllMuted
             )
         }
     }
@@ -677,11 +824,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipTimeMaps.clear()
             clipTimeMaps.putAll(nextMaps)
         }
+        if (redoVolumes.isNotEmpty()) {
+            val nextVols = redoVolumes.removeLast()
+            undoVolumes.addLast(HashMap(clipVolumes))
+            clipVolumes.clear()
+            clipVolumes.putAll(nextVols)
+            ClipAudioContributor.syncVolumes(clipVolumes)
+        }
+        val isAllMuted = next.clips.isNotEmpty() && next.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
+        ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(next, recordUndo = false)
         _uiState.update {
             it.copy(
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                isMainTrackMuted = isAllMuted
             )
         }
     }

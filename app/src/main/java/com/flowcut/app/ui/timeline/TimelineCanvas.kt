@@ -215,6 +215,8 @@ fun TimelineCanvas(
         val c = holder.current.project.clips.getOrNull(index)
         c?.timeMap?.outUs ?: c?.durationMs?.let { msToUs(it) } ?: 0L
     },
+    isMainTrackMuted: Boolean = false,
+    onToggleTrackMute: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current.density
@@ -229,6 +231,8 @@ fun TimelineCanvas(
     val currentOnTrimPreview by rememberUpdatedState(onTrimPreview)
     val currentGetClipNaturalDurationUs by rememberUpdatedState(getClipNaturalDurationUs)
     val currentOnWakeFrameDriver by rememberUpdatedState(onWakeFrameDriver)
+    val currentIsMainTrackMuted by rememberUpdatedState(isMainTrackMuted)
+    val currentOnToggleTrackMute by rememberUpdatedState(onToggleTrackMute)
 
     // Cache original untrimmed duration per clip ID so a trimmed clip can always be extended back out (Bug #4)
     val clipNaturalDurationCache = remember { mutableMapOf<String, Long>() }
@@ -285,6 +289,15 @@ fun TimelineCanvas(
     val secondOffsetCache = remember { SecondOffsetCache(maxSec = 600) }
     val clipTitleCache = remember { ClipTitleCache(maxClips = 100) }
 
+    // Track Mute/Unmute Button styling constants (Rule R10)
+    val muteBtnBorderStroke = remember(density) { Stroke(width = 1f * density) }
+    val speakerWaveStroke = remember(density) { Stroke(width = 1.5f * density, cap = StrokeCap.Round) }
+    val muteCrossColor = remember { Color(0xFFFF453A) }
+    val speakerMutedColor = remember { Color(0xFF8E8E93) }
+    val muteBtnCardBg = remember { Color(0xFF1E1E24) }
+    val muteBtnBorderColor = remember { Color(0x33FFFFFF) }
+    val muteBtnCardBorderMuted = remember { Color(0x55FF453A) }
+
     // Reusable paths (Rule R10: zero allocation in onDraw)
     val clipPath = remember { Path() }
     val selectionPath = remember { Path() }
@@ -292,6 +305,10 @@ fun TimelineCanvas(
     val rightHandlePath = remember { Path() }
     val leftChevronPath = remember { Path() }
     val rightChevronPath = remember { Path() }
+    val muteBtnCardPath = remember { Path() }
+    val speakerConePath = remember { Path() }
+    val speakerWave1Path = remember { Path() }
+    val speakerWave2Path = remember { Path() }
 
     // Unclamped virtual playhead for smooth, wall-free trim dragging (Rule R10)
     val activeTrimPlayheadUs = remember { mutableLongStateOf(Long.MIN_VALUE) }
@@ -667,7 +684,11 @@ fun TimelineCanvas(
                                             zoomState = zoomState,
                                             selectedClipIndex = selectedClipIndex
                                         )
-                                        currentOnSelect(hit)
+                                        if (hit is TimelineSelection.TrackMuteClicked) {
+                                            currentOnToggleTrackMute()
+                                        } else {
+                                            currentOnSelect(hit)
+                                        }
                                     }
                                 }
                                 break
@@ -1000,6 +1021,88 @@ fun TimelineCanvas(
                         start = Offset(boxLeft + slashInsetPx, boxTop + junctionBoxSizePx - slashInsetPx),
                         end = Offset(boxLeft + junctionBoxSizePx - slashInsetPx, boxTop + slashInsetPx),
                         strokeWidth = slashStrokeWidthPx,
+                        cap = StrokeCap.Round
+                    )
+                }
+            }
+
+            // 4.5. Track Audio Mute/Unmute Button in the Left Empty Area
+            val clip0LeftX = zoomState.timeUsToX(0L, offsetPx, halfWidthInt, pxPerUs)
+            val muteBtnCenterX = clip0LeftX - (32f * density)
+            val muteBtnCenterY = (mainClipTop + mainClipBottom) / 2f
+            val muteBtnSizePx = 36f * density
+            val muteBtnLeft = muteBtnCenterX - (muteBtnSizePx / 2f)
+            val muteBtnTop = muteBtnCenterY - (muteBtnSizePx / 2f)
+            val muteBtnRight = muteBtnLeft + muteBtnSizePx
+            val muteBtnBottom = muteBtnTop + muteBtnSizePx
+
+            if (muteBtnRight >= 0f && muteBtnLeft <= size.width) {
+                val isMuted = currentIsMainTrackMuted
+                val cardRadiusPx = 8f * density
+                muteBtnCardPath.reset()
+                muteBtnCardPath.addRoundRect(
+                    androidx.compose.ui.geometry.RoundRect(
+                        left = muteBtnLeft,
+                        top = muteBtnTop,
+                        right = muteBtnRight,
+                        bottom = muteBtnBottom,
+                        cornerRadius = CornerRadius(cardRadiusPx, cardRadiusPx)
+                    )
+                )
+                drawPath(muteBtnCardPath, color = muteBtnCardBg)
+                drawPath(
+                    muteBtnCardPath,
+                    color = if (isMuted) muteBtnCardBorderMuted else muteBtnBorderColor,
+                    style = muteBtnBorderStroke
+                )
+
+                // Speaker Cone
+                val coneColor = if (isMuted) speakerMutedColor else whiteColor
+                speakerConePath.reset()
+                speakerConePath.moveTo(muteBtnCenterX - (6.5f * density), muteBtnCenterY - (3f * density))
+                speakerConePath.lineTo(muteBtnCenterX - (2.5f * density), muteBtnCenterY - (3f * density))
+                speakerConePath.lineTo(muteBtnCenterX + (1.5f * density), muteBtnCenterY - (6.5f * density))
+                speakerConePath.lineTo(muteBtnCenterX + (1.5f * density), muteBtnCenterY + (6.5f * density))
+                speakerConePath.lineTo(muteBtnCenterX - (2.5f * density), muteBtnCenterY + (3f * density))
+                speakerConePath.lineTo(muteBtnCenterX - (6.5f * density), muteBtnCenterY + (3f * density))
+                speakerConePath.close()
+                drawPath(speakerConePath, color = coneColor)
+
+                if (!isMuted) {
+                    // Unmuted: Two crisp sound waves
+                    speakerWave1Path.reset()
+                    speakerWave1Path.moveTo(muteBtnCenterX + (4f * density), muteBtnCenterY - (3.5f * density))
+                    speakerWave1Path.quadraticTo(
+                        muteBtnCenterX + (5.5f * density),
+                        muteBtnCenterY,
+                        muteBtnCenterX + (4f * density),
+                        muteBtnCenterY + (3.5f * density)
+                    )
+                    drawPath(speakerWave1Path, color = whiteColor, style = speakerWaveStroke)
+
+                    speakerWave2Path.reset()
+                    speakerWave2Path.moveTo(muteBtnCenterX + (7f * density), muteBtnCenterY - (6f * density))
+                    speakerWave2Path.quadraticTo(
+                        muteBtnCenterX + (9.5f * density),
+                        muteBtnCenterY,
+                        muteBtnCenterX + (7f * density),
+                        muteBtnCenterY + (6f * density)
+                    )
+                    drawPath(speakerWave2Path, color = whiteColor, style = speakerWaveStroke)
+                } else {
+                    // Muted: Crisp cross (✕) in accent/red
+                    drawLine(
+                        color = muteCrossColor,
+                        start = Offset(muteBtnCenterX + (4f * density), muteBtnCenterY - (4f * density)),
+                        end = Offset(muteBtnCenterX + (8.5f * density), muteBtnCenterY + (4f * density)),
+                        strokeWidth = 1.8f * density,
+                        cap = StrokeCap.Round
+                    )
+                    drawLine(
+                        color = muteCrossColor,
+                        start = Offset(muteBtnCenterX + (8.5f * density), muteBtnCenterY - (4f * density)),
+                        end = Offset(muteBtnCenterX + (4f * density), muteBtnCenterY + (4f * density)),
+                        strokeWidth = 1.8f * density,
                         cap = StrokeCap.Round
                     )
                 }

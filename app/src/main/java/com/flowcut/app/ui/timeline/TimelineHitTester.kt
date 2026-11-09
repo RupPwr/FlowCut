@@ -15,6 +15,7 @@ sealed interface TimelineSelection {
     data class LaneItemSelected(val laneIndex: Int, val itemIndex: Int) : TimelineSelection
     data class TrimHandleLeft(val index: Int) : TimelineSelection
     data class TrimHandleRight(val index: Int) : TimelineSelection
+    data object TrackMuteClicked : TimelineSelection
 }
 
 /**
@@ -106,6 +107,28 @@ object TimelineHitTester {
         }
     }
 
+    fun hitTestTrackMuteButton(
+        tapX: Float,
+        tapY: Float,
+        playheadUs: Long,
+        halfWidthPx: Float,
+        density: Float,
+        zoomState: TimelineZoomState,
+        rulerHeightDp: Float = RULER_HEIGHT_DP,
+        mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP
+    ): Boolean {
+        val clip0LeftX = zoomState.timeUsToX(0L, playheadUs, halfWidthPx, density)
+        val muteBtnCenterX = clip0LeftX - (32f * density)
+        val rulerHeightPx = rulerHeightDp * density
+        val mainTrackHeightPx = mainTrackHeightDp * density
+        val muteBtnCenterY = rulerHeightPx + mainTrackHeightPx / 2f
+
+        val touchRadiusPx = 24f * density // 48dp touch target
+        val dx = abs(tapX - muteBtnCenterX)
+        val dy = abs(tapY - muteBtnCenterY)
+        return dx <= touchRadiusPx && dy <= touchRadiusPx
+    }
+
     fun hitTest(
         tapX: Float,
         tapY: Float,
@@ -120,6 +143,14 @@ object TimelineHitTester {
         selectedClipIndex: Int = -1
     ): TimelineSelection {
         val n = snapshot.main.n
+
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY -1: Track Audio Mute/Unmute Button (Anchored left of clip 0)
+        // -----------------------------------------------------------------------------------------
+        if (hitTestTrackMuteButton(tapX, tapY, playheadUs, halfWidthPx, density, zoomState, rulerHeightDp, mainTrackHeightDp)) {
+            return TimelineSelection.TrackMuteClicked
+        }
+
         if (n == 0 && snapshot.lanes.isEmpty()) return TimelineSelection.None
 
         // -----------------------------------------------------------------------------------------

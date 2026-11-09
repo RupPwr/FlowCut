@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
@@ -40,6 +41,7 @@ fun BottomToolbar(
     isClipSelected: Boolean = false,
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
+    onVolumeClick: () -> Unit = {},
     onDeleteClipClick: (() -> Unit)? = null,
     onClearSelection: () -> Unit = {},
     onLockedItemClick: () -> Unit = {},
@@ -90,19 +92,19 @@ fun BottomToolbar(
                         .background(colors.border)
                 )
 
-                // Actions: SPLIT, TRIM, and DELETE
+                // Actions: SPLIT, TRIM, VOLUME, and DELETE
                 Row(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Split Action
                     Column(
                         modifier = Modifier
-                            .width(52.dp)
+                            .width(48.dp)
                             .fillMaxHeight()
                             .clickable { onSplitClick() },
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -126,7 +128,7 @@ fun BottomToolbar(
                     // Trim Action
                     Column(
                         modifier = Modifier
-                            .width(52.dp)
+                            .width(48.dp)
                             .fillMaxHeight()
                             .clickable { onTrimClick() },
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -147,10 +149,34 @@ fun BottomToolbar(
                         )
                     }
 
+                    // Volume Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onVolumeClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = "VOLUME",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "VOLUME",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
                     // Delete Action
                     Column(
                         modifier = Modifier
-                            .width(52.dp)
+                            .width(48.dp)
                             .fillMaxHeight()
                             .clickable { onDeleteClipClick?.invoke() },
                         horizontalAlignment = Alignment.CenterHorizontally,

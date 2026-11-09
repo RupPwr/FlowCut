@@ -49,10 +49,56 @@ class ClipAudioContributor(
     companion object {
         const val DECLICK_RAMP_FRAMES = 144 // 3 ms at 48,000 Hz
         const val LOOKAHEAD_PREWARM_US = 1_000_000L // 1 second lookahead
+
+        // Shared lock-free state for audio volume & track mute
+        @Volatile var isMainTrackMuted: Boolean = false
+        val clipVolumes = ConcurrentHashMap<String, Float>()
+
+        fun getClipVolume(clipId: String): Float = clipVolumes[clipId] ?: 1.0f
+
+        fun setClipVolume(clipId: String, volume: Float) {
+            val clamped = volume.coerceIn(0.0f, 2.0f)
+            clipVolumes[clipId] = clamped
+            if (clamped > 0.0001f) {
+                isMainTrackMuted = false
+            }
+        }
+
+        fun syncVolumes(volumes: Map<String, Float>) {
+            clipVolumes.clear()
+            clipVolumes.putAll(volumes)
+        }
+
+        /**
+         * Maps slider volume (0.0f..2.0f) to effective perceptual gain:
+         * - 0.0f..1.0f: Quadratic perceptual attenuation (sliderVol^2) so 50% sounds like half-volume.
+         * - 1.0f..2.0f: Linear high-impact boost factor up to 4.0x (+12 dB) at 200%.
+         */
+        fun computeEffectiveGain(sliderVol: Float): Float {
+            return if (sliderVol <= 1.0f) {
+                sliderVol * sliderVol
+            } else {
+                1.0f + (sliderVol - 1.0f) * 3.0f
+            }
+        }
+
+        /**
+         * Zero-allocation soft-knee saturation limiter (Rule R10).
+         * - abs(x) <= 0.6f: Linear, completely uncompressed (0 distortion).
+         * - abs(x) > 0.6f: Smooth asymptotic compression towards 0.99f without harsh digital clipping.
+         */
+        fun softLimit(x: Float): Float {
+            val absX = kotlin.math.abs(x)
+            if (absX <= 0.6f) return x
+            val sign = if (x >= 0f) 1f else -1f
+            val diff = absX - 0.6f
+            return sign * (0.6f + 0.39f * (diff / (0.39f + diff)))
+        }
     }
 
     override fun render(startFrame: Long, frames: Int, out: FloatArray) {
         if (frames <= 0) return
+        if (isMainTrackMuted) return
 
         try {
             val startTimelineUs = ClipAudioDecoder.framesToUs(startFrame)
@@ -121,7 +167,8 @@ class ClipAudioContributor(
                             if (decoderA != null) {
                                 val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
                                 val srcFrameA = usToAudioFrames(srcUsA)
-                                decoderA.read(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                                val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                                decoderA.read(srcFrameA, framesBeforeCut, out, 0, volA)
                             }
                         }
 
@@ -131,8 +178,15 @@ class ClipAudioContributor(
                             if (decoderNext != null) {
                                 val srcUsNext = nextClip.map().sourceUs(0L)
                                 val srcFrameNext = usToAudioFrames(srcUsNext)
-                                decoderNext.read(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
+                                val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
+                                decoderNext.read(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, volNext)
                             }
+                        }
+
+                        // Soft limit boosted audio cleanly (Rule R10: zero allocations)
+                        val totalCutSamples = frames * 2
+                        for (si in 0 until totalCutSamples) {
+                            out[si] = softLimit(out[si])
                         }
 
                         lastAIndex = nextIndex
@@ -155,8 +209,9 @@ class ClipAudioContributor(
                 val decoderA = getOrCreateDecoder(clipA)
                 val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
                 val srcFrameA = usToAudioFrames(srcUsA)
+                val volA = computeEffectiveGain(getClipVolume(clipA.id))
 
-                decoderA.read(srcFrameA, frames, out, 0, 1.0f)
+                decoderA.read(srcFrameA, frames, out, 0, volA)
 
                 if (needsDeclick) {
                     applyDeclickRamp(out, 0, frames)
@@ -164,8 +219,10 @@ class ClipAudioContributor(
             } else if (bIndex in clips.indices) {
                 // Case 2: Transition crossfade between clip A and clip B
                 val clipB = clips[bIndex]
-                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f)
-                val gainB = activeSet.linearP.coerceIn(0f, 1f)
+                val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                val volB = computeEffectiveGain(getClipVolume(clipB.id))
+                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
+                val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
 
                 val decoderA = getOrCreateDecoder(clipA)
                 val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
@@ -182,6 +239,12 @@ class ClipAudioContributor(
                 }
             }
 
+            // Soft limit boosted audio cleanly (Rule R10: zero allocations)
+            val sampleCount = frames * 2
+            for (si in 0 until sampleCount) {
+                out[si] = softLimit(out[si])
+            }
+
             isFirstBlockAfterStop = false
             lastAIndex = aIndex
             lastBIndex = bIndex
@@ -196,6 +259,10 @@ class ClipAudioContributor(
      */
     fun renderSynchronous(startFrame: Long, frames: Int, out: FloatArray) {
         if (frames <= 0) return
+        if (isMainTrackMuted) {
+            out.fill(0f)
+            return
+        }
 
         try {
             val startTimelineUs = ClipAudioDecoder.framesToUs(startFrame)
@@ -235,14 +302,22 @@ class ClipAudioContributor(
                             val decoderA = getOrCreateDecoder(clipA)
                             val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
                             val srcFrameA = usToAudioFrames(srcUsA)
-                            decoderA.readSynchronous(srcFrameA, framesBeforeCut, out, 0, 1.0f)
+                            val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                            decoderA.readSynchronous(srcFrameA, framesBeforeCut, out, 0, volA)
                         }
 
                         if (framesAfterCut > 0) {
                             val decoderNext = getOrCreateDecoder(nextClip)
                             val srcUsNext = nextClip.map().sourceUs(0L)
                             val srcFrameNext = usToAudioFrames(srcUsNext)
-                            decoderNext.readSynchronous(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, 1.0f)
+                            val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
+                            decoderNext.readSynchronous(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, volNext)
+                        }
+
+                        // Soft limit boosted audio cleanly (Rule R10: zero allocations)
+                        val totalCutSamples = frames * 2
+                        for (si in 0 until totalCutSamples) {
+                            out[si] = softLimit(out[si])
                         }
 
                         lastAIndex = nextIndex
@@ -264,16 +339,19 @@ class ClipAudioContributor(
                 val decoderA = getOrCreateDecoder(clipA)
                 val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
                 val srcFrameA = usToAudioFrames(srcUsA)
+                val volA = computeEffectiveGain(getClipVolume(clipA.id))
 
-                decoderA.readSynchronous(srcFrameA, frames, out, 0, 1.0f)
+                decoderA.readSynchronous(srcFrameA, frames, out, 0, volA)
 
                 if (needsDeclick) {
                     applyDeclickRamp(out, 0, frames)
                 }
             } else if (bIndex in clips.indices) {
                 val clipB = clips[bIndex]
-                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f)
-                val gainB = activeSet.linearP.coerceIn(0f, 1f)
+                val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                val volB = computeEffectiveGain(getClipVolume(clipB.id))
+                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
+                val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
 
                 val decoderA = getOrCreateDecoder(clipA)
                 val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
@@ -288,6 +366,12 @@ class ClipAudioContributor(
                 if (isFirstBlockAfterStop) {
                     applyDeclickRamp(out, 0, frames)
                 }
+            }
+
+            // Soft limit boosted audio cleanly (Rule R10: zero allocations)
+            val sampleCount = frames * 2
+            for (si in 0 until sampleCount) {
+                out[si] = softLimit(out[si])
             }
 
             isFirstBlockAfterStop = false
