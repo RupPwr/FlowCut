@@ -266,6 +266,33 @@ fun EditorScreen(
         }
     }
 
+    var isTrimSheetVisible by remember { mutableStateOf(false) }
+
+    val handleOpenTrim: () -> Unit = {
+        var targetIdx = selectedClipIndex
+        if (targetIdx == null) {
+            val playheadMs = usToMs(playbackController.playhead.timeUs)
+            val main = snapshotHolder.current.main
+            for (i in 0 until main.n) {
+                if (playheadMs >= main.startMs[i] && playheadMs < main.endMs[i]) {
+                    targetIdx = i
+                    onSelectClip(i)
+                    break
+                }
+            }
+        }
+        if (targetIdx != null && targetIdx in 0 until snapshotHolder.current.main.n) {
+            if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                playbackController.pause()
+                frameDriver.wake()
+                onPlaybackStateChange(false)
+            }
+            isTrimSheetVisible = true
+        } else {
+            Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -475,6 +502,7 @@ fun EditorScreen(
             BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
                 onSplitClick = onSplitClick ?: handleSplit,
+                onTrimClick = handleOpenTrim,
                 onDeleteClipClick = selectedClipIndex?.let { k ->
                     {
                         onDeleteClip(k)
@@ -519,6 +547,48 @@ fun EditorScreen(
                 onCancelExport = onCancelExport,
                 onShare = onShareExport,
                 onDismiss = onCloseExportSheet
+            )
+        }
+
+        // Trim BottomSheet / Panel for selected clip
+        if (isTrimSheetVisible && selectedClipIndex != null) {
+            TrimSheet(
+                clipIndex = selectedClipIndex,
+                snapshotHolder = snapshotHolder,
+                previewRenderer = previewRenderer,
+                frameDriver = frameDriver,
+                getClipNaturalDurationUs = { k ->
+                    resolvedViewModel?.getClipNaturalDurationUs(k)
+                        ?: run {
+                            val clip = snapshotHolder.current.project.clips.getOrNull(k)
+                            clip?.let { c ->
+                                try {
+                                    val file = java.io.File(c.path)
+                                    if (file.exists()) {
+                                        val retriever = android.media.MediaMetadataRetriever()
+                                        retriever.setDataSource(file.absolutePath)
+                                        val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                        retriever.release()
+                                        durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(c.durationMs)
+                                    } else msToUs(c.durationMs)
+                                } catch (_: Exception) {
+                                    msToUs(c.durationMs)
+                                }
+                            } ?: 0L
+                        }
+                },
+                onCommitTrim = { k, inUs, outUs ->
+                    val newDurMs = usToMs(outUs - inUs)
+                    resolvedViewModel?.commitClipTrim(k, inUs, outUs)
+                    onCommitTrim(k, inUs, outUs, newDurMs)
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                    }
+                },
+                onDismiss = {
+                    isTrimSheetVisible = false
+                }
             )
         }
     }

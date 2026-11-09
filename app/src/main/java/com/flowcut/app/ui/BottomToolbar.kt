@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
@@ -38,6 +39,7 @@ import androidx.compose.ui.unit.sp
 fun BottomToolbar(
     isClipSelected: Boolean = false,
     onSplitClick: () -> Unit = {},
+    onTrimClick: () -> Unit = {},
     onDeleteClipClick: (() -> Unit)? = null,
     onClearSelection: () -> Unit = {},
     onLockedItemClick: () -> Unit = {},
@@ -88,26 +90,26 @@ fun BottomToolbar(
                         .background(colors.border)
                 )
 
-                // Actions: SPLIT and DELETE
+                // Actions: SPLIT, TRIM, and DELETE
                 Row(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
                         .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Split Action
                     Column(
                         modifier = Modifier
-                            .width(56.dp)
+                            .width(52.dp)
                             .fillMaxHeight()
                             .clickable { onSplitClick() },
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ContentCut,
+                            imageVector = Icons.AutoMirrored.Filled.CallSplit,
                             contentDescription = "SPLIT",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(20.dp)
@@ -121,10 +123,34 @@ fun BottomToolbar(
                         )
                     }
 
+                    // Trim Action
+                    Column(
+                        modifier = Modifier
+                            .width(52.dp)
+                            .fillMaxHeight()
+                            .clickable { onTrimClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCut,
+                            contentDescription = "TRIM",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "TRIM",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
                     // Delete Action
                     Column(
                         modifier = Modifier
-                            .width(56.dp)
+                            .width(52.dp)
                             .fillMaxHeight()
                             .clickable { onDeleteClipClick?.invoke() },
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -155,23 +181,23 @@ fun BottomToolbar(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 1. Trim (Locked)
+                // 1. Trim (Active: selects clip under playhead and opens TrimSheet)
                 Column(
                     modifier = Modifier
                         .width(48.dp)
-                        .clickable { onLockedItemClick() },
+                        .clickable { onTrimClick() },
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.ContentCut,
                         contentDescription = "Trim",
-                        tint = colors.textSecondary,
+                        tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
                     Text(
                         text = "Trim",
-                        color = colors.textSecondary,
+                        color = colors.textPrimary,
                         fontSize = 11.sp
                     )
                 }
