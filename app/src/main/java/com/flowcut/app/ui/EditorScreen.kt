@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -199,17 +200,32 @@ fun EditorScreen(
     val onPlaybackStateChangeState = rememberUpdatedState(onPlaybackStateChange)
     val onPlayheadUpdateState = rememberUpdatedState(onPlayheadUpdate)
 
+    val stateDirtyCounter = remember { java.util.concurrent.atomic.AtomicLong(1L) }
+
     val previewRenderer = remember {
         PreviewRenderer(
             holder = snapshotHolder,
             playhead = playbackController.playhead,
-            context = context
-        )
+            context = context,
+            onRenderRequested = {
+                stateDirtyCounter.incrementAndGet()
+            }
+        ).apply {
+            (glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
+        }
+    }
+
+    SideEffect {
+        (glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
+        (previewRenderer.glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
     }
 
     val frameDriver = remember(playbackController, previewRenderer) {
         var lastReportedSec = -1L
         var lastReportedMode = PlayMode.PAUSED
+        var lastRequestedTimeUs = -1L
+        var lastRequestedMode = PlayMode.PAUSED
+        var lastRenderDirtyVersion = -1L
 
         FrameDriver(
             controller = playbackController,
@@ -235,7 +251,25 @@ fun EditorScreen(
                 if (isPlayingState.value && mode != PlayMode.PLAYING) {
                     onPlaybackStateChangeState.value.invoke(false)
                 }
-                previewRenderer.requestRender()
+
+                // 3. Skip redundant renders when paused
+                val currentDirtyVersion = stateDirtyCounter.get()
+                val isDirty = currentDirtyVersion != lastRenderDirtyVersion
+                val shouldRender = (mode != PlayMode.PAUSED) ||
+                        (tUs != lastRequestedTimeUs) ||
+                        (mode != lastRequestedMode) ||
+                        isDirty
+
+                if (shouldRender) {
+                    lastRequestedTimeUs = tUs
+                    lastRequestedMode = mode
+                    lastRenderDirtyVersion = currentDirtyVersion
+                    if (previewRenderer.glSurfaceView != null) {
+                        previewRenderer.glSurfaceView.requestRender()
+                    } else {
+                        previewRenderer.requestRender()
+                    }
+                }
             }
         )
     }

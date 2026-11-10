@@ -68,7 +68,7 @@ class TransitionRenderer {
 
     // Pre-allocated fallback arrays for zero allocations (Rule R10)
     private val defaultAdj = FloatArray(4)
-    private val defaultTexelSize = floatArrayOf(1f / 1080f, 1f / 1920f)
+    private val defaultTexelSize = floatArrayOf(1f / 720f, 1f / 1280f)
     private val defaultIdentityMat = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
     private val defaultBgParams = FloatArray(4)
 
@@ -193,32 +193,25 @@ class TransitionRenderer {
             if (blurLevel <= 0.001) {
                 return texture(tex, uv) * 0.88;
             }
-            float radius = max(1.0, blurLevel * 28.0);
-            vec2 stride = texelSize * radius;
+            float radius = max(1.0, blurLevel * 20.0);
+            vec2 stride = (texelSize * 4.0) * radius;
 
-            // 17-tap disc sampling kernel
-            vec4 sum = texture(tex, uv) * 0.16;
+            // 9-tap kernel: center + 8-tap 2-ring diamond/rotated-grid (effective 1/4 res stride)
+            vec4 sum = texture(tex, uv) * 0.20;
 
-            // Ring 1 (radius 0.5 * stride) - 8 samples
+            // Ring 1 (inner diamond, radius 0.5 * stride) - 4 taps
             vec2 r1 = stride * 0.5;
-            sum += texture(tex, clamp(uv + vec2( r1.x,  0.0 ), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2(-r1.x,  0.0 ), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2( 0.0,   r1.y), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2( 0.0,  -r1.y), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2( r1.x * 0.707,  r1.y * 0.707), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2(-r1.x * 0.707,  r1.y * 0.707), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2( r1.x * 0.707, -r1.y * 0.707), 0.001, 0.999)) * 0.06;
-            sum += texture(tex, clamp(uv + vec2(-r1.x * 0.707, -r1.y * 0.707), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2( r1.x,  0.0 ), 0.001, 0.999)) * 0.11;
+            sum += texture(tex, clamp(uv + vec2(-r1.x,  0.0 ), 0.001, 0.999)) * 0.11;
+            sum += texture(tex, clamp(uv + vec2( 0.0,   r1.y), 0.001, 0.999)) * 0.11;
+            sum += texture(tex, clamp(uv + vec2( 0.0,  -r1.y), 0.001, 0.999)) * 0.11;
 
-            // Ring 2 (radius 1.0 * stride) - 8 samples at 22.5 deg offset
-            sum += texture(tex, clamp(uv + vec2( stride.x *  0.924,  stride.y *  0.383), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.924,  stride.y *  0.383), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2( stride.x *  0.924, -stride.y *  0.383), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.924, -stride.y *  0.383), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2( stride.x *  0.383,  stride.y *  0.924), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.383,  stride.y *  0.924), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2( stride.x *  0.383, -stride.y *  0.924), 0.001, 0.999)) * 0.045;
-            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.383, -stride.y *  0.924), 0.001, 0.999)) * 0.045;
+            // Ring 2 (outer rotated grid at 45 deg, radius 1.0 * stride) - 4 taps
+            vec2 r2 = stride * 0.7071;
+            sum += texture(tex, clamp(uv + vec2( r2.x,  r2.y), 0.001, 0.999)) * 0.09;
+            sum += texture(tex, clamp(uv + vec2(-r2.x,  r2.y), 0.001, 0.999)) * 0.09;
+            sum += texture(tex, clamp(uv + vec2( r2.x, -r2.y), 0.001, 0.999)) * 0.09;
+            sum += texture(tex, clamp(uv + vec2(-r2.x, -r2.y), 0.001, 0.999)) * 0.09;
 
             // Subtle 0.88 brightness dim so the sharp foreground video pops!
             sum.rgb *= 0.88;
@@ -234,17 +227,19 @@ class TransitionRenderer {
             if (feather < 0.001) feather = 0.001;
             float fgAlpha = smoothstep(0.0, feather, edgeDist);
 
-            if (fgAlpha >= 1.0) {
+            if (fgAlpha >= 0.999) {
                 vec2 texUv = (uMatA * vec4(cropUv, 0.0, 1.0)).xy;
                 return applyColorAdjust(uTexA, texUv, uAdjA0, uAdjA1, uAdjA2, uTexelSize);
             }
 
             vec4 bg = vec4(0.0, 0.0, 0.0, 1.0);
-            if (uBgModeA == 1) {
-                bg = vec4(uBgParamsA.rgb, 1.0);
-            } else if (uBgModeA == 2) {
-                vec2 bgUv = (uBgMatA * vec4(cropUv, 0.0, 1.0)).xy;
-                bg = sampleBlur(uTexA, bgUv, uBgParamsA.a, uTexelSize);
+            if (fgAlpha < 0.999) {
+                if (uBgModeA == 1) {
+                    bg = vec4(uBgParamsA.rgb, 1.0);
+                } else if (uBgModeA == 2) {
+                    vec2 bgUv = (uBgMatA * vec4(cropUv, 0.0, 1.0)).xy;
+                    bg = sampleBlur(uTexA, bgUv, uBgParamsA.a, uTexelSize);
+                }
             }
 
             if (fgAlpha <= 0.0) {
@@ -264,17 +259,19 @@ class TransitionRenderer {
             if (feather < 0.001) feather = 0.001;
             float fgAlpha = smoothstep(0.0, feather, edgeDist);
 
-            if (fgAlpha >= 1.0) {
+            if (fgAlpha >= 0.999) {
                 vec2 texUv = (uMatB * vec4(cropUv, 0.0, 1.0)).xy;
                 return applyColorAdjust(uTexB, texUv, uAdjB0, uAdjB1, uAdjB2, uTexelSize);
             }
 
             vec4 bg = vec4(0.0, 0.0, 0.0, 1.0);
-            if (uBgModeB == 1) {
-                bg = vec4(uBgParamsB.rgb, 1.0);
-            } else if (uBgModeB == 2) {
-                vec2 bgUv = (uBgMatB * vec4(cropUv, 0.0, 1.0)).xy;
-                bg = sampleBlur(uTexB, bgUv, uBgParamsB.a, uTexelSize);
+            if (fgAlpha < 0.999) {
+                if (uBgModeB == 1) {
+                    bg = vec4(uBgParamsB.rgb, 1.0);
+                } else if (uBgModeB == 2) {
+                    vec2 bgUv = (uBgMatB * vec4(cropUv, 0.0, 1.0)).xy;
+                    bg = sampleBlur(uTexB, bgUv, uBgParamsB.a, uTexelSize);
+                }
             }
 
             if (fgAlpha <= 0.0) {

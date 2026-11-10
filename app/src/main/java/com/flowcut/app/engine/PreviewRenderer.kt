@@ -18,8 +18,6 @@ import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.ActiveSet
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
-import com.flowcut.app.model.PREVIEW_H
-import com.flowcut.app.model.PREVIEW_W
 import com.flowcut.app.model.ProgramTimeline
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +30,13 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * Live preview resolution (720x1280, 9:16 portrait).
+ * ExportEngine stays at full 1080x1920.
+ */
+const val PREVIEW_W: Int = 720
+const val PREVIEW_H: Int = 1280
 
 /**
  * Global migration switch (Section 15).
@@ -287,6 +292,14 @@ class PreviewRenderer(
         this[1] = 1.0f / PREVIEW_H.toFloat()
     }
 
+    private var viewportWidth: Int = PREVIEW_W
+    private var viewportHeight: Int = PREVIEW_H
+
+    // Zero-allocation frame-time telemetry logger (Rule R10)
+    private var frameTimeSumUs: Long = 0L
+    private var frameTimeMaxUs: Long = 0L
+    private var frameCount: Int = 0
+
     // Pre-allocated per-slot background and foreground matrices & parameters (Rule R10)
     private val fgNormMatA = FloatArray(16)
     private val fgNormMatB = FloatArray(16)
@@ -512,19 +525,23 @@ class PreviewRenderer(
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        GLES30.glViewport(0, 0, width, height)
         if (width > 0 && height > 0) {
+            viewportWidth = width
+            viewportHeight = height
             texelSize[0] = 1.0f / width.toFloat()
             texelSize[1] = 1.0f / height.toFloat()
         }
+        GLES30.glViewport(0, 0, width, height)
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        val startNs = System.nanoTime()
+        try {
+            GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
-        val frame = renderFrame(PREVIEW_W, PREVIEW_H)
-        if (frame.clipAIndex < 0) return
+            val frame = renderFrame(viewportWidth, viewportHeight)
+            if (frame.clipAIndex < 0) return
 
         val stA = surfaceTextureA ?: return
         val stB = surfaceTextureB ?: return
@@ -582,7 +599,10 @@ class PreviewRenderer(
                 computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
                 Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
                 val bgA = getClipBackground(clipA.id)
-                val bgModeA = packBackground(bgA, bgParamsA)
+                var bgModeA = packBackground(bgA, bgParamsA)
+                if (bgModeA != 0 && isForegroundCoveringCanvas(transformA, clipA.displayWidth, clipA.displayHeight)) {
+                    bgModeA = 0
+                }
 
                 // Ensure Clip B is on Slot B
                 val clipBChanged = frameSourceB == null ||
@@ -621,7 +641,10 @@ class PreviewRenderer(
                 computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
                 Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
                 val bgB = getClipBackground(clipB.id)
-                val bgModeB = packBackground(bgB, bgParamsB)
+                var bgModeB = packBackground(bgB, bgParamsB)
+                if (bgModeB != 0 && isForegroundCoveringCanvas(transformB, clipB.displayWidth, clipB.displayHeight)) {
+                    bgModeB = 0
+                }
 
                 val easedP = ProgramTimeline.ease(frame.linearP)
                 val legacyType = when (frame.transitionType) {
@@ -632,8 +655,8 @@ class PreviewRenderer(
                     TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
                 }
 
-                val needsScissor = (bgA.type == BackgroundType.NONE && bgB.type == BackgroundType.NONE) &&
-                    computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                val needsScissor = (bgModeA == 0 && bgModeB == 0) &&
+                    computeScissorRect(viewportWidth, viewportHeight, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 if (needsScissor) {
                     GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                     GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
@@ -799,10 +822,13 @@ class PreviewRenderer(
             computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
             Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
             val bgA = getClipBackground(clipA.id)
-            val bgModeA = packBackground(bgA, bgParamsA)
+            var bgModeA = packBackground(bgA, bgParamsA)
+            if (bgModeA != 0 && isForegroundCoveringCanvas(transformA, clipA.displayWidth, clipA.displayHeight)) {
+                bgModeA = 0
+            }
 
-            val needsScissor = (bgA.type == BackgroundType.NONE) &&
-                computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+            val needsScissor = (bgModeA == 0) &&
+                computeScissorRect(viewportWidth, viewportHeight, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
             if (needsScissor) {
                 GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                 GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
@@ -935,10 +961,13 @@ class PreviewRenderer(
             computeBgNormMatrix(bgNormMat, transformB, clipA.displayWidth, clipA.displayHeight)
             Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
             val bgB = getClipBackground(clipA.id)
-            val bgModeB = packBackground(bgB, bgParamsB)
+            var bgModeB = packBackground(bgB, bgParamsB)
+            if (bgModeB != 0 && isForegroundCoveringCanvas(transformB, clipA.displayWidth, clipA.displayHeight)) {
+                bgModeB = 0
+            }
 
-            val needsScissor = (bgB.type == BackgroundType.NONE) &&
-                computeScissorRect(PREVIEW_W, PREVIEW_H, transformB, clipA.displayWidth, clipA.displayHeight, scissorRect)
+            val needsScissor = (bgModeB == 0) &&
+                computeScissorRect(viewportWidth, viewportHeight, transformB, clipA.displayWidth, clipA.displayHeight, scissorRect)
             if (needsScissor) {
                 GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                 GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
@@ -976,6 +1005,27 @@ class PreviewRenderer(
                 if (needsScissor) {
                     GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
                 }
+            }
+        }
+        } finally {
+            val durationUs = (System.nanoTime() - startNs) / 1000L
+            frameTimeSumUs += durationUs
+            if (durationUs > frameTimeMaxUs) {
+                frameTimeMaxUs = durationUs
+            }
+            frameCount++
+            if (frameCount >= 120) {
+                val avgMs = frameTimeSumUs.toDouble() / (frameCount * 1000.0)
+                val maxMs = frameTimeMaxUs.toDouble() / 1000.0
+                try {
+                    android.util.Log.d(
+                        "FlowCutPerf",
+                        "Render frame time (last 120): avg=${String.format(java.util.Locale.US, "%.2f", avgMs)}ms, max=${String.format(java.util.Locale.US, "%.2f", maxMs)}ms"
+                    )
+                } catch (_: Throwable) {}
+                frameTimeSumUs = 0L
+                frameTimeMaxUs = 0L
+                frameCount = 0
             }
         }
     }
@@ -1092,6 +1142,40 @@ class PreviewRenderer(
                     return 2
                 }
             }
+        }
+
+        /**
+         * Checks whether the foreground clip completely covers the 9:16 viewport with zero exposed background bars:
+         * Specifically when rotationDeg % 180f == 0f (or 90°/270° aligned) and the transformed clip's
+         * normalized half-extents (hw, hh) satisfy panX - hw <= -0.5f && panX + hw >= 0.5f && panY - hh <= -0.5f && panY + hh >= 0.5f.
+         */
+        fun isForegroundCoveringCanvas(
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920
+        ): Boolean {
+            val normRot = ((transform.rotationDeg % 360f) + 360f) % 360f
+            val nearestCardinal = (Math.round(normRot / 90.0).toInt() * 90) % 360
+            if (kotlin.math.abs(normRot - nearestCardinal) > 0.05f) {
+                return false
+            }
+            val aScreen = 9.0f / 16.0f
+            val rawW = if (displayWidth > 0) displayWidth else 1080
+            val rawH = if (displayHeight > 0) displayHeight else 1920
+            val aClip = (rawW.toFloat() / rawH.toFloat()).coerceAtLeast(0.01f)
+            val isSwapped = (nearestCardinal == 90 || nearestCardinal == 270)
+            val effAspect = if (isSwapped) (1.0f / aClip) else aClip
+
+            val baseHw = if (effAspect >= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
+            val baseHh = if (effAspect >= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
+            val scale = transform.scale.coerceIn(0.25f, 5.0f)
+            val hw = baseHw * scale
+            val hh = baseHh * scale
+
+            return (transform.panX - hw <= -0.5f) &&
+                   (transform.panX + hw >= 0.5f) &&
+                   (transform.panY - hh <= -0.5f) &&
+                   (transform.panY + hh >= 0.5f)
         }
 
         fun computeFgNormMatrix(
