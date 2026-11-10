@@ -105,7 +105,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val selectedIndex = _uiState.value.selectedClipIndex ?: return null
         val clip = _uiState.value.project.clips.getOrNull(selectedIndex) ?: return null
         val current = clipTransforms[clip.id] ?: ClipTransform.DEFAULT
-        val nextDeg = (current.rotationDeg + 90) % 360
+        val nextDeg = (((Math.round(current.rotationDeg / 90.0) * 90 + 90) % 360 + 360) % 360).toFloat()
         val newTransform = current.copy(rotationDeg = nextDeg)
 
         val currentProject = _uiState.value.project
@@ -144,6 +144,107 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         updateProject(currentProject, recordUndo = false)
         return newTransform
+    }
+
+    fun commitClipTransform(clipIndex: Int, transform: ClipTransform) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+
+        clipTransforms[clip.id] = transform
+        PreviewRenderer.setClipTransform(clip.id, transform)
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun applyTransformToAll(sourceClipId: String) {
+        val currentProject = _uiState.value.project
+        if (currentProject.clips.isEmpty()) return
+        val sourceTransform = clipTransforms[sourceClipId] ?: ClipTransform.DEFAULT
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+
+        for (c in currentProject.clips) {
+            val current = clipTransforms[c.id] ?: ClipTransform.DEFAULT
+            val newTransform = current.copy(
+                scale = sourceTransform.scale,
+                panX = sourceTransform.panX,
+                panY = sourceTransform.panY,
+                rotationDeg = sourceTransform.rotationDeg,
+                isFlippedH = sourceTransform.isFlippedH
+            )
+            clipTransforms[c.id] = newTransform
+            PreviewRenderer.setClipTransform(c.id, newTransform)
+        }
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitClipScale(clipIndex: Int, scale: Float, panX: Float, panY: Float) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+        val current = clipTransforms[clip.id] ?: ClipTransform.DEFAULT
+        val newTransform = current.copy(
+            scale = scale.coerceIn(0.5f, 4.0f),
+            panX = panX.coerceIn(-1.0f, 1.0f),
+            panY = panY.coerceIn(-1.0f, 1.0f)
+        )
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+
+        clipTransforms[clip.id] = newTransform
+        PreviewRenderer.setClipTransform(clip.id, newTransform)
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitApplyScaleToAll(scale: Float, panX: Float, panY: Float) {
+        val currentProject = _uiState.value.project
+        if (currentProject.clips.isEmpty()) return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+
+        val clampedScale = scale.coerceIn(0.5f, 4.0f)
+        val clampedPanX = panX.coerceIn(-1.0f, 1.0f)
+        val clampedPanY = panY.coerceIn(-1.0f, 1.0f)
+
+        for (c in currentProject.clips) {
+            val current = clipTransforms[c.id] ?: ClipTransform.DEFAULT
+            val newTransform = current.copy(
+                scale = clampedScale,
+                panX = clampedPanX,
+                panY = clampedPanY
+            )
+            clipTransforms[c.id] = newTransform
+            PreviewRenderer.setClipTransform(c.id, newTransform)
+        }
+
+        updateProject(currentProject, recordUndo = false)
     }
 
     fun getClipVolume(clipId: String): Float = clipVolumes[clipId] ?: 1.0f

@@ -165,15 +165,18 @@ class PrefetchCoordinator(
 }
 
 /**
- * Per-clip transform state: rotation in degrees (0, 90, 180, 270 clockwise)
+ * Per-clip transform state: rotation in degrees (continuous Float)
  * and horizontal mirror (isFlippedH).
  */
 data class ClipTransform(
-    val rotationDeg: Int = 0, // 0, 90, 180, 270
-    val isFlippedH: Boolean = false
+    val rotationDeg: Float = 0f,
+    val isFlippedH: Boolean = false,
+    val scale: Float = 1.0f, // 0.25f to 5.0f
+    val panX: Float = 0.0f,  // normalized screen offset
+    val panY: Float = 0.0f   // normalized screen offset
 ) {
     companion object {
-        val DEFAULT = ClipTransform(0, false)
+        val DEFAULT = ClipTransform(0f, false, 1.0f, 0.0f, 0.0f)
     }
 }
 
@@ -228,6 +231,7 @@ class PreviewRenderer(
     private val rawMatB = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
     private val cropA = FloatArray(2) { 1f }
     private val cropB = FloatArray(2) { 1f }
+    private val scissorRect = IntArray(4)
 
     private val contributors = mutableListOf<RenderContributor>()
     private val disabledContributors = mutableSetOf<RenderContributor>()
@@ -447,7 +451,7 @@ class PreviewRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        GLES30.glClearColor(0.08f, 0.08f, 0.07f, 1.0f)
+        GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
         val frame = renderFrame(PREVIEW_W, PREVIEW_H)
@@ -503,7 +507,7 @@ class PreviewRenderer(
                 }
                 val transformA = getClipTransform(clipA.id)
                 System.arraycopy(rawMatA, 0, matA, 0, 16)
-                applyTransformMatrix(matA, transformA)
+                applyTransformMatrix(matA, transformA, clipA.displayWidth, clipA.displayHeight)
                 calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
                 // Ensure Clip B is on Slot B
@@ -537,7 +541,7 @@ class PreviewRenderer(
                 }
                 val transformB = getClipTransform(clipB.id)
                 System.arraycopy(rawMatB, 0, matB, 0, 16)
-                applyTransformMatrix(matB, transformB)
+                applyTransformMatrix(matB, transformB, clipB.displayWidth, clipB.displayHeight)
                 calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
 
                 val easedP = ProgramTimeline.ease(frame.linearP)
@@ -549,6 +553,11 @@ class PreviewRenderer(
                     TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
                 }
 
+                val needsScissor = computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                if (needsScissor) {
+                    GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+                    GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
+                }
                 try {
                     renderer.draw(
                         DrawSpec(
@@ -560,7 +569,12 @@ class PreviewRenderer(
                             cropB = cropB
                         )
                     )
-                } catch (_: Exception) {}
+                } catch (_: Exception) {
+                } finally {
+                    if (needsScissor) {
+                        GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                    }
+                }
 
                 // Transition completes into Slot B as primary
                 primarySlot = 1
@@ -625,7 +639,7 @@ class PreviewRenderer(
             }
             val transformA = getClipTransform(clipA.id)
             System.arraycopy(rawMatA, 0, matA, 0, 16)
-            applyTransformMatrix(matA, transformA)
+            applyTransformMatrix(matA, transformA, clipA.displayWidth, clipA.displayHeight)
             calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
             // Standby Slot B: 3-Stage Incremental Pre-warm of upcoming different-path clip within 500ms
@@ -663,7 +677,7 @@ class PreviewRenderer(
                                         } catch (_: Exception) {}
                                         val nextTransform = getClipTransform(nextClip.id)
                                         System.arraycopy(rawMatB, 0, matB, 0, 16)
-                                        applyTransformMatrix(matB, nextTransform)
+                                        applyTransformMatrix(matB, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
                                         calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropB)
                                         standbySlotReadyForClipId = nextClip.id
                                         standbyPreparedPath = nextClip.path
@@ -683,6 +697,11 @@ class PreviewRenderer(
                 standbyPreparedInUs = -1L
             }
 
+            val needsScissor = computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+            if (needsScissor) {
+                GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+                GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
+            }
             try {
                 renderer.draw(
                     DrawSpec(
@@ -694,7 +713,12 @@ class PreviewRenderer(
                         cropB = cropB
                     )
                 )
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            } finally {
+                if (needsScissor) {
+                    GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                }
+            }
         } else {
             // --- Slot B is Primary (stB / texBId) ---
             val clipBChanged = frameSourceB == null || frameSourceB?.currentPath != clipA.path
@@ -727,7 +751,7 @@ class PreviewRenderer(
             }
             val transformB = getClipTransform(clipA.id)
             System.arraycopy(rawMatB, 0, matB, 0, 16)
-            applyTransformMatrix(matB, transformB)
+            applyTransformMatrix(matB, transformB, clipA.displayWidth, clipA.displayHeight)
             calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformB, cropB)
 
             // Standby Slot A: 3-Stage Incremental Pre-warm of upcoming different-path clip within 500ms
@@ -765,7 +789,7 @@ class PreviewRenderer(
                                         } catch (_: Exception) {}
                                         val nextTransform = getClipTransform(nextClip.id)
                                         System.arraycopy(rawMatA, 0, matA, 0, 16)
-                                        applyTransformMatrix(matA, nextTransform)
+                                        applyTransformMatrix(matA, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
                                         calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropA)
                                         standbySlotReadyForClipId = nextClip.id
                                         standbyPreparedPath = nextClip.path
@@ -785,6 +809,11 @@ class PreviewRenderer(
                 standbyPreparedInUs = -1L
             }
 
+            val needsScissor = computeScissorRect(PREVIEW_W, PREVIEW_H, transformB, clipA.displayWidth, clipA.displayHeight, scissorRect)
+            if (needsScissor) {
+                GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+                GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
+            }
             try {
                 renderer.draw(
                     DrawSpec(
@@ -796,7 +825,12 @@ class PreviewRenderer(
                         cropB = cropB
                     )
                 )
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            } finally {
+                if (needsScissor) {
+                    GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                }
+            }
         }
     }
 
@@ -855,10 +889,8 @@ class PreviewRenderer(
         }
 
         fun calculateClipCrop(displayWidth: Int, displayHeight: Int, transform: ClipTransform, out: FloatArray) {
-            val isRotated90or270 = transform.rotationDeg == 90 || transform.rotationDeg == 270
-            val effectiveW = if (isRotated90or270) displayHeight else displayWidth
-            val effectiveH = if (isRotated90or270) displayWidth else displayHeight
-            calculateCropInto(effectiveW, effectiveH, out)
+            out[0] = 1.0f
+            out[1] = 1.0f
         }
 
         fun calculateCropInto(displayWidth: Int, displayHeight: Int, out: FloatArray) {
@@ -875,19 +907,105 @@ class PreviewRenderer(
 
         fun applyTransformMatrix(
             mat: FloatArray,
-            transform: ClipTransform
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920
         ) {
-            if (transform.rotationDeg == 0 && !transform.isFlippedH) {
-                return
+            val aScreen = 9.0f / 16.0f
+            val w = if (displayWidth > 0) displayWidth else 1080
+            val h = if (displayHeight > 0) displayHeight else 1920
+            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+
+            val sx1: Float
+            val sy1: Float
+            val sx2: Float
+            val sy2: Float
+            if (aClip >= aScreen) {
+                sx1 = aScreen
+                sy1 = 1.0f
+                sx2 = 1.0f / aClip
+                sy2 = 1.0f
+            } else {
+                sx1 = 1.0f
+                sy1 = 1.0f / aScreen
+                sx2 = 1.0f
+                sy2 = aClip
             }
+
             Matrix.translateM(mat, 0, 0.5f, 0.5f, 0f)
-            if (transform.rotationDeg != 0) {
-                Matrix.rotateM(mat, 0, transform.rotationDeg.toFloat(), 0f, 0f, 1f)
+            Matrix.scaleM(mat, 0, sx2, sy2, 1f)
+            if (transform.rotationDeg != 0f) {
+                Matrix.rotateM(mat, 0, transform.rotationDeg, 0f, 0f, 1f)
             }
             if (transform.isFlippedH) {
                 Matrix.scaleM(mat, 0, -1f, 1f, 1f)
             }
-            Matrix.translateM(mat, 0, -0.5f, -0.5f, 0f)
+            Matrix.scaleM(mat, 0, sx1, sy1, 1f)
+            val sInv = 1.0f / transform.scale.coerceIn(0.25f, 5.0f)
+            Matrix.scaleM(mat, 0, sInv, sInv, 1f)
+            Matrix.translateM(mat, 0, -0.5f - transform.panX, -0.5f - transform.panY, 0f)
+        }
+
+        fun computeScissorRect(
+            width: Int,
+            height: Int,
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920,
+            out: IntArray
+        ): Boolean {
+            val aScreen = 9.0f / 16.0f
+            val w = if (displayWidth > 0) displayWidth else 1080
+            val h = if (displayHeight > 0) displayHeight else 1920
+            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+
+            val baseHw: Float
+            val baseHh: Float
+            if (aClip >= aScreen) {
+                baseHw = 0.5f * (aClip / aScreen)
+                baseHh = 0.5f
+            } else {
+                baseHw = 0.5f
+                baseHh = 0.5f * (aScreen / aClip)
+            }
+
+            val scale = transform.scale.coerceIn(0.25f, 5.0f)
+            val hw = baseHw * scale
+            val hh = baseHh * scale
+
+            val rad = Math.toRadians(transform.rotationDeg.toDouble())
+            val cos = Math.abs(Math.cos(rad)).toFloat()
+            val sin = Math.abs(Math.sin(rad)).toFloat()
+
+            val rx = hw * cos + (hh * sin / aScreen)
+            val ry = (hw * aScreen * sin) + (hh * cos)
+
+            val leftNorm = 0.5f + transform.panX - rx
+            val rightNorm = 0.5f + transform.panX + rx
+            val bottomNorm = 0.5f + transform.panY - ry
+            val topNorm = 0.5f + transform.panY + ry
+
+            if (leftNorm <= 0f && rightNorm >= 1f && bottomNorm <= 0f && topNorm >= 1f) {
+                out[0] = 0
+                out[1] = 0
+                out[2] = width
+                out[3] = height
+                return false
+            }
+
+            val xMin = (leftNorm * width).toInt().coerceIn(0, width)
+            val xMax = (rightNorm * width).toInt().coerceIn(0, width)
+            val yMin = (bottomNorm * height).toInt().coerceIn(0, height)
+            val yMax = (topNorm * height).toInt().coerceIn(0, height)
+
+            val scissorW = (xMax - xMin).coerceAtLeast(0)
+            val scissorH = (yMax - yMin).coerceAtLeast(0)
+
+            out[0] = xMin
+            out[1] = yMin
+            out[2] = scissorW
+            out[3] = scissorH
+            return true
         }
 
         fun toLegacyClip(clip: Clip): com.flowcut.app.model.Clip {

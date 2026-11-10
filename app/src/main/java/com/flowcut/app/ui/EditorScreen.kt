@@ -2,9 +2,14 @@ package com.flowcut.app.ui
 
 import android.view.View
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,9 +17,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -26,13 +37,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.flowcut.app.ALL_FEATURES
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.flowcut.app.audio.AudioEngine
 import com.flowcut.app.audio.AudioFeature
 import com.flowcut.app.audio.ClipAudioContributor
@@ -299,6 +318,17 @@ fun EditorScreen(
     val vmUiState = resolvedViewModel?.uiState?.collectAsState()?.value
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
     var isVolumeSheetVisible by remember { mutableStateOf(false) }
+    var showApplyToAll by remember { mutableStateOf(false) }
+    var applyToAllJob by remember { mutableStateOf<Job?>(null) }
+
+    val triggerApplyToAllPill: () -> Unit = {
+        applyToAllJob?.cancel()
+        showApplyToAll = true
+        applyToAllJob = coroutineScope.launch {
+            delay(3000L)
+            showApplyToAll = false
+        }
+    }
 
     Box(
         modifier = modifier
@@ -332,15 +362,221 @@ fun EditorScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // 2. Preview box: weight 1f, minimum 220 dp
-                PreviewBox(
-                    hasClips = hasClips,
-                    selectedTransitionName = selectedTransitionName,
-                    onAddVideoClick = onAddClipsClick,
-                    glSurfaceView = if (USE_NEW_CORE && previewRenderer.glSurfaceView != null) previewRenderer.glSurfaceView else glSurfaceView,
+                Box(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 220.dp)
-                )
+                        .fillMaxWidth()
+                ) {
+                    PreviewBox(
+                        hasClips = hasClips,
+                        selectedTransitionName = selectedTransitionName,
+                        onAddVideoClick = onAddClipsClick,
+                        glSurfaceView = if (USE_NEW_CORE && previewRenderer.glSurfaceView != null) previewRenderer.glSurfaceView else glSurfaceView,
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    // On-Preview Free Transform Gestures overlay when a clip is selected
+                    if (hasClips && selectedClipIndex != null) {
+                        val activeClipId = resolvedViewModel?.uiState?.value?.project?.clips?.getOrNull(selectedClipIndex)?.id
+                        if (activeClipId != null) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .pointerInput(selectedClipIndex, activeClipId) {
+                                        var lastTapTimeMs = 0L
+                                        var lastTapPosition = Offset.Zero
+
+                                        awaitEachGesture {
+                                            val down = awaitFirstDown(requireUnconsumed = false)
+                                            val downTime = System.currentTimeMillis()
+                                            val downPos = down.position
+                                            var isDragOrTransform = false
+
+                                            var currentTransform = resolvedViewModel?.getClipTransform(activeClipId)
+                                                ?: PreviewRenderer.getClipTransform(activeClipId)
+
+                                            var totalMovedPx = 0f
+
+                                            do {
+                                                val event = awaitPointerEvent()
+                                                val pressedList = event.changes.filter { it.pressed }
+                                                if (pressedList.isEmpty()) break
+
+                                                if (pressedList.size == 1) {
+                                                    val p = pressedList[0]
+                                                    val dx = p.position.x - p.previousPosition.x
+                                                    val dy = p.position.y - p.previousPosition.y
+                                                    val moveDist = kotlin.math.sqrt(dx * dx + dy * dy)
+                                                    totalMovedPx += moveDist
+
+                                                    if (totalMovedPx > 10f) {
+                                                        isDragOrTransform = true
+                                                        p.consume()
+
+                                                        val previewW = size.width.toFloat().coerceAtLeast(1f)
+                                                        val previewH = size.height.toFloat().coerceAtLeast(1f)
+
+                                                        val newPanX = (currentTransform.panX + dx / previewW).coerceIn(-1.5f, 1.5f)
+                                                        val newPanY = (currentTransform.panY - dy / previewH).coerceIn(-1.5f, 1.5f)
+
+                                                        currentTransform = currentTransform.copy(panX = newPanX, panY = newPanY)
+                                                        PreviewRenderer.setClipTransform(activeClipId, currentTransform)
+                                                        previewRenderer.requestRender()
+                                                        frameDriver.wake()
+                                                    }
+                                                } else if (pressedList.size >= 2) {
+                                                    isDragOrTransform = true
+                                                    val p1 = pressedList[0]
+                                                    val p2 = pressedList[1]
+                                                    p1.consume()
+                                                    p2.consume()
+
+                                                    val prevPos1 = p1.previousPosition
+                                                    val prevPos2 = p2.previousPosition
+                                                    val currPos1 = p1.position
+                                                    val currPos2 = p2.position
+
+                                                    // 1. Pan (centroid delta)
+                                                    val prevCenter = (prevPos1 + prevPos2) / 2f
+                                                    val currCenter = (currPos1 + currPos2) / 2f
+                                                    val dPan = currCenter - prevCenter
+
+                                                    val previewW = size.width.toFloat().coerceAtLeast(1f)
+                                                    val previewH = size.height.toFloat().coerceAtLeast(1f)
+                                                    val newPanX = (currentTransform.panX + dPan.x / previewW).coerceIn(-1.5f, 1.5f)
+                                                    val newPanY = (currentTransform.panY - dPan.y / previewH).coerceIn(-1.5f, 1.5f)
+
+                                                    // 2. Zoom (distance ratio)
+                                                    val prevDist = (prevPos1 - prevPos2).getDistance()
+                                                    val currDist = (currPos1 - currPos2).getDistance()
+                                                    val zoomRatio = if (prevDist > 1f) currDist / prevDist else 1f
+                                                    val newScale = (currentTransform.scale * zoomRatio).coerceIn(0.25f, 5.0f)
+
+                                                    // 3. Twist (rotation delta)
+                                                    val prevAngle = Math.toDegrees(kotlin.math.atan2((prevPos2.y - prevPos1.y).toDouble(), (prevPos2.x - prevPos1.x).toDouble())).toFloat()
+                                                    val currAngle = Math.toDegrees(kotlin.math.atan2((currPos2.y - currPos1.y).toDouble(), (currPos2.x - currPos1.x).toDouble())).toFloat()
+                                                    var angleDelta = currAngle - prevAngle
+                                                    while (angleDelta > 180f) angleDelta -= 360f
+                                                    while (angleDelta < -180f) angleDelta += 360f
+
+                                                    val rawRotation = currentTransform.rotationDeg + angleDelta
+                                                    val normAngle = ((rawRotation % 360f) + 360f) % 360f
+                                                    val nearestCardinal = (Math.round(normAngle / 90f) * 90f).toFloat()
+                                                    val diff = kotlin.math.abs(normAngle - nearestCardinal)
+                                                    val finalRotation = if (diff <= 2.5f) {
+                                                        (nearestCardinal % 360f)
+                                                    } else {
+                                                        rawRotation
+                                                    }
+
+                                                    currentTransform = currentTransform.copy(
+                                                        scale = newScale,
+                                                        panX = newPanX,
+                                                        panY = newPanY,
+                                                        rotationDeg = finalRotation
+                                                    )
+                                                    PreviewRenderer.setClipTransform(activeClipId, currentTransform)
+                                                    previewRenderer.requestRender()
+                                                    frameDriver.wake()
+                                                }
+                                            } while (true)
+
+                                            // Gesture completed (all fingers up)
+                                            if (isDragOrTransform) {
+                                                resolvedViewModel?.commitClipTransform(selectedClipIndex, currentTransform)
+                                                if (USE_NEW_CORE) {
+                                                    resolvedViewModel?.let { vm ->
+                                                        snapshotHolder.current = vm.getSnapshot()
+                                                    }
+                                                }
+                                                previewRenderer.requestRender()
+                                                frameDriver.wake()
+                                                triggerApplyToAllPill()
+                                            } else {
+                                                // Check for double-tap
+                                                val upTime = System.currentTimeMillis()
+                                                val tapDuration = upTime - downTime
+                                                val tapDist = (downPos - lastTapPosition).getDistance()
+
+                                                if (tapDuration < 300L && (upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
+                                                    // Double-tap detected: reset transform!
+                                                    val resetTransform = currentTransform.copy(
+                                                        scale = 1.0f,
+                                                        panX = 0f,
+                                                        panY = 0f,
+                                                        rotationDeg = 0f
+                                                    )
+                                                    resolvedViewModel?.commitClipTransform(selectedClipIndex, resetTransform)
+                                                    if (USE_NEW_CORE) {
+                                                        resolvedViewModel?.let { vm ->
+                                                            snapshotHolder.current = vm.getSnapshot()
+                                                        }
+                                                    }
+                                                    PreviewRenderer.setClipTransform(activeClipId, resetTransform)
+                                                    previewRenderer.requestRender()
+                                                    frameDriver.wake()
+                                                    triggerApplyToAllPill()
+                                                    lastTapTimeMs = 0L
+                                                } else if (tapDuration < 300L) {
+                                                    lastTapTimeMs = upTime
+                                                    lastTapPosition = downPos
+                                                }
+                                            }
+                                        }
+                                    }
+                            )
+                        }
+                    }
+
+                    // Floating 3-Second "Apply to All" Pill in bottom-right corner of preview
+                    if (hasClips && selectedClipIndex != null && showApplyToAll) {
+                        Surface(
+                            onClick = {
+                                applyToAllJob?.cancel()
+                                showApplyToAll = false
+                                val currentProject = resolvedViewModel?.uiState?.value?.project
+                                val clip = currentProject?.clips?.getOrNull(selectedClipIndex)
+                                if (clip != null) {
+                                    resolvedViewModel?.applyTransformToAll(clip.id)
+                                    if (USE_NEW_CORE) {
+                                        resolvedViewModel?.let { vm ->
+                                            snapshotHolder.current = vm.getSnapshot()
+                                        }
+                                    }
+                                    previewRenderer.requestRender()
+                                    frameDriver.wake()
+                                }
+                            },
+                            shape = RoundedCornerShape(16.dp),
+                            color = colors.surface2.copy(alpha = 0.92f),
+                            border = BorderStroke(1.dp, colors.border),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DoneAll,
+                                    contentDescription = "Apply to All",
+                                    tint = colors.accent,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Apply to All",
+                                    color = colors.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -527,6 +763,7 @@ fun EditorScreen(
                     }
                     previewRenderer.requestRender()
                     frameDriver.wake()
+                    triggerApplyToAllPill()
                 },
                 onFlipClick = onFlipClip ?: {
                     resolvedViewModel?.flipSelectedClip()
@@ -537,6 +774,7 @@ fun EditorScreen(
                     }
                     previewRenderer.requestRender()
                     frameDriver.wake()
+                    triggerApplyToAllPill()
                 },
                 onDeleteClipClick = selectedClipIndex?.let { k ->
                     {

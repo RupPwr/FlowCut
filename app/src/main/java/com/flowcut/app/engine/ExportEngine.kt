@@ -308,6 +308,7 @@ class ExportEngine(private val context: Context) {
             val rawMatB = FloatArray(16)
             val cropA = FloatArray(2) { 1f }
             val cropB = FloatArray(2) { 1f }
+            val scissorRect = IntArray(4)
             val activeSet = ActiveSet(snapshot.lanes.size)
 
             var currentAIndex = -1
@@ -525,7 +526,7 @@ class ExportEngine(private val context: Context) {
 
                 val transformA = PreviewRenderer.getClipTransform(clipA.id)
                 System.arraycopy(rawMatA, 0, matA, 0, 16)
-                PreviewRenderer.applyTransformMatrix(matA, transformA)
+                PreviewRenderer.applyTransformMatrix(matA, transformA, clipA.displayWidth, clipA.displayHeight)
                 PreviewRenderer.calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
                 if (res.isTransition && res.clipBIndex >= 0) {
@@ -565,7 +566,7 @@ class ExportEngine(private val context: Context) {
 
                     val transformB = PreviewRenderer.getClipTransform(clipB.id)
                     System.arraycopy(rawMatB, 0, matB, 0, 16)
-                    PreviewRenderer.applyTransformMatrix(matB, transformB)
+                    PreviewRenderer.applyTransformMatrix(matB, transformB, clipB.displayWidth, clipB.displayHeight)
                     PreviewRenderer.calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
                 } else {
                     if (frameSourceB != null) {
@@ -575,16 +576,30 @@ class ExportEngine(private val context: Context) {
                     }
                 }
 
-                rnd.draw(
-                    DrawSpec(
-                        type = res.transitionType,
-                        easedP = res.easedP,
-                        matA = matA,
-                        matB = matB,
-                        cropA = cropA,
-                        cropB = cropB
+                GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+
+                val needsScissor = PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                if (needsScissor) {
+                    GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+                    GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
+                }
+                try {
+                    rnd.draw(
+                        DrawSpec(
+                            type = res.transitionType,
+                            easedP = res.easedP,
+                            matA = matA,
+                            matB = matB,
+                            cropA = cropA,
+                            cropB = cropB
+                        )
                     )
-                )
+                } finally {
+                    if (needsScissor) {
+                        GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                    }
+                }
 
                 // Non-zero monotonic EGL timestamp: offset by +1ms (1,000,000 ns) to avoid driver 0L pitfalls
                 val presentationTimeNs = (i * 1_000_000_000L / EXPORT_FPS) + 1_000_000L
