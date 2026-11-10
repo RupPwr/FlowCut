@@ -125,7 +125,11 @@ data class SetTimeMapCommand(
     override fun apply(p: Project): Project {
         if (clipIndex !in p.clips.indices) return p
         val oldClip = p.clips[clipIndex]
-        val newDurationMs = usToMs(timeMap.timelineDurationUs())
+        val newDurationMs = if (timeMap.speedNum == 0 && timeMap.inUs == timeMap.outUs) {
+            oldClip.durationMs
+        } else {
+            usToMs(timeMap.timelineDurationUs())
+        }
         val newClip = oldClip.copy(timeMap = timeMap, durationMs = newDurationMs)
         val newClips = p.clips.toMutableList()
         newClips[clipIndex] = newClip

@@ -15,6 +15,8 @@ data class DrawSpec(
     var matB: FloatArray = FloatArray(16),
     var cropA: FloatArray = FloatArray(2),
     var cropB: FloatArray = FloatArray(2),
+    var opacityA: Float = 1.0f,
+    var opacityB: Float = 1.0f,
     var adjA0: FloatArray? = null,
     var adjA1: FloatArray? = null,
     var adjA2: FloatArray? = null,
@@ -65,6 +67,15 @@ class TransitionRenderer {
     private var uBgModeBLoc = -1
     private var uBgParamsALoc = -1
     private var uBgParamsBLoc = -1
+    private var uOpacityALoc = -1
+    private var uOpacityBLoc = -1
+
+    // Overlay compositor program and uniforms
+    private var overlayProgramId = 0
+    private var uOverlayMatLoc = -1
+    private var uOverlayTexLoc = -1
+    private var uOverlayOpacityLoc = -1
+    private val overlayMvp = FloatArray(16)
 
     // Pre-allocated fallback arrays for zero allocations (Rule R10)
     private val defaultAdj = FloatArray(4)
@@ -114,6 +125,8 @@ class TransitionRenderer {
         uniform int uBgModeB;
         uniform vec4 uBgParamsA;
         uniform vec4 uBgParamsB;
+        uniform float uOpacityA;
+        uniform float uOpacityB;
 
         in vec2 vUV;
         out vec4 outColor;
@@ -226,6 +239,7 @@ class TransitionRenderer {
             float feather = max(fwidth(fgCoord.x), fwidth(fgCoord.y)) * 1.5;
             if (feather < 0.001) feather = 0.001;
             float fgAlpha = smoothstep(0.0, feather, edgeDist);
+            fgAlpha *= clamp(uOpacityA, 0.0, 1.0);
 
             if (fgAlpha >= 0.999) {
                 vec2 texUv = (uMatA * vec4(cropUv, 0.0, 1.0)).xy;
@@ -258,6 +272,7 @@ class TransitionRenderer {
             float feather = max(fwidth(fgCoord.x), fwidth(fgCoord.y)) * 1.5;
             if (feather < 0.001) feather = 0.001;
             float fgAlpha = smoothstep(0.0, feather, edgeDist);
+            fgAlpha *= clamp(uOpacityB, 0.0, 1.0);
 
             if (fgAlpha >= 0.999) {
                 vec2 texUv = (uMatB * vec4(cropUv, 0.0, 1.0)).xy;
@@ -319,6 +334,31 @@ class TransitionRenderer {
         }
     """.trimIndent()
 
+    private val overlayVertexShaderSource = """
+        #version 300 es
+        layout(location = 0) in vec4 aPos;
+        layout(location = 1) in vec2 aUV;
+        uniform mat4 uOverlayMat;
+        out vec2 vUV;
+        void main() {
+            gl_Position = uOverlayMat * aPos;
+            vUV = aUV;
+        }
+    """.trimIndent()
+
+    private val overlayFragmentShaderSource = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uOverlayTex;
+        uniform float uOverlayOpacity;
+        in vec2 vUV;
+        out vec4 outColor;
+        void main() {
+            vec4 texColor = texture(uOverlayTex, vUV);
+            outColor = vec4(texColor.rgb, texColor.a * clamp(uOverlayOpacity, 0.0, 1.0));
+        }
+    """.trimIndent()
+
     // 4 vertices (Pos: x, y; UV: u, v)
     // Triangle strip: (-1,-1), (1,-1), (-1,1), (1,1)
     private val quadVertices = floatArrayOf(
@@ -358,6 +398,16 @@ class TransitionRenderer {
         uBgModeBLoc = GLES30.glGetUniformLocation(programId, "uBgModeB")
         uBgParamsALoc = GLES30.glGetUniformLocation(programId, "uBgParamsA")
         uBgParamsBLoc = GLES30.glGetUniformLocation(programId, "uBgParamsB")
+        uOpacityALoc = GLES30.glGetUniformLocation(programId, "uOpacityA")
+        uOpacityBLoc = GLES30.glGetUniformLocation(programId, "uOpacityB")
+
+        // Setup Overlay Compositor Program
+        val overlayVs = compileShader(GLES30.GL_VERTEX_SHADER, overlayVertexShaderSource)
+        val overlayFs = compileShader(GLES30.GL_FRAGMENT_SHADER, overlayFragmentShaderSource)
+        overlayProgramId = createProgram(overlayVs, overlayFs)
+        uOverlayMatLoc = GLES30.glGetUniformLocation(overlayProgramId, "uOverlayMat")
+        uOverlayTexLoc = GLES30.glGetUniformLocation(overlayProgramId, "uOverlayTex")
+        uOverlayOpacityLoc = GLES30.glGetUniformLocation(overlayProgramId, "uOverlayOpacity")
 
         // Setup VAO & VBO
         val vaos = IntArray(1)
@@ -456,6 +506,8 @@ class TransitionRenderer {
         GLES30.glUniform1i(uBgModeBLoc, spec.bgModeB)
         GLES30.glUniform4fv(uBgParamsALoc, 1, spec.bgParamsA ?: defaultBgParams, 0)
         GLES30.glUniform4fv(uBgParamsBLoc, 1, spec.bgParamsB ?: defaultBgParams, 0)
+        GLES30.glUniform1f(uOpacityALoc, spec.opacityA)
+        GLES30.glUniform1f(uOpacityBLoc, spec.opacityB)
 
         // Draw quad
         GLES30.glBindVertexArray(vaoId)
@@ -465,10 +517,55 @@ class TransitionRenderer {
         GLES30.glUseProgram(0)
     }
 
+    /**
+     * Compositor pass for overlay items (text, sticker, image) over the base video layer.
+     * Uses standard GL_TEXTURE_2D + straight alpha blending.
+     * Automatically skips overlays with opacity <= 0.001f or off-screen bounds (Rule R10).
+     */
+    fun drawOverlayQuad(
+        texId: Int,
+        transform: ClipTransform,
+        opacity: Float = 1.0f,
+        displayWidth: Int = 1080,
+        displayHeight: Int = 1920
+    ) {
+        if (texId <= 0) return
+        val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
+        if (effectiveOpacity <= 0.001f) return
+
+        if (isOverlayOffScreen(transform, displayWidth, displayHeight)) {
+            return
+        }
+
+        GLES30.glEnable(GLES30.GL_BLEND)
+        GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+
+        GLES30.glUseProgram(overlayProgramId)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
+        GLES30.glUniform1i(uOverlayTexLoc, 0)
+        GLES30.glUniform1f(uOverlayOpacityLoc, effectiveOpacity)
+
+        computeOverlayMvp(overlayMvp, transform, displayWidth, displayHeight)
+        GLES30.glUniformMatrix4fv(uOverlayMatLoc, 1, false, overlayMvp, 0)
+
+        GLES30.glBindVertexArray(vaoId)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glBindVertexArray(0)
+
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        GLES30.glUseProgram(0)
+        GLES30.glDisable(GLES30.GL_BLEND)
+    }
+
     fun release() {
         if (programId != 0) {
             GLES30.glDeleteProgram(programId)
             programId = 0
+        }
+        if (overlayProgramId != 0) {
+            GLES30.glDeleteProgram(overlayProgramId)
+            overlayProgramId = 0
         }
         if (vaoId != 0) {
             GLES30.glDeleteVertexArrays(1, intArrayOf(vaoId), 0)
@@ -523,6 +620,64 @@ class TransitionRenderer {
             } else {
                 floatArrayOf(1.0f, aspect / target)
             }
+        }
+
+        fun isOverlayOffScreen(
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920
+        ): Boolean {
+            val aScreen = 9.0f / 16.0f
+            val w = if (displayWidth > 0) displayWidth else 1080
+            val h = if (displayHeight > 0) displayHeight else 1920
+            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+
+            val baseHw = if (aClip >= aScreen) 0.5f * (aClip / aScreen) else 0.5f
+            val baseHh = if (aClip >= aScreen) 0.5f else 0.5f * (aScreen / aClip)
+
+            val scale = transform.scale.coerceIn(0.01f, 10.0f)
+            val hw = baseHw * scale
+            val hh = baseHh * scale
+
+            val rad = Math.toRadians(transform.rotationDeg.toDouble())
+            val cos = Math.abs(Math.cos(rad)).toFloat()
+            val sin = Math.abs(Math.sin(rad)).toFloat()
+
+            val rx = hw * cos + (hh * sin / aScreen)
+            val ry = (hw * aScreen * sin) + (hh * cos)
+
+            val leftNorm = 0.5f + transform.panX - rx
+            val rightNorm = 0.5f + transform.panX + rx
+            val bottomNorm = 0.5f + transform.panY - ry
+            val topNorm = 0.5f + transform.panY + ry
+
+            return rightNorm <= 0f || leftNorm >= 1f || topNorm <= 0f || bottomNorm >= 1f
+        }
+
+        fun computeOverlayMvp(
+            outMvp: FloatArray,
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920
+        ) {
+            val aScreen = 9.0f / 16.0f
+            val w = if (displayWidth > 0) displayWidth else 1080
+            val h = if (displayHeight > 0) displayHeight else 1920
+            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+
+            val baseHw = if (aClip >= aScreen) 0.5f * (aClip / aScreen) else 0.5f
+            val baseHh = if (aClip >= aScreen) 0.5f else 0.5f * (aScreen / aClip)
+            val scale = transform.scale.coerceIn(0.01f, 10.0f)
+
+            android.opengl.Matrix.setIdentityM(outMvp, 0)
+            android.opengl.Matrix.translateM(outMvp, 0, transform.panX * 2.0f, transform.panY * 2.0f, 0f)
+            if (transform.rotationDeg != 0f) {
+                android.opengl.Matrix.rotateM(outMvp, 0, transform.rotationDeg, 0f, 0f, 1f)
+            }
+            if (transform.isFlippedH) {
+                android.opengl.Matrix.scaleM(outMvp, 0, -1f, 1f, 1f)
+            }
+            android.opengl.Matrix.scaleM(outMvp, 0, baseHw * scale, baseHh * scale, 1f)
         }
     }
 }

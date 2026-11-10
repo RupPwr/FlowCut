@@ -198,6 +198,7 @@ class ExportEngine(private val context: Context) {
         var frameSourceB: FrameSource? = null
         val snapshotHolder = SnapshotHolder(snapshot)
         val audioContributor = ClipAudioContributor(snapshotHolder)
+        val activeLayerSet = ActiveLayerSet()
 
         var muxerStarted = false
         var muxerReleased = false
@@ -556,6 +557,7 @@ class ExportEngine(private val context: Context) {
                 val isTransition = res.isTransition && res.clipBIndex >= 0
                 var bgB = ClipBackground.DEFAULT
                 var bgModeB = 0
+                var opacityB = 1.0f
 
                 if (isTransition) {
                     val clipB = snapshot.project.clips[res.clipBIndex]
@@ -593,6 +595,7 @@ class ExportEngine(private val context: Context) {
                     } catch (_: Exception) {}
 
                     val transformB = PreviewRenderer.getClipTransform(clipB.id)
+                    opacityB = transformB.opacity
                     PreviewRenderer.computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
                     System.arraycopy(rawMatB, 0, matB, 0, 16)
                     PreviewRenderer.applyTransformMatrix(matB, transformB, clipB.displayWidth, clipB.displayHeight)
@@ -629,6 +632,8 @@ class ExportEngine(private val context: Context) {
                 drawSpec.matB = matB
                 drawSpec.cropA = cropA
                 drawSpec.cropB = cropB
+                drawSpec.opacityA = transformA.opacity
+                drawSpec.opacityB = opacityB
                 drawSpec.adjA0 = adjA0
                 drawSpec.adjA1 = adjA1
                 drawSpec.adjA2 = adjA2
@@ -661,6 +666,29 @@ class ExportEngine(private val context: Context) {
                 } finally {
                     if (needsScissor) {
                         GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                    }
+                }
+
+                // Overlay compositor hook: render active overlay layers for this timestamp
+                val plan = PreviewRenderer.currentLayerPlan
+                if (plan.segments.isNotEmpty()) {
+                    val found = plan.resolveAt(res.tUs, activeLayerSet)
+                    if (found && activeLayerSet.visualCount > 0) {
+                        for (v in 0 until activeLayerSet.visualCount) {
+                            val itemIndex = activeLayerSet.activeVisualIndices[v]
+                            val item = plan.items.getOrNull(itemIndex) ?: continue
+                            if (item.transform.opacity <= 0.001f) continue
+                            val texId = PreviewRenderer.getOverlayTextureId(item.id)
+                            if (texId > 0) {
+                                rnd.drawOverlayQuad(
+                                    texId = texId,
+                                    transform = item.transform,
+                                    opacity = item.transform.opacity,
+                                    displayWidth = EXPORT_W,
+                                    displayHeight = EXPORT_H
+                                )
+                            }
+                        }
                     }
                 }
 

@@ -12,13 +12,13 @@ data class TimeMap(
     val speedDen: Int = 1                        // default 1/1. Reverse (negative) currently not allowed.
 ) {
     init {
-        require(speedNum > 0) { "speedNum must be positive: $speedNum" }
+        require(speedNum >= 0) { "speedNum must be non-negative: $speedNum" }
         require(speedDen > 0) { "speedDen must be positive: $speedDen" }
         require(outUs >= inUs) { "outUs ($outUs) must be >= inUs ($inUs)" }
     }
 
-    fun timelineDurationUs(): Long = (outUs - inUs) * speedDen / speedNum
+    fun timelineDurationUs(): Long = if (speedNum == 0) (outUs - inUs) else (outUs - inUs) * speedDen / speedNum
 
-    fun sourceUs(localTimelineUs: Long): Long = inUs + localTimelineUs * speedNum / speedDen
+    fun sourceUs(localTimelineUs: Long): Long = if (speedNum == 0) inUs else inUs + localTimelineUs * speedNum / speedDen
 }
 

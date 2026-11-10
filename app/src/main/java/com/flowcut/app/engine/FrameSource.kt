@@ -454,8 +454,8 @@ class FrameSource(
         val dec = codec ?: return false
 
         try {
-            // Case C: If already at target frame (within 12ms), no new frame is needed
-            if (currentPtsUs != -1L && (kotlin.math.abs(localUs - currentPtsUs) < 12_000L || (currentPtsUs >= localUs - 10_000L && currentPtsUs <= localUs + 15_000L))) {
+            // Case C: If already at target frame (within 12ms), or freeze frame repeating identical localUs
+            if (currentPtsUs != -1L && (localUs == lastRenderedLocalUs || kotlin.math.abs(localUs - currentPtsUs) < 12_000L || (currentPtsUs >= localUs - 10_000L && currentPtsUs <= localUs + 15_000L))) {
                 return false
             }
 

@@ -178,10 +178,11 @@ data class ClipTransform(
     val isFlippedH: Boolean = false,
     val scale: Float = 1.0f, // 0.25f to 5.0f
     val panX: Float = 0.0f,  // normalized screen offset
-    val panY: Float = 0.0f   // normalized screen offset
+    val panY: Float = 0.0f,  // normalized screen offset
+    val opacity: Float = 1.0f // 0.0f to 1.0f, default 1.0f = 100%
 ) {
     companion object {
-        val DEFAULT = ClipTransform(0f, false, 1.0f, 0.0f, 0.0f)
+        val DEFAULT = ClipTransform(0f, false, 1.0f, 0.0f, 0.0f, 1.0f)
     }
 }
 
@@ -269,6 +270,7 @@ class PreviewRenderer(
     // Pre-allocated arrays and structures (Rule R10: Zero heap allocations on hot path)
     @Volatile var trimPreviewTimeUs: Long = -1L
     private var activeSet: ActiveSet = ActiveSet(holder.current.lanes.size)
+    private val activeLayerSet = ActiveLayerSet()
     private val resolvedFrame = ResolvedFrame()
     private val frameCtx = MutableFrameCtx()
 
@@ -673,6 +675,8 @@ class PreviewRenderer(
                     drawSpec.matB = matB
                     drawSpec.cropA = cropA
                     drawSpec.cropB = cropB
+                    drawSpec.opacityA = transformA.opacity
+                    drawSpec.opacityB = transformB.opacity
                     drawSpec.adjA0 = adjA0
                     drawSpec.adjA1 = adjA1
                     drawSpec.adjA2 = adjA2
@@ -700,6 +704,7 @@ class PreviewRenderer(
                 // Transition completes into Slot B as primary
                 primarySlot = 1
                 standbySlotReadyForClipId = null
+                renderOverlays(frame.tUs)
                 return
             }
         }
@@ -844,6 +849,8 @@ class PreviewRenderer(
                 drawSpec.matB = matB
                 drawSpec.cropA = cropA
                 drawSpec.cropB = cropB
+                drawSpec.opacityA = transformA.opacity
+                drawSpec.opacityB = 1.0f
                 drawSpec.adjA0 = adjA0
                 drawSpec.adjA1 = adjA1
                 drawSpec.adjA2 = adjA2
@@ -867,6 +874,7 @@ class PreviewRenderer(
                     GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
                 }
             }
+            renderOverlays(frame.tUs)
         } else {
             // --- Slot B is Primary (stB / texBId) ---
             val clipBChanged = frameSourceB == null || frameSourceB?.currentPath != clipA.path
@@ -983,6 +991,8 @@ class PreviewRenderer(
                 drawSpec.matB = matB
                 drawSpec.cropA = cropA
                 drawSpec.cropB = cropB
+                drawSpec.opacityA = 1.0f
+                drawSpec.opacityB = transformB.opacity
                 drawSpec.adjA0 = adjA0
                 drawSpec.adjA1 = adjA1
                 drawSpec.adjA2 = adjA2
@@ -1006,6 +1016,7 @@ class PreviewRenderer(
                     GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
                 }
             }
+            renderOverlays(frame.tUs)
         }
         } finally {
             val durationUs = (System.nanoTime() - startNs) / 1000L
@@ -1026,6 +1037,29 @@ class PreviewRenderer(
                 frameTimeSumUs = 0L
                 frameTimeMaxUs = 0L
                 frameCount = 0
+            }
+        }
+    }
+
+    private fun renderOverlays(tUs: Long) {
+        val plan = currentLayerPlan
+        if (plan.segments.isEmpty()) return
+        val found = plan.resolveAt(tUs, activeLayerSet)
+        if (!found || activeLayerSet.visualCount == 0) return
+
+        for (i in 0 until activeLayerSet.visualCount) {
+            val itemIndex = activeLayerSet.activeVisualIndices[i]
+            val item = plan.items.getOrNull(itemIndex) ?: continue
+            if (item.transform.opacity <= 0.001f) continue
+            val texId = getOverlayTextureId(item.id)
+            if (texId > 0) {
+                renderer.drawOverlayQuad(
+                    texId = texId,
+                    transform = item.transform,
+                    opacity = item.transform.opacity,
+                    displayWidth = viewportWidth,
+                    displayHeight = viewportHeight
+                )
             }
         }
     }
@@ -1068,9 +1102,44 @@ class PreviewRenderer(
     }
 
     companion object {
+        @Volatile
+        var currentLayerPlan: CompiledLayerPlan = CompiledLayerPlan.EMPTY
+
+        fun setLayerPlan(plan: CompiledLayerPlan) {
+            currentLayerPlan = plan
+        }
+
+        private val overlayTextures = ConcurrentHashMap<String, Int>()
+
+        fun setOverlayTextureId(itemId: String, texId: Int) {
+            if (texId > 0) {
+                overlayTextures[itemId] = texId
+            } else {
+                overlayTextures.remove(itemId)
+            }
+        }
+
+        fun getOverlayTextureId(itemId: String): Int {
+            return overlayTextures[itemId] ?: 0
+        }
+
+        fun clearOverlayTextures() {
+            overlayTextures.clear()
+        }
+
         val clipTransforms = ConcurrentHashMap<String, ClipTransform>()
         val clipColorAdjusts = ConcurrentHashMap<String, ClipColorAdjust>()
         val clipBackgrounds = ConcurrentHashMap<String, ClipBackground>()
+
+        fun getClipOpacity(clipId: String?): Float {
+            if (clipId == null) return 1.0f
+            return getClipTransform(clipId).opacity
+        }
+
+        fun setClipOpacity(clipId: String, opacity: Float) {
+            val t = getClipTransform(clipId)
+            setClipTransform(clipId, t.copy(opacity = opacity.coerceIn(0f, 1f)))
+        }
 
         fun getClipTransform(clipId: String?): ClipTransform {
             if (clipId == null) return ClipTransform.DEFAULT

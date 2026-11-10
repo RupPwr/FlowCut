@@ -2,6 +2,9 @@ package com.flowcut.app.ui
 
 import android.view.View
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -63,6 +66,7 @@ import com.flowcut.app.audio.AudioEngine
 import com.flowcut.app.audio.AudioFeature
 import com.flowcut.app.audio.ClipAudioContributor
 import com.flowcut.app.core.feature.DefaultFeatureRegistry
+import com.flowcut.app.core.model.map
 import com.flowcut.app.core.playback.PlayMode
 import com.flowcut.app.core.playback.PlaybackController
 import com.flowcut.app.core.time.msToUs
@@ -299,6 +303,52 @@ fun EditorScreen(
         }
     }
 
+    val replacePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null && selectedClipIndex != null) {
+            resolvedViewModel?.replaceSelectedClipUri(selectedClipIndex, uri) {
+                if (USE_NEW_CORE) {
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                    }
+                }
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    val replaceFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null && selectedClipIndex != null) {
+            resolvedViewModel?.replaceSelectedClipUri(selectedClipIndex, uri) {
+                if (USE_NEW_CORE) {
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                    }
+                }
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    val openReplacePicker: () -> Unit = {
+        try {
+            replacePickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+            )
+        } catch (_: Exception) {
+            try {
+                replaceFallbackLauncher.launch("video/*")
+            } catch (_: Exception) {
+                Toast.makeText(context, "Cannot open video picker", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             if (playbackController.playhead.mode != PlayMode.PLAYING) {
@@ -336,6 +386,7 @@ fun EditorScreen(
     var isSpeedSheetVisible by remember { mutableStateOf(false) }
     var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var isBackgroundSheetVisible by remember { mutableStateOf(false) }
+    var isOpacitySheetVisible by remember { mutableStateOf(false) }
 
     val handleOpenTrim: () -> Unit = {
         var targetIdx = selectedClipIndex
@@ -360,6 +411,7 @@ fun EditorScreen(
             isSpeedSheetVisible = false
             isAdjustSheetVisible = false
             isBackgroundSheetVisible = false
+            isOpacitySheetVisible = false
             isTrimSheetVisible = true
         } else {
             Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
@@ -380,16 +432,22 @@ fun EditorScreen(
             }
         }
         if (targetIdx != null && targetIdx in 0 until snapshotHolder.current.main.n) {
-            if (playbackController.playhead.mode == PlayMode.PLAYING) {
-                playbackController.pause()
-                frameDriver.wake()
-                onPlaybackStateChange(false)
+            val targetClip = snapshotHolder.current.project.clips.getOrNull(targetIdx)
+            if (targetClip != null && targetClip.map().speedNum == 0) {
+                Toast.makeText(context, "Speed cannot be changed on a Freeze frame", Toast.LENGTH_SHORT).show()
+            } else {
+                if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                    playbackController.pause()
+                    frameDriver.wake()
+                    onPlaybackStateChange(false)
+                }
+                isTrimSheetVisible = false
+                isVolumeSheetVisible = false
+                isAdjustSheetVisible = false
+                isBackgroundSheetVisible = false
+                isOpacitySheetVisible = false
+                isSpeedSheetVisible = true
             }
-            isTrimSheetVisible = false
-            isVolumeSheetVisible = false
-            isAdjustSheetVisible = false
-            isBackgroundSheetVisible = false
-            isSpeedSheetVisible = true
         } else {
             Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
         }
@@ -993,7 +1051,7 @@ fun EditorScreen(
                                 }
                             },
                             onCommitTrim = { k, inUs, outUs, durMs ->
-                                resolvedViewModel?.commitClipTrim(k, inUs, outUs)
+                                resolvedViewModel?.commitClipTrim(k, inUs, outUs, durMs)
                                 onCommitTrim(k, inUs, outUs, durMs)
                             },
                             onTrimPreview = { previewUs ->
@@ -1065,6 +1123,7 @@ fun EditorScreen(
                     isBackgroundSheetVisible = false
                     isSpeedSheetVisible = false
                     isTrimSheetVisible = false
+                    isOpacitySheetVisible = false
                     isVolumeSheetVisible = true
                 },
                 onSpeedClick = handleOpenSpeed,
@@ -1078,6 +1137,7 @@ fun EditorScreen(
                     isSpeedSheetVisible = false
                     isBackgroundSheetVisible = false
                     isTrimSheetVisible = false
+                    isOpacitySheetVisible = false
                     isAdjustSheetVisible = true
                 },
                 onBackgroundClick = {
@@ -1090,6 +1150,7 @@ fun EditorScreen(
                     isSpeedSheetVisible = false
                     isAdjustSheetVisible = false
                     isTrimSheetVisible = false
+                    isOpacitySheetVisible = false
                     isBackgroundSheetVisible = true
                 },
                 onRotateClick = onRotateClip ?: {
@@ -1113,6 +1174,51 @@ fun EditorScreen(
                     previewRenderer.requestRender()
                     frameDriver.wake()
                     triggerApplyToAllPill()
+                },
+                onOpacityClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isVolumeSheetVisible = false
+                    isSpeedSheetVisible = false
+                    isAdjustSheetVisible = false
+                    isBackgroundSheetVisible = false
+                    isTrimSheetVisible = false
+                    isOpacitySheetVisible = true
+                },
+                onCopyClick = {
+                    if (selectedClipIndex != null) {
+                        val result = resolvedViewModel?.duplicateClip(selectedClipIndex)
+                        if (result != null) {
+                            if (USE_NEW_CORE) {
+                                snapshotHolder.current = result.newSnapshot
+                            }
+                            playbackController.seekTo(msToUs(result.newStartMs))
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    }
+                },
+                onReplaceClick = {
+                    if (selectedClipIndex != null) {
+                        openReplacePicker()
+                    }
+                },
+                onFreezeClick = {
+                    if (selectedClipIndex != null) {
+                        val playheadUs = playbackController.playhead.timeUs
+                        val result = resolvedViewModel?.freezeSelectedClip(playheadUs)
+                        if (result != null) {
+                            if (USE_NEW_CORE) {
+                                snapshotHolder.current = result.newSnapshot
+                            }
+                            playbackController.seekTo(msToUs(result.freezeStartMs))
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    }
                 },
                 onDeleteClipClick = selectedClipIndex?.let { k ->
                     {
@@ -1304,6 +1410,34 @@ fun EditorScreen(
                     frameDriver.wake()
                 },
                 onDismiss = { isBackgroundSheetVisible = false }
+            )
+        }
+
+        // Opacity BottomSheet (0% to 100%) for selected clip
+        if (isOpacitySheetVisible && selectedClipIndex != null) {
+            OpacitySheet(
+                clipIndex = selectedClipIndex,
+                snapshotHolder = snapshotHolder,
+                getClipOpacity = { id ->
+                    resolvedViewModel?.getClipOpacity(id) ?: PreviewRenderer.getClipOpacity(id)
+                },
+                onSetLiveOpacity = { id, opacity ->
+                    resolvedViewModel?.setClipOpacityLive(id, opacity)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onCommitSingleOpacity = { idx, opacity ->
+                    resolvedViewModel?.commitClipOpacity(idx, opacity)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onCommitApplyAllOpacity = { opacity ->
+                    resolvedViewModel?.applyOpacityToAll(opacity)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    triggerApplyToAllPill()
+                },
+                onDismiss = { isOpacitySheetVisible = false }
             )
         }
     }
