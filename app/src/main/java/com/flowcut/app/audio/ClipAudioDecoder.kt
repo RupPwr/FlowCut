@@ -217,6 +217,138 @@ class ClipAudioDecoder(private val clip: Clip) {
     }
 
     /**
+     * Reads [count] timeline audio frames starting at [sourceStartFrame] playing at [speed] multiplier
+     * (0.2f to 10.0f) using zero-heap-allocation linear interpolation resampling (Rule R10).
+     */
+    fun readResampled(sourceStartFrame: Long, count: Int, speed: Float, out: FloatArray, outOffset: Int, gain: Float) {
+        if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
+        if (kotlin.math.abs(speed - 1.0f) < 0.01f) {
+            read(sourceStartFrame, count, out, outOffset, gain)
+            return
+        }
+
+        // For extreme speed (> 4.0x), mute live audio to prevent audio thread starvation and AudioClock stalls
+        if (speed > 4.0f) {
+            return
+        }
+
+        val totalNeededSrcFrames = (count * speed).toInt() + 2
+        val targetEnd = sourceStartFrame + totalNeededSrcFrames
+        val start = bufferStartFrame
+        val countBuffered = bufferedFrames
+
+        if (sourceStartFrame < start || sourceStartFrame > start + countBuffered + 24_000L) {
+            seekToFrame(sourceStartFrame)
+        } else if (targetEnd > start + countBuffered) {
+            // Strictly at most 1 non-blocking chunk decode per 10ms block so AudioEngine thread never stalls!
+            decodeChunk()
+        } else {
+            val remaining = (start + countBuffered) - targetEnd
+            if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
+                decodeChunk()
+            }
+        }
+
+        val curStart = bufferStartFrame
+        val curBuffered = bufferedFrames
+        val curEnd = curStart + curBuffered
+
+        var dstIdx = outOffset
+        for (i in 0 until count) {
+            val exactSrcPos = sourceStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+            val f0 = exactSrcPos.toLong()
+            val f1 = f0 + 1L
+            val frac = (exactSrcPos - f0.toDouble()).toFloat()
+
+            if (f0 in curStart until curEnd) {
+                val ringIdx0 = ((f0 and BUFFER_MASK.toLong()).toInt()) shl 1
+                val s0L = pcmBuffer[ringIdx0]
+                val s0R = pcmBuffer[ringIdx0 + 1]
+
+                val sL: Float
+                val sR: Float
+                if (f1 in curStart until curEnd) {
+                    val ringIdx1 = ((f1 and BUFFER_MASK.toLong()).toInt()) shl 1
+                    val s1L = pcmBuffer[ringIdx1]
+                    val s1R = pcmBuffer[ringIdx1 + 1]
+                    sL = s0L * (1f - frac) + s1L * frac
+                    sR = s0R * (1f - frac) + s1R * frac
+                } else {
+                    sL = s0L
+                    sR = s0R
+                }
+
+                out[dstIdx] += sL * gain
+                out[dstIdx + 1] += sR * gain
+            }
+            dstIdx += TARGET_CHANNELS
+        }
+    }
+
+    /**
+     * Synchronous accurate audio read for offline export with variable speed linear resampling.
+     */
+    fun readResampledSynchronous(sourceStartFrame: Long, count: Int, speed: Float, out: FloatArray, outOffset: Int, gain: Float) {
+        if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
+        if (kotlin.math.abs(speed - 1.0f) < 0.01f) {
+            readSynchronous(sourceStartFrame, count, out, outOffset, gain)
+            return
+        }
+        synchronized(codecLock) {
+            val totalNeededSrcFrames = (count * speed).toInt() + 2
+            val targetEnd = sourceStartFrame + totalNeededSrcFrames
+            if (sourceStartFrame < bufferStartFrame || sourceStartFrame >= bufferStartFrame + bufferedFrames) {
+                internalSeekToFrame(sourceStartFrame)
+            }
+
+            var retries = 0
+            while (bufferStartFrame + bufferedFrames < targetEnd && !outputEos && retries < 60) {
+                val decoded = internalDecodeChunk(timeoutUs = 5_000L)
+                if (!decoded && inputEos) {
+                    retries++
+                } else if (!decoded) {
+                    retries++
+                }
+            }
+
+            val curStart = bufferStartFrame
+            val curBuffered = bufferedFrames
+            val curEnd = curStart + curBuffered
+
+            var dstIdx = outOffset
+            for (i in 0 until count) {
+                val exactSrcPos = sourceStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+                val f0 = exactSrcPos.toLong()
+                val f1 = f0 + 1L
+                val frac = (exactSrcPos - f0.toDouble()).toFloat()
+
+                if (f0 in curStart until curEnd) {
+                    val ringIdx0 = ((f0 and BUFFER_MASK.toLong()).toInt()) shl 1
+                    val s0L = pcmBuffer[ringIdx0]
+                    val s0R = pcmBuffer[ringIdx0 + 1]
+
+                    val sL: Float
+                    val sR: Float
+                    if (f1 in curStart until curEnd) {
+                        val ringIdx1 = ((f1 and BUFFER_MASK.toLong()).toInt()) shl 1
+                        val s1L = pcmBuffer[ringIdx1]
+                        val s1R = pcmBuffer[ringIdx1 + 1]
+                        sL = s0L * (1f - frac) + s1L * frac
+                        sR = s0R * (1f - frac) + s1R * frac
+                    } else {
+                        sL = s0L
+                        sR = s0R
+                    }
+
+                    out[dstIdx] += sL * gain
+                    out[dstIdx + 1] += sR * gain
+                }
+                dstIdx += TARGET_CHANNELS
+            }
+        }
+    }
+
+    /**
      * Synchronous accurate audio read for offline export.
      * Decodes source audio synchronously up to [sourceFrame] + [count] instead of dropping to silence.
      */

@@ -299,6 +299,7 @@ fun EditorScreen(
 
     var isTrimSheetVisible by remember { mutableStateOf(false) }
     var isVolumeSheetVisible by remember { mutableStateOf(false) }
+    var isSpeedSheetVisible by remember { mutableStateOf(false) }
     var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var isBackgroundSheetVisible by remember { mutableStateOf(false) }
 
@@ -322,9 +323,39 @@ fun EditorScreen(
                 onPlaybackStateChange(false)
             }
             isVolumeSheetVisible = false
+            isSpeedSheetVisible = false
             isAdjustSheetVisible = false
             isBackgroundSheetVisible = false
             isTrimSheetVisible = true
+        } else {
+            Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val handleOpenSpeed: () -> Unit = {
+        var targetIdx = selectedClipIndex
+        if (targetIdx == null) {
+            val playheadMs = usToMs(playbackController.playhead.timeUs)
+            val main = snapshotHolder.current.main
+            for (i in 0 until main.n) {
+                if (playheadMs >= main.startMs[i] && playheadMs < main.endMs[i]) {
+                    targetIdx = i
+                    onSelectClip(i)
+                    break
+                }
+            }
+        }
+        if (targetIdx != null && targetIdx in 0 until snapshotHolder.current.main.n) {
+            if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                playbackController.pause()
+                frameDriver.wake()
+                onPlaybackStateChange(false)
+            }
+            isTrimSheetVisible = false
+            isVolumeSheetVisible = false
+            isAdjustSheetVisible = false
+            isBackgroundSheetVisible = false
+            isSpeedSheetVisible = true
         } else {
             Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
         }
@@ -998,9 +1029,11 @@ fun EditorScreen(
                 onVolumeClick = {
                     isAdjustSheetVisible = false
                     isBackgroundSheetVisible = false
+                    isSpeedSheetVisible = false
                     isTrimSheetVisible = false
                     isVolumeSheetVisible = true
                 },
+                onSpeedClick = handleOpenSpeed,
                 onAdjustClick = {
                     if (playbackController.playhead.mode == PlayMode.PLAYING) {
                         playbackController.pause()
@@ -1008,6 +1041,7 @@ fun EditorScreen(
                         onPlaybackStateChange(false)
                     }
                     isVolumeSheetVisible = false
+                    isSpeedSheetVisible = false
                     isBackgroundSheetVisible = false
                     isTrimSheetVisible = false
                     isAdjustSheetVisible = true
@@ -1019,6 +1053,7 @@ fun EditorScreen(
                         onPlaybackStateChange(false)
                     }
                     isVolumeSheetVisible = false
+                    isSpeedSheetVisible = false
                     isAdjustSheetVisible = false
                     isTrimSheetVisible = false
                     isBackgroundSheetVisible = true
@@ -1145,6 +1180,52 @@ fun EditorScreen(
                 onCommitSingleVolume = { idx, vol -> resolvedViewModel?.commitClipVolume(idx, vol) },
                 onCommitApplyAllVolume = { vol -> resolvedViewModel?.commitApplyVolumeToAll(vol) },
                 onDismiss = { isVolumeSheetVisible = false }
+            )
+        }
+
+        // Speed BottomSheet (0.2x to 10.0x) for selected clip
+        if (isSpeedSheetVisible && selectedClipIndex != null) {
+            val currentProject = vmUiState?.project ?: com.flowcut.app.model.Project()
+            val initialProject = remember(selectedClipIndex) { currentProject }
+            val initialTimeMaps = remember(selectedClipIndex) { HashMap(resolvedViewModel?.clipTimeMaps ?: emptyMap()) }
+
+            SpeedSheet(
+                clipIndex = selectedClipIndex,
+                snapshotHolder = snapshotHolder,
+                previewRenderer = previewRenderer,
+                onWakeFrameDriver = { frameDriver.wake() },
+                getClipSpeed = { id -> resolvedViewModel?.getClipSpeed(id) ?: 1.0f },
+                getMaxSpeedForClip = { k -> resolvedViewModel?.getMaxSpeedForClip(k) ?: 10.0f },
+                onSetLiveSpeed = { k, spd ->
+                    resolvedViewModel?.setLiveClipSpeed(k, spd)
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                    }
+                },
+                onCommitSingleSpeed = { k, spd, initProj, initMaps ->
+                    resolvedViewModel?.commitClipSpeed(k, spd, initProj, initMaps)
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                    }
+                },
+                onCommitApplyAllSpeed = { spd, initProj, initMaps ->
+                    resolvedViewModel?.commitApplySpeedToAll(spd, initProj, initMaps)
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                    }
+                },
+                onRevertSpeed = { initProj, initMaps ->
+                    resolvedViewModel?.revertSpeedEdit(initProj, initMaps)
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                    }
+                },
+                initialProject = initialProject,
+                initialTimeMaps = initialTimeMaps,
+                onDismiss = { isSpeedSheetVisible = false }
             )
         }
 

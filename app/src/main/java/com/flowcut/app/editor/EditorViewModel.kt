@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 enum class AppScreen {
     HOME,
@@ -530,7 +531,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val currentProject = _uiState.value.project
         if (clipIndex !in currentProject.clips.indices) return
         val oldClip = currentProject.clips[clipIndex]
-        val newDurationMs = usToMs(newOutUs - newInUs)
+        val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
+        val speedNum = oldMap.speedNum
+        val speedDen = oldMap.speedDen
+        val timelineDurUs = ((newOutUs - newInUs) * speedDen.toLong()) / speedNum.toLong()
+        val newDurationMs = usToMs(timelineDurUs)
         if (newDurationMs < 200L) return
 
         val newClip = oldClip.copy(durationMs = newDurationMs)
@@ -558,8 +563,141 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         redoTransforms.clear()
         redoColorAdjusts.clear()
         redoBackgrounds.clear()
-        clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs)
+        clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs, speedNum, speedDen)
         updateProject(newProject, recordUndo = false)
+    }
+
+    fun getClipSpeed(clipId: String): Float {
+        val map = clipTimeMaps[clipId] ?: return 1.0f
+        return if (map.speedDen > 0) {
+            val raw = map.speedNum.toFloat() / map.speedDen.toFloat()
+            (kotlin.math.round(raw * 100f) / 100f).coerceIn(0.2f, 10.0f)
+        } else 1.0f
+    }
+
+    fun getMaxSpeedForClip(clipIndex: Int): Float {
+        val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return 10.0f
+        val oldMap = clipTimeMaps[clip.id] ?: TimeMap(0L, msToUs(clip.durationMs))
+        val sourceSpanUs = maxOf(200_000L, oldMap.outUs - oldMap.inUs)
+        return (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
+    }
+
+    fun setLiveClipSpeed(clipIndex: Int, speed: Float) {
+        val currentProject = _uiState.value.project
+        if (clipIndex !in currentProject.clips.indices) return
+        val oldClip = currentProject.clips[clipIndex]
+        val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
+        val sourceSpanUs = oldMap.outUs - oldMap.inUs
+
+        val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
+        val clampedSpeed = speed.coerceIn(0.2f, maxSpeed)
+        val speedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
+        val speedDen = 100
+
+        val timelineDurUs = (sourceSpanUs * speedDen.toLong()) / speedNum.toLong()
+        val newDurMs = maxOf(200L, usToMs(timelineDurUs))
+
+        val newClip = oldClip.copy(durationMs = newDurMs)
+        val newClips = currentProject.clips.toMutableList()
+        newClips[clipIndex] = newClip
+
+        val newTransitions = currentProject.transitions.toMutableList()
+        for (j in maxOf(0, clipIndex - 1)..minOf(newTransitions.size - 1, clipIndex)) {
+            val maxAllowed = minOf(newClips[j].durationMs, newClips[j + 1].durationMs) / 2L
+            if (newTransitions[j].durationMs > maxAllowed) {
+                newTransitions[j] = newTransitions[j].copy(durationMs = maxAllowed)
+            }
+        }
+
+        clipTimeMaps[oldClip.id] = TimeMap(oldMap.inUs, oldMap.outUs, speedNum, speedDen)
+        val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
+        updateProject(newProject, recordUndo = false)
+    }
+
+    fun commitClipSpeed(
+        clipIndex: Int,
+        speed: Float,
+        initialProject: Project? = null,
+        initialTimeMaps: Map<String, TimeMap>? = null
+    ) {
+        val currentProject = _uiState.value.project
+        if (clipIndex !in currentProject.clips.indices) return
+
+        val snapProject = initialProject ?: currentProject
+        val snapTimeMaps = initialTimeMaps ?: HashMap(clipTimeMaps)
+
+        undoStack.push(snapProject)
+        undoTimeMaps.addLast(HashMap(snapTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+
+        setLiveClipSpeed(clipIndex, speed)
+    }
+
+    fun commitApplySpeedToAll(
+        speed: Float,
+        initialProject: Project? = null,
+        initialTimeMaps: Map<String, TimeMap>? = null
+    ) {
+        val currentProject = _uiState.value.project
+        if (currentProject.clips.isEmpty()) return
+
+        val snapProject = initialProject ?: currentProject
+        val snapTimeMaps = initialTimeMaps ?: HashMap(clipTimeMaps)
+
+        undoStack.push(snapProject)
+        undoTimeMaps.addLast(HashMap(snapTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+
+        val speedDen = 100
+        val newClips = currentProject.clips.toMutableList()
+
+        for (i in newClips.indices) {
+            val clip = newClips[i]
+            val oldMap = clipTimeMaps[clip.id] ?: TimeMap(0L, msToUs(clip.durationMs))
+            val sourceSpanUs = oldMap.outUs - oldMap.inUs
+            val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
+            val clampedSpeed = speed.coerceIn(0.2f, maxSpeed)
+            val speedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
+
+            val timelineDurUs = (sourceSpanUs * speedDen.toLong()) / speedNum.toLong()
+            val newDurMs = maxOf(200L, usToMs(timelineDurUs))
+
+            newClips[i] = clip.copy(durationMs = newDurMs)
+            clipTimeMaps[clip.id] = TimeMap(oldMap.inUs, oldMap.outUs, speedNum, speedDen)
+        }
+
+        val newTransitions = currentProject.transitions.toMutableList()
+        for (j in newTransitions.indices) {
+            val maxAllowed = minOf(newClips[j].durationMs, newClips[j + 1].durationMs) / 2L
+            if (newTransitions[j].durationMs > maxAllowed) {
+                newTransitions[j] = newTransitions[j].copy(durationMs = maxAllowed)
+            }
+        }
+
+        val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
+        updateProject(newProject, recordUndo = false)
+    }
+
+    fun revertSpeedEdit(originalProject: Project, originalTimeMaps: Map<String, TimeMap>) {
+        clipTimeMaps.clear()
+        clipTimeMaps.putAll(originalTimeMaps)
+        updateProject(originalProject, recordUndo = false)
     }
 
     fun splitAtPlayhead(playheadUs: Long, preferredClipIndex: Int? = null): SplitResult? {

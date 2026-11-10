@@ -163,23 +163,31 @@ class ClipAudioContributor(
 
                         // 1. Render first N frames from Clip k
                         if (framesBeforeCut > 0) {
-                            val decoderA = decoders[clipA.path]
-                            if (decoderA != null) {
-                                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
-                                val srcFrameA = usToAudioFrames(srcUsA)
-                                val volA = computeEffectiveGain(getClipVolume(clipA.id))
-                                decoderA.read(srcFrameA, framesBeforeCut, out, 0, volA)
+                            val mapA = clipA.map()
+                            val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                            if (speedA <= 4.0f) {
+                                val decoderA = decoders[clipA.path]
+                                if (decoderA != null) {
+                                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                                    val srcFrameA = usToAudioFrames(srcUsA)
+                                    val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                                    decoderA.readResampled(srcFrameA, framesBeforeCut, speedA, out, 0, volA)
+                                }
                             }
                         }
 
                         // 2. Render remaining (frames - N) frames from Clip k + 1
                         if (framesAfterCut > 0) {
-                            val decoderNext = decoders[nextClip.path]
-                            if (decoderNext != null) {
-                                val srcUsNext = nextClip.map().sourceUs(0L)
-                                val srcFrameNext = usToAudioFrames(srcUsNext)
-                                val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
-                                decoderNext.read(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, volNext)
+                            val mapNext = nextClip.map()
+                            val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
+                            if (speedNext <= 4.0f) {
+                                val decoderNext = decoders[nextClip.path]
+                                if (decoderNext != null) {
+                                    val srcUsNext = mapNext.sourceUs(0L)
+                                    val srcFrameNext = usToAudioFrames(srcUsNext)
+                                    val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
+                                    decoderNext.readResampled(srcFrameNext, framesAfterCut, speedNext, out, framesBeforeCut * 2, volNext)
+                                }
                             }
                         }
 
@@ -206,15 +214,19 @@ class ClipAudioContributor(
 
             if (bIndex == -1) {
                 // Case 1: Single clip playback
-                val decoderA = getOrCreateDecoder(clipA)
-                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
-                val srcFrameA = usToAudioFrames(srcUsA)
-                val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                val mapA = clipA.map()
+                val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                if (speedA <= 4.0f) {
+                    val decoderA = getOrCreateDecoder(clipA)
+                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                    val srcFrameA = usToAudioFrames(srcUsA)
+                    val volA = computeEffectiveGain(getClipVolume(clipA.id))
 
-                decoderA.read(srcFrameA, frames, out, 0, volA)
+                    decoderA.readResampled(srcFrameA, frames, speedA, out, 0, volA)
 
-                if (needsDeclick) {
-                    applyDeclickRamp(out, 0, frames)
+                    if (needsDeclick) {
+                        applyDeclickRamp(out, 0, frames)
+                    }
                 }
             } else if (bIndex in clips.indices) {
                 // Case 2: Transition crossfade between clip A and clip B
@@ -224,15 +236,23 @@ class ClipAudioContributor(
                 val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
                 val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
 
-                val decoderA = getOrCreateDecoder(clipA)
-                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
-                val srcFrameA = usToAudioFrames(srcUsA)
-                decoderA.read(srcFrameA, frames, out, 0, gainA)
+                val mapA = clipA.map()
+                val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                if (speedA <= 4.0f) {
+                    val decoderA = getOrCreateDecoder(clipA)
+                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                    val srcFrameA = usToAudioFrames(srcUsA)
+                    decoderA.readResampled(srcFrameA, frames, speedA, out, 0, gainA)
+                }
 
-                val decoderB = getOrCreateDecoder(clipB)
-                val srcUsB = clipB.map().sourceUs(activeSet.bLocalUs)
-                val srcFrameB = usToAudioFrames(srcUsB)
-                decoderB.read(srcFrameB, frames, out, 0, gainB)
+                val mapB = clipB.map()
+                val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
+                if (speedB <= 4.0f) {
+                    val decoderB = getOrCreateDecoder(clipB)
+                    val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
+                    val srcFrameB = usToAudioFrames(srcUsB)
+                    decoderB.readResampled(srcFrameB, frames, speedB, out, 0, gainB)
+                }
 
                 if (isFirstBlockAfterStop) {
                     applyDeclickRamp(out, 0, frames)
@@ -300,18 +320,22 @@ class ClipAudioContributor(
 
                         if (framesBeforeCut > 0) {
                             val decoderA = getOrCreateDecoder(clipA)
-                            val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                            val mapA = clipA.map()
+                            val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
                             val srcFrameA = usToAudioFrames(srcUsA)
                             val volA = computeEffectiveGain(getClipVolume(clipA.id))
-                            decoderA.readSynchronous(srcFrameA, framesBeforeCut, out, 0, volA)
+                            val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                            decoderA.readResampledSynchronous(srcFrameA, framesBeforeCut, speedA, out, 0, volA)
                         }
 
                         if (framesAfterCut > 0) {
                             val decoderNext = getOrCreateDecoder(nextClip)
-                            val srcUsNext = nextClip.map().sourceUs(0L)
+                            val mapNext = nextClip.map()
+                            val srcUsNext = mapNext.sourceUs(0L)
                             val srcFrameNext = usToAudioFrames(srcUsNext)
                             val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
-                            decoderNext.readSynchronous(srcFrameNext, framesAfterCut, out, framesBeforeCut * 2, volNext)
+                            val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
+                            decoderNext.readResampledSynchronous(srcFrameNext, framesAfterCut, speedNext, out, framesBeforeCut * 2, volNext)
                         }
 
                         // Soft limit boosted audio cleanly (Rule R10: zero allocations)
@@ -337,11 +361,13 @@ class ClipAudioContributor(
 
             if (bIndex == -1) {
                 val decoderA = getOrCreateDecoder(clipA)
-                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                val mapA = clipA.map()
+                val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
                 val srcFrameA = usToAudioFrames(srcUsA)
                 val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
 
-                decoderA.readSynchronous(srcFrameA, frames, out, 0, volA)
+                decoderA.readResampledSynchronous(srcFrameA, frames, speedA, out, 0, volA)
 
                 if (needsDeclick) {
                     applyDeclickRamp(out, 0, frames)
@@ -354,14 +380,18 @@ class ClipAudioContributor(
                 val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
 
                 val decoderA = getOrCreateDecoder(clipA)
-                val srcUsA = clipA.map().sourceUs(activeSet.aLocalUs)
+                val mapA = clipA.map()
+                val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
                 val srcFrameA = usToAudioFrames(srcUsA)
-                decoderA.readSynchronous(srcFrameA, frames, out, 0, gainA)
+                val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                decoderA.readResampledSynchronous(srcFrameA, frames, speedA, out, 0, gainA)
 
                 val decoderB = getOrCreateDecoder(clipB)
-                val srcUsB = clipB.map().sourceUs(activeSet.bLocalUs)
+                val mapB = clipB.map()
+                val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
                 val srcFrameB = usToAudioFrames(srcUsB)
-                decoderB.readSynchronous(srcFrameB, frames, out, 0, gainB)
+                val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
+                decoderB.readResampledSynchronous(srcFrameB, frames, speedB, out, 0, gainB)
 
                 if (isFirstBlockAfterStop) {
                     applyDeclickRamp(out, 0, frames)

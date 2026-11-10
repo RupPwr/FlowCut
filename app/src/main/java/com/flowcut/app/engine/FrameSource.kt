@@ -34,6 +34,7 @@ class FrameSource(
     private var lastRenderedLocalUs: Long = -1L
     private var isAccuratePausedFrameLatched: Boolean = false
     private var isCatchingUpFromSeek: Boolean = false
+    private var lastForwardKeyframeHopUs: Long = -1L
 
     var prewarmStage: Int = 0 // 0 = uninitialized, 1 = extractor ready, 2 = codec configured & seeked, 3 = target frame decoded & ready
     private var videoTrackIndex: Int = -1
@@ -113,6 +114,7 @@ class FrameSource(
             lastRenderedLocalUs = -1L
             isAccuratePausedFrameLatched = false
             isCatchingUpFromSeek = true
+            lastForwardKeyframeHopUs = -1L
             prewarmStage = 2
             return true
         } catch (_: Exception) {
@@ -331,8 +333,9 @@ class FrameSource(
                 isCatchingUpFromSeek = false
             }
 
-            // Lookahead pacing threshold (Item 3): 4ms tolerance so vsync transitions smoothly without cadence stutter
-            if (currentPtsUs >= localUs - 4_000L && currentPtsUs <= localUs + 500_000L) {
+            // Case C: Slow-motion / close frame pacing (12ms tolerance or forward within 500ms)
+            if (currentPtsUs != -1L && ((kotlin.math.abs(localUs - currentPtsUs) < 12_000L) ||
+                (currentPtsUs >= localUs - 4_000L && currentPtsUs <= localUs + 500_000L))) {
                 lastRenderedLocalUs = localUs
                 isAccuratePausedFrameLatched = true
                 return false
@@ -341,10 +344,9 @@ class FrameSource(
             val isInitial = currentPtsUs == -1L
             // Backward jump > 500ms
             val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 500_000L
-            // Only seek forward on massive jumps (> 2.5s). Never seek/flush on small lags (< 2.5s) during playback!
-            val isHugeForwardJump = currentPtsUs != -1L && localUs > currentPtsUs + 2_500_000L
 
-            if (isInitial || isBackwardJump || isHugeForwardJump) {
+            if (isInitial || isBackwardJump) {
+                lastForwardKeyframeHopUs = -1L
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)
                 if (didRender) {
                     lastRenderedLocalUs = localUs
@@ -353,70 +355,88 @@ class FrameSource(
                 return didRender
             }
 
-            // Catch-up / normal playback decode loop:
-            var hasDequeuedAnyOutput = false
-            var skippedCount = 0
-            val maxAttempts = 15
-            var attempts = 0
-            val bufferInfo = MediaCodec.BufferInfo()
+            val deltaUs = localUs - currentPtsUs
 
-            while (attempts < maxAttempts && !outputEos) {
-                attempts++
+            // Case B (Extreme forward jump > 1.5s): Only hop to keyframe if keyframe is strictly AHEAD of currentPtsUs
+            if (deltaUs > 1_500_000L && (lastForwardKeyframeHopUs == -1L || localUs - lastForwardKeyframeHopUs > 600_000L)) {
+                val targetMs = localUs / 1000L
+                val idxPath = clip.path.replace(".mp4", ".idx")
+                val keyframes = com.flowcut.app.storage.KeyframeIndex.load(idxPath)
+                val closestKeyframeMs = if (keyframes != null && keyframes.isNotEmpty()) {
+                    com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, targetMs)
+                } else -1L
+                val keyframeUs = if (closestKeyframeMs >= 0L) closestKeyframeMs * 1000L else -1L
 
-                // Feed input buffer
-                if (!inputEos) {
-                    val inTimeout = if (hasDequeuedAnyOutput) 0L else 1_000L
-                    val inIndex = dec.dequeueInputBuffer(inTimeout)
-                    if (inIndex >= 0) {
-                        val inBuf = dec.getInputBuffer(inIndex)
-                        if (inBuf != null) {
-                            inBuf.clear()
-                            val sampleSize = ext.readSampleData(inBuf, 0)
-                            if (sampleSize < 0) {
-                                dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                inputEos = true
-                            } else {
-                                dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
-                                ext.advance()
-                            }
-                        }
-                    }
-                }
-
-                // Use 2.5ms timeout for initial output wait, 0L for subsequent checks once a buffer is received
-                val outTimeoutUs = if (hasDequeuedAnyOutput) 0L else 2_500L
-                val outIndex = dec.dequeueOutputBuffer(bufferInfo, outTimeoutUs)
-
-                if (outIndex >= 0) {
-                    hasDequeuedAnyOutput = true
-                    val pts = bufferInfo.presentationTimeUs
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        outputEos = true
-                    }
-
-                    // Render if target reached OR after skipping up to 4 late frames so display keeps updating smoothly
-                    val isTargetReached = (skippedCount >= 4) || (pts >= localUs - 12_000L) || outputEos
-
-                    if (isTargetReached) {
-                        dec.releaseOutputBuffer(outIndex, true)
-                        currentPtsUs = pts
+                if (keyframeUs > currentPtsUs + 300_000L) {
+                    lastForwardKeyframeHopUs = localUs
+                    val didRender = seekTo(localUs, fastKeyframeOnly = true)
+                    if (didRender) {
                         lastRenderedLocalUs = localUs
                         isAccuratePausedFrameLatched = true
-                        if (pts >= lastSeekTargetUs - 50_000L) {
-                            isCatchingUpFromSeek = false
-                        }
-                        return true
-                    } else {
-                        // Drop intermediate frame silently without ever force-rendering early GOP frames
-                        dec.releaseOutputBuffer(outIndex, false)
-                        currentPtsUs = pts
-                        skippedCount++
                     }
-                } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    if (inputEos || hasDequeuedAnyOutput) {
-                        break
-                    }
+                    return didRender
                 }
+            }
+
+            // Case A: Ultra-smooth forward playback decode & drain loop (Fix Bug #1)
+            // 1. Feed up to 4 input packets so hardware decoder queue is always well-fed
+            var inFed = 0
+            while (!inputEos && inFed < 4) {
+                val inIndex = dec.dequeueInputBuffer(0L)
+                if (inIndex >= 0) {
+                    val inBuf = dec.getInputBuffer(inIndex)
+                    if (inBuf != null) {
+                        inBuf.clear()
+                        val sampleSize = ext.readSampleData(inBuf, 0)
+                        if (sampleSize < 0) {
+                            dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputEos = true
+                        } else {
+                            dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
+                            ext.advance()
+                        }
+                    }
+                    inFed++
+                } else {
+                    break
+                }
+            }
+
+            // 2. Dequeue output buffers: always release with render = true so SurfaceTexture is never starved!
+            val isFastForward = deltaUs >= 40_000L
+            val maxDrains = if (isFastForward) 6 else 3
+            var drainedCount = 0
+            var renderedAny = false
+            val bufferInfo = MediaCodec.BufferInfo()
+
+            var outIndex = dec.dequeueOutputBuffer(bufferInfo, 2_000L)
+            while (outIndex >= 0) {
+                val pts = bufferInfo.presentationTimeUs
+                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    outputEos = true
+                }
+
+                // SurfaceTexture latches the latest released buffer on updateTexImage()
+                dec.releaseOutputBuffer(outIndex, true)
+                currentPtsUs = pts
+                renderedAny = true
+                drainedCount++
+
+                if (pts >= localUs - 15_000L || outputEos || drainedCount >= maxDrains) {
+                    break
+                }
+
+                // Non-blocking check for next decoded frame already ready in hardware queue
+                outIndex = dec.dequeueOutputBuffer(bufferInfo, 0L)
+            }
+
+            if (renderedAny) {
+                lastRenderedLocalUs = localUs
+                isAccuratePausedFrameLatched = true
+                if (currentPtsUs >= lastSeekTargetUs - 50_000L) {
+                    isCatchingUpFromSeek = false
+                }
+                return true
             }
         } catch (_: Exception) {
             return false
@@ -434,8 +454,8 @@ class FrameSource(
         val dec = codec ?: return false
 
         try {
-            // If already at target frame (within 12ms), no new frame is needed
-            if (currentPtsUs != -1L && currentPtsUs >= localUs - 10_000L && currentPtsUs <= localUs + 15_000L) {
+            // Case C: If already at target frame (within 12ms), no new frame is needed
+            if (currentPtsUs != -1L && (kotlin.math.abs(localUs - currentPtsUs) < 12_000L || (currentPtsUs >= localUs - 10_000L && currentPtsUs <= localUs + 15_000L))) {
                 return false
             }
 
@@ -517,6 +537,7 @@ class FrameSource(
         lastRenderedLocalUs = -1L
         isAccuratePausedFrameLatched = false
         isCatchingUpFromSeek = false
+        lastForwardKeyframeHopUs = -1L
         prewarmStage = 0
 
         releaseExecutor.execute {
