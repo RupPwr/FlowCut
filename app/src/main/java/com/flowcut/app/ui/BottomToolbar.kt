@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -48,6 +49,7 @@ fun BottomToolbar(
     onTrimClick: () -> Unit = {},
     onVolumeClick: () -> Unit = {},
     onAdjustClick: () -> Unit = {},
+    onBackgroundClick: () -> Unit = {},
     onRotateClick: () -> Unit = {},
     onFlipClick: () -> Unit = {},
     onDeleteClipClick: (() -> Unit)? = null,
@@ -200,6 +202,30 @@ fun BottomToolbar(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "ADJUST",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Background Action (Blur / Solid Color Canvas Background)
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onBackgroundClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Wallpaper,
+                            contentDescription = "BG",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "BG",
                             color = colors.textPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold

@@ -16,6 +16,7 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES30
+import android.opengl.Matrix
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -318,6 +319,15 @@ class ExportEngine(private val context: Context) {
             val adjB1 = FloatArray(4)
             val adjB2 = FloatArray(4)
             val texelSize = floatArrayOf(1.0f / EXPORT_W.toFloat(), 1.0f / EXPORT_H.toFloat())
+
+            val fgNormMatA = FloatArray(16)
+            val fgNormMatB = FloatArray(16)
+            val bgNormMat = FloatArray(16)
+            val bgMatA = FloatArray(16)
+            val bgMatB = FloatArray(16)
+            val bgParamsA = FloatArray(4)
+            val bgParamsB = FloatArray(4)
+
             val drawSpec = DrawSpec()
 
             var currentAIndex = -1
@@ -534,11 +544,20 @@ class ExportEngine(private val context: Context) {
                 } catch (_: Exception) {}
 
                 val transformA = PreviewRenderer.getClipTransform(clipA.id)
+                PreviewRenderer.computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
                 System.arraycopy(rawMatA, 0, matA, 0, 16)
                 PreviewRenderer.applyTransformMatrix(matA, transformA, clipA.displayWidth, clipA.displayHeight)
                 PreviewRenderer.calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
+                PreviewRenderer.computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
+                val bgA = PreviewRenderer.getClipBackground(clipA.id)
+                val bgModeA = PreviewRenderer.packBackground(bgA, bgParamsA)
 
-                if (res.isTransition && res.clipBIndex >= 0) {
+                val isTransition = res.isTransition && res.clipBIndex >= 0
+                var bgB = ClipBackground.DEFAULT
+                var bgModeB = 0
+
+                if (isTransition) {
                     val clipB = snapshot.project.clips[res.clipBIndex]
                     val legacyClipB = PreviewRenderer.toLegacyClip(clipB)
                     val renderedB: Boolean
@@ -574,9 +593,14 @@ class ExportEngine(private val context: Context) {
                     } catch (_: Exception) {}
 
                     val transformB = PreviewRenderer.getClipTransform(clipB.id)
+                    PreviewRenderer.computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
                     System.arraycopy(rawMatB, 0, matB, 0, 16)
                     PreviewRenderer.applyTransformMatrix(matB, transformB, clipB.displayWidth, clipB.displayHeight)
                     PreviewRenderer.calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
+                    PreviewRenderer.computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                    Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
+                    bgB = PreviewRenderer.getClipBackground(clipB.id)
+                    bgModeB = PreviewRenderer.packBackground(bgB, bgParamsB)
                 } else {
                     if (frameSourceB != null) {
                         frameSourceB?.release()
@@ -591,7 +615,7 @@ class ExportEngine(private val context: Context) {
                 val adjustA = PreviewRenderer.getClipColorAdjust(clipA.id)
                 PreviewRenderer.packAdjust(adjustA, adjA0, adjA1, adjA2)
 
-                if (res.isTransition && res.clipBIndex >= 0) {
+                if (isTransition) {
                     val clipB = snapshot.project.clips[res.clipBIndex]
                     val adjustB = PreviewRenderer.getClipColorAdjust(clipB.id)
                     PreviewRenderer.packAdjust(adjustB, adjB0, adjB1, adjB2)
@@ -612,8 +636,22 @@ class ExportEngine(private val context: Context) {
                 drawSpec.adjB1 = adjB1
                 drawSpec.adjB2 = adjB2
                 drawSpec.texelSize = texelSize
+                drawSpec.fgNormMatA = fgNormMatA
+                drawSpec.fgNormMatB = if (isTransition) fgNormMatB else null
+                drawSpec.bgMatA = bgMatA
+                drawSpec.bgMatB = if (isTransition) bgMatB else null
+                drawSpec.bgModeA = bgModeA
+                drawSpec.bgModeB = bgModeB
+                drawSpec.bgParamsA = bgParamsA
+                drawSpec.bgParamsB = if (isTransition) bgParamsB else null
 
-                val needsScissor = PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                val needsScissor = if (isTransition) {
+                    (bgA.type == BackgroundType.NONE && bgB.type == BackgroundType.NONE) &&
+                        PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                } else {
+                    (bgA.type == BackgroundType.NONE) &&
+                        PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                }
                 if (needsScissor) {
                     GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                     GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])

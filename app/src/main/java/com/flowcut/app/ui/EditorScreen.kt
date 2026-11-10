@@ -68,6 +68,7 @@ import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.FrameDriver
 import com.flowcut.app.engine.PreviewRenderer
@@ -297,6 +298,9 @@ fun EditorScreen(
     }
 
     var isTrimSheetVisible by remember { mutableStateOf(false) }
+    var isVolumeSheetVisible by remember { mutableStateOf(false) }
+    var isAdjustSheetVisible by remember { mutableStateOf(false) }
+    var isBackgroundSheetVisible by remember { mutableStateOf(false) }
 
     val handleOpenTrim: () -> Unit = {
         var targetIdx = selectedClipIndex
@@ -317,6 +321,9 @@ fun EditorScreen(
                 frameDriver.wake()
                 onPlaybackStateChange(false)
             }
+            isVolumeSheetVisible = false
+            isAdjustSheetVisible = false
+            isBackgroundSheetVisible = false
             isTrimSheetVisible = true
         } else {
             Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
@@ -325,8 +332,6 @@ fun EditorScreen(
 
     val vmUiState = resolvedViewModel?.uiState?.collectAsState()?.value
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
-    var isVolumeSheetVisible by remember { mutableStateOf(false) }
-    var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var showApplyToAll by remember { mutableStateOf(false) }
     var applyToAllJob by remember { mutableStateOf<Job?>(null) }
 
@@ -990,14 +995,33 @@ fun EditorScreen(
                 isClipSelected = selectedClipIndex != null,
                 onSplitClick = onSplitClick ?: handleSplit,
                 onTrimClick = handleOpenTrim,
-                onVolumeClick = { isVolumeSheetVisible = true },
+                onVolumeClick = {
+                    isAdjustSheetVisible = false
+                    isBackgroundSheetVisible = false
+                    isTrimSheetVisible = false
+                    isVolumeSheetVisible = true
+                },
                 onAdjustClick = {
                     if (playbackController.playhead.mode == PlayMode.PLAYING) {
                         playbackController.pause()
                         frameDriver.wake()
                         onPlaybackStateChange(false)
                     }
+                    isVolumeSheetVisible = false
+                    isBackgroundSheetVisible = false
+                    isTrimSheetVisible = false
                     isAdjustSheetVisible = true
+                },
+                onBackgroundClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isVolumeSheetVisible = false
+                    isAdjustSheetVisible = false
+                    isTrimSheetVisible = false
+                    isBackgroundSheetVisible = true
                 },
                 onRotateClick = onRotateClip ?: {
                     resolvedViewModel?.rotateSelectedClip()
@@ -1143,6 +1167,28 @@ fun EditorScreen(
                     frameDriver.wake()
                 },
                 onDismiss = { isAdjustSheetVisible = false }
+            )
+        }
+
+        // Canvas Background BottomSheet (CapCut/VN style) for selected clip
+        if (isBackgroundSheetVisible && selectedClipIndex != null) {
+            BackgroundSheet(
+                clipIndex = selectedClipIndex,
+                snapshotHolder = snapshotHolder,
+                previewRenderer = previewRenderer,
+                onWakeFrameDriver = { frameDriver.wake() },
+                getClipBackground = { id -> resolvedViewModel?.getClipBackground(id) ?: ClipBackground.DEFAULT },
+                onCommitSingleBackground = { idx, bg ->
+                    resolvedViewModel?.commitClipBackground(idx, bg)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onCommitApplyAllBackground = { bg ->
+                    resolvedViewModel?.commitApplyBackgroundToAll(bg)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isBackgroundSheetVisible = false }
             )
         }
     }

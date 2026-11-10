@@ -21,7 +21,15 @@ data class DrawSpec(
     var adjB0: FloatArray? = null,
     var adjB1: FloatArray? = null,
     var adjB2: FloatArray? = null,
-    var texelSize: FloatArray? = null
+    var texelSize: FloatArray? = null,
+    var fgNormMatA: FloatArray? = null,
+    var fgNormMatB: FloatArray? = null,
+    var bgMatA: FloatArray? = null,
+    var bgMatB: FloatArray? = null,
+    var bgModeA: Int = 0,
+    var bgModeB: Int = 0,
+    var bgParamsA: FloatArray? = null,
+    var bgParamsB: FloatArray? = null
 )
 
 class TransitionRenderer {
@@ -49,10 +57,20 @@ class TransitionRenderer {
     private var uAdjB1Loc = -1
     private var uAdjB2Loc = -1
     private var uTexelSizeLoc = -1
+    private var uFgNormMatALoc = -1
+    private var uFgNormMatBLoc = -1
+    private var uBgMatALoc = -1
+    private var uBgMatBLoc = -1
+    private var uBgModeALoc = -1
+    private var uBgModeBLoc = -1
+    private var uBgParamsALoc = -1
+    private var uBgParamsBLoc = -1
 
     // Pre-allocated fallback arrays for zero allocations (Rule R10)
     private val defaultAdj = FloatArray(4)
     private val defaultTexelSize = floatArrayOf(1f / 1080f, 1f / 1920f)
+    private val defaultIdentityMat = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
+    private val defaultBgParams = FloatArray(4)
 
     private val vertexShaderSource = """
         #version 300 es
@@ -87,6 +105,15 @@ class TransitionRenderer {
         uniform vec4 uAdjB1;
         uniform vec4 uAdjB2;
         uniform vec2 uTexelSize;
+
+        uniform mat4 uFgNormMatA;
+        uniform mat4 uFgNormMatB;
+        uniform mat4 uBgMatA;
+        uniform mat4 uBgMatB;
+        uniform int uBgModeA;
+        uniform int uBgModeB;
+        uniform vec4 uBgParamsA;
+        uniform vec4 uBgParamsB;
 
         in vec2 vUV;
         out vec4 outColor;
@@ -162,15 +189,101 @@ class TransitionRenderer {
             return color;
         }
 
-        vec4 sampleClipA(vec2 uv) {
-            uv = (uv - 0.5) * uCropA + 0.5;
-            uv = (uMatA * vec4(clamp(uv, 0.0, 1.0), 0.0, 1.0)).xy;
-            return applyColorAdjust(uTexA, uv, uAdjA0, uAdjA1, uAdjA2, uTexelSize);
+        vec4 sampleBlur(samplerExternalOES tex, vec2 uv, float blurLevel, vec2 texelSize) {
+            if (blurLevel <= 0.001) {
+                return texture(tex, uv) * 0.88;
+            }
+            float radius = max(1.0, blurLevel * 28.0);
+            vec2 stride = texelSize * radius;
+
+            // 17-tap disc sampling kernel
+            vec4 sum = texture(tex, uv) * 0.16;
+
+            // Ring 1 (radius 0.5 * stride) - 8 samples
+            vec2 r1 = stride * 0.5;
+            sum += texture(tex, clamp(uv + vec2( r1.x,  0.0 ), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2(-r1.x,  0.0 ), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2( 0.0,   r1.y), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2( 0.0,  -r1.y), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2( r1.x * 0.707,  r1.y * 0.707), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2(-r1.x * 0.707,  r1.y * 0.707), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2( r1.x * 0.707, -r1.y * 0.707), 0.001, 0.999)) * 0.06;
+            sum += texture(tex, clamp(uv + vec2(-r1.x * 0.707, -r1.y * 0.707), 0.001, 0.999)) * 0.06;
+
+            // Ring 2 (radius 1.0 * stride) - 8 samples at 22.5 deg offset
+            sum += texture(tex, clamp(uv + vec2( stride.x *  0.924,  stride.y *  0.383), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.924,  stride.y *  0.383), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2( stride.x *  0.924, -stride.y *  0.383), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.924, -stride.y *  0.383), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2( stride.x *  0.383,  stride.y *  0.924), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.383,  stride.y *  0.924), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2( stride.x *  0.383, -stride.y *  0.924), 0.001, 0.999)) * 0.045;
+            sum += texture(tex, clamp(uv + vec2(-stride.x *  0.383, -stride.y *  0.924), 0.001, 0.999)) * 0.045;
+
+            // Subtle 0.88 brightness dim so the sharp foreground video pops!
+            sum.rgb *= 0.88;
+            sum.a = 1.0;
+            return sum;
         }
+
+        vec4 sampleClipA(vec2 uv) {
+            vec2 cropUv = (uv - 0.5) * uCropA + 0.5;
+            vec2 fgCoord = (uFgNormMatA * vec4(cropUv, 0.0, 1.0)).xy;
+            float edgeDist = min(min(fgCoord.x, 1.0 - fgCoord.x), min(fgCoord.y, 1.0 - fgCoord.y));
+            float feather = max(fwidth(fgCoord.x), fwidth(fgCoord.y)) * 1.5;
+            if (feather < 0.001) feather = 0.001;
+            float fgAlpha = smoothstep(0.0, feather, edgeDist);
+
+            if (fgAlpha >= 1.0) {
+                vec2 texUv = (uMatA * vec4(cropUv, 0.0, 1.0)).xy;
+                return applyColorAdjust(uTexA, texUv, uAdjA0, uAdjA1, uAdjA2, uTexelSize);
+            }
+
+            vec4 bg = vec4(0.0, 0.0, 0.0, 1.0);
+            if (uBgModeA == 1) {
+                bg = vec4(uBgParamsA.rgb, 1.0);
+            } else if (uBgModeA == 2) {
+                vec2 bgUv = (uBgMatA * vec4(cropUv, 0.0, 1.0)).xy;
+                bg = sampleBlur(uTexA, bgUv, uBgParamsA.a, uTexelSize);
+            }
+
+            if (fgAlpha <= 0.0) {
+                return bg;
+            }
+
+            vec2 texUv = (uMatA * vec4(cropUv, 0.0, 1.0)).xy;
+            vec4 fg = applyColorAdjust(uTexA, texUv, uAdjA0, uAdjA1, uAdjA2, uTexelSize);
+            return mix(bg, fg, fgAlpha);
+        }
+
         vec4 sampleClipB(vec2 uv) {
-            uv = (uv - 0.5) * uCropB + 0.5;
-            uv = (uMatB * vec4(clamp(uv, 0.0, 1.0), 0.0, 1.0)).xy;
-            return applyColorAdjust(uTexB, uv, uAdjB0, uAdjB1, uAdjB2, uTexelSize);
+            vec2 cropUv = (uv - 0.5) * uCropB + 0.5;
+            vec2 fgCoord = (uFgNormMatB * vec4(cropUv, 0.0, 1.0)).xy;
+            float edgeDist = min(min(fgCoord.x, 1.0 - fgCoord.x), min(fgCoord.y, 1.0 - fgCoord.y));
+            float feather = max(fwidth(fgCoord.x), fwidth(fgCoord.y)) * 1.5;
+            if (feather < 0.001) feather = 0.001;
+            float fgAlpha = smoothstep(0.0, feather, edgeDist);
+
+            if (fgAlpha >= 1.0) {
+                vec2 texUv = (uMatB * vec4(cropUv, 0.0, 1.0)).xy;
+                return applyColorAdjust(uTexB, texUv, uAdjB0, uAdjB1, uAdjB2, uTexelSize);
+            }
+
+            vec4 bg = vec4(0.0, 0.0, 0.0, 1.0);
+            if (uBgModeB == 1) {
+                bg = vec4(uBgParamsB.rgb, 1.0);
+            } else if (uBgModeB == 2) {
+                vec2 bgUv = (uBgMatB * vec4(cropUv, 0.0, 1.0)).xy;
+                bg = sampleBlur(uTexB, bgUv, uBgParamsB.a, uTexelSize);
+            }
+
+            if (fgAlpha <= 0.0) {
+                return bg;
+            }
+
+            vec2 texUv = (uMatB * vec4(cropUv, 0.0, 1.0)).xy;
+            vec4 fg = applyColorAdjust(uTexB, texUv, uAdjB0, uAdjB1, uAdjB2, uTexelSize);
+            return mix(bg, fg, fgAlpha);
         }
 
         vec4 sA(vec2 uv) { return sampleClipA(uv); }
@@ -240,6 +353,14 @@ class TransitionRenderer {
         uAdjB1Loc = GLES30.glGetUniformLocation(programId, "uAdjB1")
         uAdjB2Loc = GLES30.glGetUniformLocation(programId, "uAdjB2")
         uTexelSizeLoc = GLES30.glGetUniformLocation(programId, "uTexelSize")
+        uFgNormMatALoc = GLES30.glGetUniformLocation(programId, "uFgNormMatA")
+        uFgNormMatBLoc = GLES30.glGetUniformLocation(programId, "uFgNormMatB")
+        uBgMatALoc = GLES30.glGetUniformLocation(programId, "uBgMatA")
+        uBgMatBLoc = GLES30.glGetUniformLocation(programId, "uBgMatB")
+        uBgModeALoc = GLES30.glGetUniformLocation(programId, "uBgModeA")
+        uBgModeBLoc = GLES30.glGetUniformLocation(programId, "uBgModeB")
+        uBgParamsALoc = GLES30.glGetUniformLocation(programId, "uBgParamsA")
+        uBgParamsBLoc = GLES30.glGetUniformLocation(programId, "uBgParamsB")
 
         // Setup VAO & VBO
         val vaos = IntArray(1)
@@ -330,6 +451,14 @@ class TransitionRenderer {
         GLES30.glUniform4fv(uAdjB1Loc, 1, spec.adjB1 ?: defaultAdj, 0)
         GLES30.glUniform4fv(uAdjB2Loc, 1, spec.adjB2 ?: defaultAdj, 0)
         GLES30.glUniform2fv(uTexelSizeLoc, 1, spec.texelSize ?: defaultTexelSize, 0)
+        GLES30.glUniformMatrix4fv(uFgNormMatALoc, 1, false, spec.fgNormMatA ?: defaultIdentityMat, 0)
+        GLES30.glUniformMatrix4fv(uFgNormMatBLoc, 1, false, spec.fgNormMatB ?: defaultIdentityMat, 0)
+        GLES30.glUniformMatrix4fv(uBgMatALoc, 1, false, spec.bgMatA ?: defaultIdentityMat, 0)
+        GLES30.glUniformMatrix4fv(uBgMatBLoc, 1, false, spec.bgMatB ?: defaultIdentityMat, 0)
+        GLES30.glUniform1i(uBgModeALoc, spec.bgModeA)
+        GLES30.glUniform1i(uBgModeBLoc, spec.bgModeB)
+        GLES30.glUniform4fv(uBgParamsALoc, 1, spec.bgParamsA ?: defaultBgParams, 0)
+        GLES30.glUniform4fv(uBgParamsBLoc, 1, spec.bgParamsB ?: defaultBgParams, 0)
 
         // Draw quad
         GLES30.glBindVertexArray(vaoId)

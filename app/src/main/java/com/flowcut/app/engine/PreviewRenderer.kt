@@ -207,6 +207,22 @@ data class ClipColorAdjust(
 }
 
 /**
+ * Per-clip canvas background state (Requirement 1):
+ * NONE (black padding), COLOR (solid ARGB color), or BLUR (creamy Gaussian blur of the clip).
+ */
+enum class BackgroundType { NONE, COLOR, BLUR }
+
+data class ClipBackground(
+    val type: BackgroundType = BackgroundType.NONE,
+    val colorArgb: Int = 0xFF000000.toInt(), // Used when type == COLOR
+    val blurLevel: Float = 0.5f              // 0.1f..1.0f (presets: 0.25f, 0.5f, 0.75f, 1.0f)
+) {
+    companion object {
+        val DEFAULT = ClipBackground()
+    }
+}
+
+/**
  * PreviewRenderer on the new core architecture (Sections 5, 7, 10, 11 & 15).
  * - Reads `val s = holder.current` and `val tUs = playhead.timeUs` ONCE per frame on the render path.
  * - Reuses a single pre-allocated `ActiveSet` (resized only if `s.lanes.size` grows) and calls `s.resolve(tUs, activeSet)`.
@@ -270,6 +286,16 @@ class PreviewRenderer(
         this[0] = 1.0f / PREVIEW_W.toFloat()
         this[1] = 1.0f / PREVIEW_H.toFloat()
     }
+
+    // Pre-allocated per-slot background and foreground matrices & parameters (Rule R10)
+    private val fgNormMatA = FloatArray(16)
+    private val fgNormMatB = FloatArray(16)
+    private val bgNormMat = FloatArray(16)
+    private val bgMatA = FloatArray(16)
+    private val bgMatB = FloatArray(16)
+    private val bgParamsA = FloatArray(4)
+    private val bgParamsB = FloatArray(4)
+
     private val drawSpec = DrawSpec()
 
     private val contributors = mutableListOf<RenderContributor>()
@@ -549,9 +575,14 @@ class PreviewRenderer(
                     }
                 }
                 val transformA = getClipTransform(clipA.id)
+                computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
                 System.arraycopy(rawMatA, 0, matA, 0, 16)
                 applyTransformMatrix(matA, transformA, clipA.displayWidth, clipA.displayHeight)
                 calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
+                computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
+                val bgA = getClipBackground(clipA.id)
+                val bgModeA = packBackground(bgA, bgParamsA)
 
                 // Ensure Clip B is on Slot B
                 val clipBChanged = frameSourceB == null ||
@@ -583,9 +614,14 @@ class PreviewRenderer(
                     }
                 }
                 val transformB = getClipTransform(clipB.id)
+                computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
                 System.arraycopy(rawMatB, 0, matB, 0, 16)
                 applyTransformMatrix(matB, transformB, clipB.displayWidth, clipB.displayHeight)
                 calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
+                computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
+                val bgB = getClipBackground(clipB.id)
+                val bgModeB = packBackground(bgB, bgParamsB)
 
                 val easedP = ProgramTimeline.ease(frame.linearP)
                 val legacyType = when (frame.transitionType) {
@@ -596,7 +632,8 @@ class PreviewRenderer(
                     TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
                 }
 
-                val needsScissor = computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                val needsScissor = (bgA.type == BackgroundType.NONE && bgB.type == BackgroundType.NONE) &&
+                    computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 if (needsScissor) {
                     GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                     GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
@@ -620,6 +657,14 @@ class PreviewRenderer(
                     drawSpec.adjB1 = adjB1
                     drawSpec.adjB2 = adjB2
                     drawSpec.texelSize = texelSize
+                    drawSpec.fgNormMatA = fgNormMatA
+                    drawSpec.fgNormMatB = fgNormMatB
+                    drawSpec.bgMatA = bgMatA
+                    drawSpec.bgMatB = bgMatB
+                    drawSpec.bgModeA = bgModeA
+                    drawSpec.bgModeB = bgModeB
+                    drawSpec.bgParamsA = bgParamsA
+                    drawSpec.bgParamsB = bgParamsB
 
                     renderer.draw(drawSpec)
                 } catch (_: Exception) {
@@ -750,7 +795,14 @@ class PreviewRenderer(
                 standbyPreparedInUs = -1L
             }
 
-            val needsScissor = computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+            computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
+            computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+            Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
+            val bgA = getClipBackground(clipA.id)
+            val bgModeA = packBackground(bgA, bgParamsA)
+
+            val needsScissor = (bgA.type == BackgroundType.NONE) &&
+                computeScissorRect(PREVIEW_W, PREVIEW_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
             if (needsScissor) {
                 GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                 GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
@@ -773,6 +825,14 @@ class PreviewRenderer(
                 drawSpec.adjB1 = adjB1
                 drawSpec.adjB2 = adjB2
                 drawSpec.texelSize = texelSize
+                drawSpec.fgNormMatA = fgNormMatA
+                drawSpec.fgNormMatB = null
+                drawSpec.bgMatA = bgMatA
+                drawSpec.bgMatB = null
+                drawSpec.bgModeA = bgModeA
+                drawSpec.bgModeB = 0
+                drawSpec.bgParamsA = bgParamsA
+                drawSpec.bgParamsB = null
 
                 renderer.draw(drawSpec)
             } catch (_: Exception) {
@@ -871,7 +931,14 @@ class PreviewRenderer(
                 standbyPreparedInUs = -1L
             }
 
-            val needsScissor = computeScissorRect(PREVIEW_W, PREVIEW_H, transformB, clipA.displayWidth, clipA.displayHeight, scissorRect)
+            computeFgNormMatrix(fgNormMatB, transformB, clipA.displayWidth, clipA.displayHeight)
+            computeBgNormMatrix(bgNormMat, transformB, clipA.displayWidth, clipA.displayHeight)
+            Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
+            val bgB = getClipBackground(clipA.id)
+            val bgModeB = packBackground(bgB, bgParamsB)
+
+            val needsScissor = (bgB.type == BackgroundType.NONE) &&
+                computeScissorRect(PREVIEW_W, PREVIEW_H, transformB, clipA.displayWidth, clipA.displayHeight, scissorRect)
             if (needsScissor) {
                 GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                 GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
@@ -894,6 +961,14 @@ class PreviewRenderer(
                 drawSpec.adjB1 = adjB1
                 drawSpec.adjB2 = adjB2
                 drawSpec.texelSize = texelSize
+                drawSpec.fgNormMatA = null
+                drawSpec.fgNormMatB = fgNormMatB
+                drawSpec.bgMatA = null
+                drawSpec.bgMatB = bgMatB
+                drawSpec.bgModeA = 0
+                drawSpec.bgModeB = bgModeB
+                drawSpec.bgParamsA = null
+                drawSpec.bgParamsB = bgParamsB
 
                 renderer.draw(drawSpec)
             } catch (_: Exception) {
@@ -945,6 +1020,7 @@ class PreviewRenderer(
     companion object {
         val clipTransforms = ConcurrentHashMap<String, ClipTransform>()
         val clipColorAdjusts = ConcurrentHashMap<String, ClipColorAdjust>()
+        val clipBackgrounds = ConcurrentHashMap<String, ClipBackground>()
 
         fun getClipTransform(clipId: String?): ClipTransform {
             if (clipId == null) return ClipTransform.DEFAULT
@@ -972,6 +1048,97 @@ class PreviewRenderer(
         fun syncColorAdjusts(adjusts: Map<String, ClipColorAdjust>) {
             clipColorAdjusts.clear()
             clipColorAdjusts.putAll(adjusts)
+        }
+
+        fun getClipBackground(clipId: String?): ClipBackground {
+            if (clipId == null) return ClipBackground.DEFAULT
+            return clipBackgrounds[clipId] ?: ClipBackground.DEFAULT
+        }
+
+        fun setClipBackground(clipId: String, bg: ClipBackground) {
+            clipBackgrounds[clipId] = bg
+        }
+
+        fun syncBackgrounds(bgs: Map<String, ClipBackground>) {
+            clipBackgrounds.clear()
+            clipBackgrounds.putAll(bgs)
+        }
+
+        fun packBackground(bg: ClipBackground, outParams: FloatArray): Int {
+            when (bg.type) {
+                BackgroundType.NONE -> {
+                    outParams[0] = 0f
+                    outParams[1] = 0f
+                    outParams[2] = 0f
+                    outParams[3] = 0f
+                    return 0
+                }
+                BackgroundType.COLOR -> {
+                    val r = ((bg.colorArgb ushr 16) and 0xFF) / 255f
+                    val g = ((bg.colorArgb ushr 8) and 0xFF) / 255f
+                    val b = (bg.colorArgb and 0xFF) / 255f
+                    val a = ((bg.colorArgb ushr 24) and 0xFF) / 255f
+                    outParams[0] = r
+                    outParams[1] = g
+                    outParams[2] = b
+                    outParams[3] = a
+                    return 1
+                }
+                BackgroundType.BLUR -> {
+                    outParams[0] = 0f
+                    outParams[1] = 0f
+                    outParams[2] = 0f
+                    outParams[3] = bg.blurLevel.coerceIn(0.01f, 1.0f)
+                    return 2
+                }
+            }
+        }
+
+        fun computeFgNormMatrix(
+            outMat: FloatArray,
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920
+        ) {
+            Matrix.setIdentityM(outMat, 0)
+            applyTransformMatrix(outMat, transform, displayWidth, displayHeight)
+        }
+
+        fun computeBgNormMatrix(
+            outMat: FloatArray,
+            transform: ClipTransform,
+            displayWidth: Int = 1080,
+            displayHeight: Int = 1920
+        ) {
+            Matrix.setIdentityM(outMat, 0)
+            val aScreen = 9.0f / 16.0f
+            val rot = (((Math.round(transform.rotationDeg / 90.0).toInt() * 90) % 360 + 360) % 360)
+            val isSwapped = (rot == 90 || rot == 270)
+            val rawW = if (displayWidth > 0) displayWidth else 1080
+            val rawH = if (displayHeight > 0) displayHeight else 1920
+            val w = if (isSwapped) rawH else rawW
+            val h = if (isSwapped) rawW else rawH
+            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+
+            val sx: Float
+            val sy: Float
+            if (aClip >= aScreen) {
+                sx = aScreen / aClip
+                sy = 1.0f
+            } else {
+                sx = 1.0f
+                sy = aClip / aScreen
+            }
+
+            Matrix.translateM(outMat, 0, 0.5f, 0.5f, 0f)
+            if (rot != 0) {
+                Matrix.rotateM(outMat, 0, rot.toFloat(), 0f, 0f, 1f)
+            }
+            if (transform.isFlippedH) {
+                Matrix.scaleM(outMat, 0, -1f, 1f, 1f)
+            }
+            Matrix.scaleM(outMat, 0, sx, sy, 1f)
+            Matrix.translateM(outMat, 0, -0.5f, -0.5f, 0f)
         }
 
         fun packAdjust(adjust: ClipColorAdjust, out0: FloatArray, out1: FloatArray, out2: FloatArray) {

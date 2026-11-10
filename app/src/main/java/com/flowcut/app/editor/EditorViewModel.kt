@@ -9,6 +9,8 @@ import com.flowcut.app.core.time.TimeMap
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.BackgroundType
+import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.ClipTransform
 import com.flowcut.app.engine.ExportEngine
@@ -104,6 +106,60 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val redoColorAdjusts = ArrayDeque<Map<String, ClipColorAdjust>>()
     val clipColorAdjusts = mutableMapOf<String, ClipColorAdjust>()
 
+    // Per-clip canvas background (NONE, COLOR, BLUR) and undo/redo stacks
+    private val undoBackgrounds = ArrayDeque<Map<String, ClipBackground>>()
+    private val redoBackgrounds = ArrayDeque<Map<String, ClipBackground>>()
+    val clipBackgrounds = mutableMapOf<String, ClipBackground>()
+
+    fun getClipBackground(clipId: String): ClipBackground =
+        clipBackgrounds[clipId] ?: ClipBackground.DEFAULT
+
+    fun commitClipBackground(clipIndex: Int, background: ClipBackground) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+
+        clipBackgrounds[clip.id] = background
+        PreviewRenderer.setClipBackground(clip.id, background)
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitApplyBackgroundToAll(background: ClipBackground) {
+        val currentProject = _uiState.value.project
+        if (currentProject.clips.isEmpty()) return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+
+        for (c in currentProject.clips) {
+            clipBackgrounds[c.id] = background
+            PreviewRenderer.setClipBackground(c.id, background)
+        }
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
     fun getClipColorAdjust(clipId: String): ClipColorAdjust =
         clipColorAdjusts[clipId] ?: ClipColorAdjust.DEFAULT
 
@@ -116,10 +172,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         clipColorAdjusts[clip.id] = adjust
         PreviewRenderer.setClipColorAdjust(clip.id, adjust)
@@ -136,10 +194,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         for (c in currentProject.clips) {
             clipColorAdjusts[c.id] = adjust
@@ -165,10 +225,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         clipTransforms[clip.id] = newTransform
         PreviewRenderer.setClipTransform(clip.id, newTransform)
@@ -189,10 +251,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         clipTransforms[clip.id] = newTransform
         PreviewRenderer.setClipTransform(clip.id, newTransform)
@@ -210,10 +274,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         clipTransforms[clip.id] = transform
         PreviewRenderer.setClipTransform(clip.id, transform)
@@ -231,10 +297,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         for (c in currentProject.clips) {
             val current = clipTransforms[c.id] ?: ClipTransform.DEFAULT
@@ -267,10 +335,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         clipTransforms[clip.id] = newTransform
         PreviewRenderer.setClipTransform(clip.id, newTransform)
@@ -287,10 +357,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         val clampedScale = scale.coerceIn(0.5f, 4.0f)
         val clampedPanX = panX.coerceIn(-1.0f, 1.0f)
@@ -336,10 +408,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         if (!currentlyAllMuted) {
             // Mute everything: save current non-zero volumes
@@ -377,10 +451,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         clipVolumes[clip.id] = clampedVol
         ClipAudioContributor.setClipVolume(clip.id, clampedVol)
@@ -404,10 +480,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         for (c in currentProject.clips) {
             clipVolumes[c.id] = clampedVol
@@ -474,10 +552,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
         clipTimeMaps[oldClip.id] = TimeMap(newInUs, newOutUs)
         updateProject(newProject, recordUndo = false)
     }
@@ -584,10 +664,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoVolumes.addLast(HashMap(clipVolumes))
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
+        redoBackgrounds.clear()
 
         // Register natural duration for both halves
         val naturalDur = clipNaturalDurations[oldClip.id] ?: getMediaFileDurationUs(oldClip)
@@ -619,6 +701,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         clipColorAdjusts[rightClipId] = origAdjust
         PreviewRenderer.setClipColorAdjust(oldClip.id, origAdjust)
         PreviewRenderer.setClipColorAdjust(rightClipId, origAdjust)
+
+        // Inherit canvas background for both halves (Requirement 5)
+        val origBg = clipBackgrounds[oldClip.id] ?: ClipBackground.DEFAULT
+        clipBackgrounds[oldClip.id] = origBg
+        clipBackgrounds[rightClipId] = origBg
+        PreviewRenderer.setClipBackground(oldClip.id, origBg)
+        PreviewRenderer.setClipBackground(rightClipId, origBg)
 
         // Update project and select the new Right Clip (targetK + 1)
         updateProject(newProject, recordUndo = false)
@@ -672,9 +761,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             undoTimeMaps.addLast(HashMap(clipTimeMaps))
             undoVolumes.addLast(HashMap(clipVolumes))
             undoTransforms.addLast(HashMap(clipTransforms))
+            undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+            undoBackgrounds.addLast(HashMap(clipBackgrounds))
             redoTimeMaps.clear()
             redoVolumes.clear()
             redoTransforms.clear()
+            redoColorAdjusts.clear()
+            redoBackgrounds.clear()
         }
         val newTimeline = ProgramTimeline(newProject)
         val clampedMs = _uiState.value.currentMs.coerceIn(0L, maxOf(0L, newTimeline.total))
@@ -807,6 +900,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             PreviewRenderer.clipTransforms.remove(deletedId)
             clipColorAdjusts.remove(deletedId)
             PreviewRenderer.clipColorAdjusts.remove(deletedId)
+            clipBackgrounds.remove(deletedId)
+            PreviewRenderer.clipBackgrounds.remove(deletedId)
         }
         val newProject = ProgramTimeline.deleteClip(_uiState.value.project, index)
         val isAllMuted = newProject.clips.isNotEmpty() && newProject.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
@@ -852,6 +947,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             redoColorAdjusts.clear()
             clipColorAdjusts.clear()
             PreviewRenderer.clipColorAdjusts.clear()
+            undoBackgrounds.clear()
+            redoBackgrounds.clear()
+            clipBackgrounds.clear()
+            PreviewRenderer.clipBackgrounds.clear()
             _uiState.update {
                 it.copy(
                     project = Project(),
@@ -1085,6 +1184,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipColorAdjusts.putAll(prevAdjusts)
             PreviewRenderer.syncColorAdjusts(clipColorAdjusts)
         }
+        if (undoBackgrounds.isNotEmpty()) {
+            val prevBgs = undoBackgrounds.removeLast()
+            redoBackgrounds.addLast(HashMap(clipBackgrounds))
+            clipBackgrounds.clear()
+            clipBackgrounds.putAll(prevBgs)
+            PreviewRenderer.syncBackgrounds(clipBackgrounds)
+        }
         val isAllMuted = previous.clips.isNotEmpty() && previous.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(previous, recordUndo = false)
@@ -1125,6 +1231,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipColorAdjusts.clear()
             clipColorAdjusts.putAll(nextAdjusts)
             PreviewRenderer.syncColorAdjusts(clipColorAdjusts)
+        }
+        if (redoBackgrounds.isNotEmpty()) {
+            val nextBgs = redoBackgrounds.removeLast()
+            undoBackgrounds.addLast(HashMap(clipBackgrounds))
+            clipBackgrounds.clear()
+            clipBackgrounds.putAll(nextBgs)
+            PreviewRenderer.syncBackgrounds(clipBackgrounds)
         }
         val isAllMuted = next.clips.isNotEmpty() && next.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
