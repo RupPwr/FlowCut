@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -46,6 +47,7 @@ fun BottomToolbar(
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
     onVolumeClick: () -> Unit = {},
+    onAdjustClick: () -> Unit = {},
     onRotateClick: () -> Unit = {},
     onFlipClick: () -> Unit = {},
     onDeleteClipClick: (() -> Unit)? = null,
@@ -174,6 +176,30 @@ fun BottomToolbar(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "VOLUME",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Adjust Action (Color Adjust: Brightness, Contrast, Saturation, etc.)
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onAdjustClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "ADJUST",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ADJUST",
                             color = colors.textPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold

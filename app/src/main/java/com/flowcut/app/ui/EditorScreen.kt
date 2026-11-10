@@ -68,6 +68,7 @@ import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.FrameDriver
 import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.engine.USE_NEW_CORE
@@ -325,6 +326,7 @@ fun EditorScreen(
     val vmUiState = resolvedViewModel?.uiState?.collectAsState()?.value
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
     var isVolumeSheetVisible by remember { mutableStateOf(false) }
+    var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var showApplyToAll by remember { mutableStateOf(false) }
     var applyToAllJob by remember { mutableStateOf<Job?>(null) }
 
@@ -989,6 +991,14 @@ fun EditorScreen(
                 onSplitClick = onSplitClick ?: handleSplit,
                 onTrimClick = handleOpenTrim,
                 onVolumeClick = { isVolumeSheetVisible = true },
+                onAdjustClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isAdjustSheetVisible = true
+                },
                 onRotateClick = onRotateClip ?: {
                     resolvedViewModel?.rotateSelectedClip()
                     if (USE_NEW_CORE) {
@@ -1111,6 +1121,28 @@ fun EditorScreen(
                 onCommitSingleVolume = { idx, vol -> resolvedViewModel?.commitClipVolume(idx, vol) },
                 onCommitApplyAllVolume = { vol -> resolvedViewModel?.commitApplyVolumeToAll(vol) },
                 onDismiss = { isVolumeSheetVisible = false }
+            )
+        }
+
+        // Color Adjust BottomSheet (CapCut/VN style) for selected clip
+        if (isAdjustSheetVisible && selectedClipIndex != null) {
+            AdjustSheet(
+                clipIndex = selectedClipIndex,
+                snapshotHolder = snapshotHolder,
+                previewRenderer = previewRenderer,
+                onWakeFrameDriver = { frameDriver.wake() },
+                getClipColorAdjust = { id -> resolvedViewModel?.getClipColorAdjust(id) ?: ClipColorAdjust.DEFAULT },
+                onCommitSingleAdjust = { idx, adj ->
+                    resolvedViewModel?.commitClipColorAdjust(idx, adj)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onCommitApplyAllAdjust = { adj ->
+                    resolvedViewModel?.commitApplyColorAdjustToAll(adj)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isAdjustSheetVisible = false }
             )
         }
     }

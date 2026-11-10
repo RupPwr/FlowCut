@@ -311,6 +311,15 @@ class ExportEngine(private val context: Context) {
             val scissorRect = IntArray(4)
             val activeSet = ActiveSet(snapshot.lanes.size)
 
+            val adjA0 = FloatArray(4)
+            val adjA1 = FloatArray(4)
+            val adjA2 = FloatArray(4)
+            val adjB0 = FloatArray(4)
+            val adjB1 = FloatArray(4)
+            val adjB2 = FloatArray(4)
+            val texelSize = floatArrayOf(1.0f / EXPORT_W.toFloat(), 1.0f / EXPORT_H.toFloat())
+            val drawSpec = DrawSpec()
+
             var currentAIndex = -1
             var currentBIndex = -1
 
@@ -579,22 +588,38 @@ class ExportEngine(private val context: Context) {
                 GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
+                val adjustA = PreviewRenderer.getClipColorAdjust(clipA.id)
+                PreviewRenderer.packAdjust(adjustA, adjA0, adjA1, adjA2)
+
+                if (res.isTransition && res.clipBIndex >= 0) {
+                    val clipB = snapshot.project.clips[res.clipBIndex]
+                    val adjustB = PreviewRenderer.getClipColorAdjust(clipB.id)
+                    PreviewRenderer.packAdjust(adjustB, adjB0, adjB1, adjB2)
+                } else {
+                    PreviewRenderer.packAdjust(ClipColorAdjust.DEFAULT, adjB0, adjB1, adjB2)
+                }
+
+                drawSpec.type = res.transitionType
+                drawSpec.easedP = res.easedP
+                drawSpec.matA = matA
+                drawSpec.matB = matB
+                drawSpec.cropA = cropA
+                drawSpec.cropB = cropB
+                drawSpec.adjA0 = adjA0
+                drawSpec.adjA1 = adjA1
+                drawSpec.adjA2 = adjA2
+                drawSpec.adjB0 = adjB0
+                drawSpec.adjB1 = adjB1
+                drawSpec.adjB2 = adjB2
+                drawSpec.texelSize = texelSize
+
                 val needsScissor = PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 if (needsScissor) {
                     GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                     GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
                 }
                 try {
-                    rnd.draw(
-                        DrawSpec(
-                            type = res.transitionType,
-                            easedP = res.easedP,
-                            matA = matA,
-                            matB = matB,
-                            cropA = cropA,
-                            cropB = cropB
-                        )
-                    )
+                    rnd.draw(drawSpec)
                 } finally {
                     if (needsScissor) {
                         GLES30.glDisable(GLES30.GL_SCISSOR_TEST)

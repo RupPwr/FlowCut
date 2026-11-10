@@ -181,6 +181,32 @@ data class ClipTransform(
 }
 
 /**
+ * Per-clip color adjustment state (Requirement 1):
+ * Normalized values in -1.0f..1.0f (sharpness in 0.0f..1.0f), all defaulting to 0.0f.
+ */
+data class ClipColorAdjust(
+    val brightness: Float = 0f,  // -1f..1f (UI: -50 to +50)
+    val contrast: Float = 0f,    // -1f..1f (UI: -50 to +50)
+    val saturation: Float = 0f,  // -1f..1f (UI: -50 to +50, -1f = grayscale)
+    val exposure: Float = 0f,    // -1f..1f (UI: -50 to +50)
+    val warmth: Float = 0f,      // -1f..1f (UI: -50 to +50, cool to warm)
+    val tint: Float = 0f,        // -1f..1f (UI: -50 to +50, green to magenta)
+    val highlights: Float = 0f,  // -1f..1f (UI: -50 to +50)
+    val shadows: Float = 0f,     // -1f..1f (UI: -50 to +50)
+    val sharpness: Float = 0f,   //  0f..1f (UI:  0 to 100)
+    val vignette: Float = 0f     // -1f..1f (UI: -50 to +50)
+) {
+    val isIdentity: Boolean get() =
+        brightness == 0f && contrast == 0f && saturation == 0f &&
+        exposure == 0f && warmth == 0f && tint == 0f &&
+        highlights == 0f && shadows == 0f && sharpness == 0f && vignette == 0f
+
+    companion object {
+        val DEFAULT = ClipColorAdjust()
+    }
+}
+
+/**
  * PreviewRenderer on the new core architecture (Sections 5, 7, 10, 11 & 15).
  * - Reads `val s = holder.current` and `val tUs = playhead.timeUs` ONCE per frame on the render path.
  * - Reuses a single pre-allocated `ActiveSet` (resized only if `s.lanes.size` grows) and calls `s.resolve(tUs, activeSet)`.
@@ -232,6 +258,19 @@ class PreviewRenderer(
     private val cropA = FloatArray(2) { 1f }
     private val cropB = FloatArray(2) { 1f }
     private val scissorRect = IntArray(4)
+
+    // Pre-allocated per-slot color adjustment uniforms (Rule R10: Zero heap allocations on GL render path)
+    private val adjA0 = FloatArray(4)
+    private val adjA1 = FloatArray(4)
+    private val adjA2 = FloatArray(4)
+    private val adjB0 = FloatArray(4)
+    private val adjB1 = FloatArray(4)
+    private val adjB2 = FloatArray(4)
+    private val texelSize = FloatArray(2).apply {
+        this[0] = 1.0f / PREVIEW_W.toFloat()
+        this[1] = 1.0f / PREVIEW_H.toFloat()
+    }
+    private val drawSpec = DrawSpec()
 
     private val contributors = mutableListOf<RenderContributor>()
     private val disabledContributors = mutableSetOf<RenderContributor>()
@@ -448,6 +487,10 @@ class PreviewRenderer(
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         GLES30.glViewport(0, 0, width, height)
+        if (width > 0 && height > 0) {
+            texelSize[0] = 1.0f / width.toFloat()
+            texelSize[1] = 1.0f / height.toFloat()
+        }
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -559,16 +602,26 @@ class PreviewRenderer(
                     GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
                 }
                 try {
-                    renderer.draw(
-                        DrawSpec(
-                            type = legacyType,
-                            easedP = easedP,
-                            matA = matA,
-                            matB = matB,
-                            cropA = cropA,
-                            cropB = cropB
-                        )
-                    )
+                    val adjustA = getClipColorAdjust(clipA.id)
+                    packAdjust(adjustA, adjA0, adjA1, adjA2)
+                    val adjustB = getClipColorAdjust(clipB.id)
+                    packAdjust(adjustB, adjB0, adjB1, adjB2)
+
+                    drawSpec.type = legacyType
+                    drawSpec.easedP = easedP
+                    drawSpec.matA = matA
+                    drawSpec.matB = matB
+                    drawSpec.cropA = cropA
+                    drawSpec.cropB = cropB
+                    drawSpec.adjA0 = adjA0
+                    drawSpec.adjA1 = adjA1
+                    drawSpec.adjA2 = adjA2
+                    drawSpec.adjB0 = adjB0
+                    drawSpec.adjB1 = adjB1
+                    drawSpec.adjB2 = adjB2
+                    drawSpec.texelSize = texelSize
+
+                    renderer.draw(drawSpec)
                 } catch (_: Exception) {
                 } finally {
                     if (needsScissor) {
@@ -703,16 +756,25 @@ class PreviewRenderer(
                 GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
             }
             try {
-                renderer.draw(
-                    DrawSpec(
-                        type = com.flowcut.app.model.TransitionType.NONE,
-                        easedP = 0.0f,
-                        matA = matA,
-                        matB = matB,
-                        cropA = cropA,
-                        cropB = cropB
-                    )
-                )
+                val adjustA = getClipColorAdjust(clipA.id)
+                packAdjust(adjustA, adjA0, adjA1, adjA2)
+                packAdjust(ClipColorAdjust.DEFAULT, adjB0, adjB1, adjB2)
+
+                drawSpec.type = com.flowcut.app.model.TransitionType.NONE
+                drawSpec.easedP = 0.0f
+                drawSpec.matA = matA
+                drawSpec.matB = matB
+                drawSpec.cropA = cropA
+                drawSpec.cropB = cropB
+                drawSpec.adjA0 = adjA0
+                drawSpec.adjA1 = adjA1
+                drawSpec.adjA2 = adjA2
+                drawSpec.adjB0 = adjB0
+                drawSpec.adjB1 = adjB1
+                drawSpec.adjB2 = adjB2
+                drawSpec.texelSize = texelSize
+
+                renderer.draw(drawSpec)
             } catch (_: Exception) {
             } finally {
                 if (needsScissor) {
@@ -815,16 +877,25 @@ class PreviewRenderer(
                 GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
             }
             try {
-                renderer.draw(
-                    DrawSpec(
-                        type = com.flowcut.app.model.TransitionType.FADE,
-                        easedP = 1.0f,
-                        matA = matA,
-                        matB = matB,
-                        cropA = cropA,
-                        cropB = cropB
-                    )
-                )
+                packAdjust(ClipColorAdjust.DEFAULT, adjA0, adjA1, adjA2)
+                val adjustB = getClipColorAdjust(clipA.id)
+                packAdjust(adjustB, adjB0, adjB1, adjB2)
+
+                drawSpec.type = com.flowcut.app.model.TransitionType.FADE
+                drawSpec.easedP = 1.0f
+                drawSpec.matA = matA
+                drawSpec.matB = matB
+                drawSpec.cropA = cropA
+                drawSpec.cropB = cropB
+                drawSpec.adjA0 = adjA0
+                drawSpec.adjA1 = adjA1
+                drawSpec.adjA2 = adjA2
+                drawSpec.adjB0 = adjB0
+                drawSpec.adjB1 = adjB1
+                drawSpec.adjB2 = adjB2
+                drawSpec.texelSize = texelSize
+
+                renderer.draw(drawSpec)
             } catch (_: Exception) {
             } finally {
                 if (needsScissor) {
@@ -873,6 +944,7 @@ class PreviewRenderer(
 
     companion object {
         val clipTransforms = ConcurrentHashMap<String, ClipTransform>()
+        val clipColorAdjusts = ConcurrentHashMap<String, ClipColorAdjust>()
 
         fun getClipTransform(clipId: String?): ClipTransform {
             if (clipId == null) return ClipTransform.DEFAULT
@@ -886,6 +958,35 @@ class PreviewRenderer(
         fun syncTransforms(transforms: Map<String, ClipTransform>) {
             clipTransforms.clear()
             clipTransforms.putAll(transforms)
+        }
+
+        fun getClipColorAdjust(clipId: String?): ClipColorAdjust {
+            if (clipId == null) return ClipColorAdjust.DEFAULT
+            return clipColorAdjusts[clipId] ?: ClipColorAdjust.DEFAULT
+        }
+
+        fun setClipColorAdjust(clipId: String, adjust: ClipColorAdjust) {
+            clipColorAdjusts[clipId] = adjust
+        }
+
+        fun syncColorAdjusts(adjusts: Map<String, ClipColorAdjust>) {
+            clipColorAdjusts.clear()
+            clipColorAdjusts.putAll(adjusts)
+        }
+
+        fun packAdjust(adjust: ClipColorAdjust, out0: FloatArray, out1: FloatArray, out2: FloatArray) {
+            out0[0] = adjust.brightness
+            out0[1] = adjust.contrast
+            out0[2] = adjust.saturation
+            out0[3] = adjust.exposure
+            out1[0] = adjust.warmth
+            out1[1] = adjust.tint
+            out1[2] = adjust.highlights
+            out1[3] = adjust.shadows
+            out2[0] = adjust.sharpness
+            out2[1] = adjust.vignette
+            out2[2] = 0f
+            out2[3] = 0f
         }
 
         fun calculateClipCrop(displayWidth: Int, displayHeight: Int, transform: ClipTransform, out: FloatArray) {

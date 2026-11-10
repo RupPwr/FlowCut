@@ -9,12 +9,19 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 data class DrawSpec(
-    val type: TransitionType,
-    val easedP: Float,
-    val matA: FloatArray,
-    val matB: FloatArray,
-    val cropA: FloatArray,
-    val cropB: FloatArray
+    var type: TransitionType = TransitionType.NONE,
+    var easedP: Float = 0f,
+    var matA: FloatArray = FloatArray(16),
+    var matB: FloatArray = FloatArray(16),
+    var cropA: FloatArray = FloatArray(2),
+    var cropB: FloatArray = FloatArray(2),
+    var adjA0: FloatArray? = null,
+    var adjA1: FloatArray? = null,
+    var adjA2: FloatArray? = null,
+    var adjB0: FloatArray? = null,
+    var adjB1: FloatArray? = null,
+    var adjB2: FloatArray? = null,
+    var texelSize: FloatArray? = null
 )
 
 class TransitionRenderer {
@@ -35,6 +42,17 @@ class TransitionRenderer {
     private var uPLoc = -1
     private var uTypeLoc = -1
     private var uAspectLoc = -1
+    private var uAdjA0Loc = -1
+    private var uAdjA1Loc = -1
+    private var uAdjA2Loc = -1
+    private var uAdjB0Loc = -1
+    private var uAdjB1Loc = -1
+    private var uAdjB2Loc = -1
+    private var uTexelSizeLoc = -1
+
+    // Pre-allocated fallback arrays for zero allocations (Rule R10)
+    private val defaultAdj = FloatArray(4)
+    private val defaultTexelSize = floatArrayOf(1f / 1080f, 1f / 1920f)
 
     private val vertexShaderSource = """
         #version 300 es
@@ -62,19 +80,101 @@ class TransitionRenderer {
         uniform int uType;
         uniform float uAspect;
 
+        uniform vec4 uAdjA0;
+        uniform vec4 uAdjA1;
+        uniform vec4 uAdjA2;
+        uniform vec4 uAdjB0;
+        uniform vec4 uAdjB1;
+        uniform vec4 uAdjB2;
+        uniform vec2 uTexelSize;
+
         in vec2 vUV;
         out vec4 outColor;
 
-        vec4 sA(vec2 uv) {
+        vec4 applyColorAdjust(samplerExternalOES tex, vec2 uv, vec4 adj0, vec4 adj1, vec4 adj2, vec2 texelSize) {
+            // Fast Path: If all adjustments for this slot are 0.0, return raw sampled texture color immediately
+            if (dot(abs(adj0), vec4(1.0)) == 0.0 &&
+                dot(abs(adj1), vec4(1.0)) == 0.0 &&
+                dot(abs(adj2.xy), vec2(1.0)) == 0.0) {
+                return texture(tex, uv);
+            }
+
+            float brightness = adj0.x;
+            float contrast   = adj0.y;
+            float saturation = adj0.z;
+            float exposure   = adj0.w;
+
+            float warmth     = adj1.x;
+            float tint       = adj1.y;
+            float highlights = adj1.z;
+            float shadows    = adj1.w;
+
+            float sharpness  = adj2.x;
+            float vignette   = adj2.y;
+
+            vec4 color = texture(tex, uv);
+
+            // Sharpness (sharpness > 0.001): 5-tap unsharp mask
+            if (sharpness > 0.001) {
+                vec3 nLeft  = texture(tex, uv - vec2(texelSize.x, 0.0)).rgb;
+                vec3 nRight = texture(tex, uv + vec2(texelSize.x, 0.0)).rgb;
+                vec3 nDown  = texture(tex, uv - vec2(0.0, texelSize.y)).rgb;
+                vec3 nUp    = texture(tex, uv + vec2(0.0, texelSize.y)).rgb;
+                vec3 neighbors = nLeft + nRight + nDown + nUp;
+                color.rgb += (color.rgb * 4.0 - neighbors) * (sharpness * 1.2);
+            }
+
+            // Exposure & Brightness
+            color.rgb *= exp2(exposure * 1.2);
+            color.rgb += brightness * 0.35;
+
+            // Highlights & Shadows
+            float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float shadowWeight = (1.0 - clamp(luma, 0.0, 1.0)) * (1.0 - clamp(luma, 0.0, 1.0));
+            float highlightWeight = clamp(luma, 0.0, 1.0) * clamp(luma, 0.0, 1.0);
+            color.rgb += (shadows * shadowWeight + highlights * highlightWeight) * 0.35;
+
+            // Contrast: Pivot around mid-gray 0.5
+            color.rgb = (color.rgb - 0.5) * (1.0 + contrast * 0.85) + 0.5;
+
+            // Saturation: Mix between vec3(luma) and color.rgb by (1.0 + saturation)
+            float lumaAfter = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+            color.rgb = mix(vec3(lumaAfter), color.rgb, max(0.0, 1.0 + saturation));
+
+            // Warmth (Temp) & Tint
+            color.r += warmth * 0.12;
+            color.b -= warmth * 0.12;
+            color.g -= tint * 0.10;
+            color.r += tint * 0.05;
+            color.b += tint * 0.05;
+
+            // Vignette: radial distance from uv center (0.5, 0.5)
+            float dist = length(uv - vec2(0.5, 0.5));
+            float vigFactor = smoothstep(0.25, 0.85, dist);
+            if (vignette < 0.0) {
+                color.rgb *= (1.0 + vignette * vigFactor);
+            } else if (vignette > 0.0) {
+                color.rgb = mix(color.rgb, vec3(1.0), vignette * vigFactor * 0.8);
+            }
+
+            // Clamp final RGB cleanly to [0.0, 1.0]
+            color.rgb = clamp(color.rgb, 0.0, 1.0);
+            return color;
+        }
+
+        vec4 sampleClipA(vec2 uv) {
             uv = (uv - 0.5) * uCropA + 0.5;
             uv = (uMatA * vec4(clamp(uv, 0.0, 1.0), 0.0, 1.0)).xy;
-            return texture(uTexA, uv);
+            return applyColorAdjust(uTexA, uv, uAdjA0, uAdjA1, uAdjA2, uTexelSize);
         }
-        vec4 sB(vec2 uv) {
+        vec4 sampleClipB(vec2 uv) {
             uv = (uv - 0.5) * uCropB + 0.5;
             uv = (uMatB * vec4(clamp(uv, 0.0, 1.0), 0.0, 1.0)).xy;
-            return texture(uTexB, uv);
+            return applyColorAdjust(uTexB, uv, uAdjB0, uAdjB1, uAdjB2, uTexelSize);
         }
+
+        vec4 sA(vec2 uv) { return sampleClipA(uv); }
+        vec4 sB(vec2 uv) { return sampleClipB(uv); }
 
         void main() {
             vec4 c;
@@ -133,6 +233,13 @@ class TransitionRenderer {
         uPLoc = GLES30.glGetUniformLocation(programId, "uP")
         uTypeLoc = GLES30.glGetUniformLocation(programId, "uType")
         uAspectLoc = GLES30.glGetUniformLocation(programId, "uAspect")
+        uAdjA0Loc = GLES30.glGetUniformLocation(programId, "uAdjA0")
+        uAdjA1Loc = GLES30.glGetUniformLocation(programId, "uAdjA1")
+        uAdjA2Loc = GLES30.glGetUniformLocation(programId, "uAdjA2")
+        uAdjB0Loc = GLES30.glGetUniformLocation(programId, "uAdjB0")
+        uAdjB1Loc = GLES30.glGetUniformLocation(programId, "uAdjB1")
+        uAdjB2Loc = GLES30.glGetUniformLocation(programId, "uAdjB2")
+        uTexelSizeLoc = GLES30.glGetUniformLocation(programId, "uTexelSize")
 
         // Setup VAO & VBO
         val vaos = IntArray(1)
@@ -216,6 +323,13 @@ class TransitionRenderer {
         GLES30.glUniform1f(uPLoc, spec.easedP)
         GLES30.glUniform1i(uTypeLoc, spec.type.glId)
         GLES30.glUniform1f(uAspectLoc, 9.0f / 16.0f)
+        GLES30.glUniform4fv(uAdjA0Loc, 1, spec.adjA0 ?: defaultAdj, 0)
+        GLES30.glUniform4fv(uAdjA1Loc, 1, spec.adjA1 ?: defaultAdj, 0)
+        GLES30.glUniform4fv(uAdjA2Loc, 1, spec.adjA2 ?: defaultAdj, 0)
+        GLES30.glUniform4fv(uAdjB0Loc, 1, spec.adjB0 ?: defaultAdj, 0)
+        GLES30.glUniform4fv(uAdjB1Loc, 1, spec.adjB1 ?: defaultAdj, 0)
+        GLES30.glUniform4fv(uAdjB2Loc, 1, spec.adjB2 ?: defaultAdj, 0)
+        GLES30.glUniform2fv(uTexelSizeLoc, 1, spec.texelSize ?: defaultTexelSize, 0)
 
         // Draw quad
         GLES30.glBindVertexArray(vaoId)
