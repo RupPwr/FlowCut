@@ -28,6 +28,7 @@ data class OverlayItem(
     val colorAdjust: ClipColorAdjust = ClipColorAdjust(),
     val text: String = "",
     val textColorArgb: Int = 0xFFFFFFFF.toInt(),
+    val bgStyle: Int = 0,
     val mediaPath: String = "",
     val filterPresetId: Int = 0,
     val filterIntensity: Float = 1.0f

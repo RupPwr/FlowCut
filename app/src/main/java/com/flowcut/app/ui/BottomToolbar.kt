@@ -27,7 +27,10 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Flip
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Opacity
@@ -50,6 +53,7 @@ import androidx.compose.ui.unit.sp
 fun BottomToolbar(
     isClipSelected: Boolean = false,
     isOverlaySelected: Boolean = false,
+    isTextOverlaySelected: Boolean = false,
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
     onVolumeClick: () -> Unit = {},
@@ -65,6 +69,10 @@ fun BottomToolbar(
     onDeleteClipClick: (() -> Unit)? = null,
     onClearSelection: () -> Unit = {},
     onLockedItemClick: () -> Unit = {},
+    onTextClick: () -> Unit = {},
+    onStickerClick: () -> Unit = {},
+    onImageClick: () -> Unit = {},
+    onEditTextOverlayClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = FlowCutTheme.colors
@@ -467,7 +475,7 @@ fun BottomToolbar(
                         .background(colors.border)
                 )
 
-                // Actions: SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE
+                // Actions: EDIT (for text), SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -477,6 +485,32 @@ fun BottomToolbar(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Edit Action (when Text overlay is selected)
+                    if (isTextOverlaySelected) {
+                        Column(
+                            modifier = Modifier
+                                .width(48.dp)
+                                .fillMaxHeight()
+                                .clickable { onEditTextOverlayClick() },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "EDIT",
+                                tint = colors.accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "EDIT",
+                                color = colors.accent,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
                     // Split Action
                     Column(
                         modifier = Modifier
@@ -623,12 +657,14 @@ fun BottomToolbar(
                 }
             }
         } else {
-            // Main Bottom Toolbar (Normal state when NO clip is selected)
+            // Main Bottom Toolbar (Normal state when NO clip or overlay is selected)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(64.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .height(64.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 1. Trim (Active: selects clip under playhead and opens TrimSheet)
@@ -652,7 +688,70 @@ fun BottomToolbar(
                     )
                 }
 
-                // 2. Transit. (Active)
+                // 2. Text (Active: opens TextEditorSheet)
+                Column(
+                    modifier = Modifier
+                        .width(48.dp)
+                        .clickable { onTextClick() },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.TextFields,
+                        contentDescription = "Text",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "Text",
+                        color = colors.textPrimary,
+                        fontSize = 11.sp
+                    )
+                }
+
+                // 3. Sticker (Active: opens StickerPickerSheet)
+                Column(
+                    modifier = Modifier
+                        .width(48.dp)
+                        .clickable { onStickerClick() },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.EmojiEmotions,
+                        contentDescription = "Sticker",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "Sticker",
+                        color = colors.textPrimary,
+                        fontSize = 11.sp
+                    )
+                }
+
+                // 4. Image / PIP Photo (Active: launches image picker)
+                Column(
+                    modifier = Modifier
+                        .width(48.dp)
+                        .clickable { onImageClick() },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Image,
+                        contentDescription = "Image",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "Image",
+                        color = colors.textPrimary,
+                        fontSize = 11.sp
+                    )
+                }
+
+                // 5. Transit. (Active)
                 Column(
                     modifier = Modifier.width(48.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -671,7 +770,7 @@ fun BottomToolbar(
                     )
                 }
 
-                // 3. Audio (Locked)
+                // 6. Audio (Locked)
                 Column(
                     modifier = Modifier
                         .width(48.dp)
@@ -692,28 +791,7 @@ fun BottomToolbar(
                     )
                 }
 
-                // 4. Text (Locked)
-                Column(
-                    modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onLockedItemClick() },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.TextFields,
-                        contentDescription = "Text",
-                        tint = colors.textSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Text(
-                        text = "Text",
-                        color = colors.textSecondary,
-                        fontSize = 11.sp
-                    )
-                }
-
-                // 5. AI (Locked)
+                // 7. AI (Locked)
                 Column(
                     modifier = Modifier
                         .width(48.dp)

@@ -360,6 +360,63 @@ fun EditorScreen(
         }
     }
 
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
+            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
+                Toast.makeText(context, "Maximum 6 image overlays reached", Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
+            val cachePath = copyUriToCacheFile(context, uri, "overlay_img_")
+            if (cachePath != null) {
+                val playheadUs = playbackController.playhead.timeUs
+                vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    val imageFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
+            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
+                Toast.makeText(context, "Maximum 6 image overlays reached", Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
+            val cachePath = copyUriToCacheFile(context, uri, "overlay_img_")
+            if (cachePath != null) {
+                val playheadUs = playbackController.playhead.timeUs
+                vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    val openImagePicker: () -> Unit = {
+        val vm = resolvedViewModel
+        if (vm != null && !com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
+            Toast.makeText(context, "Maximum 6 image overlays reached", Toast.LENGTH_SHORT).show()
+        } else {
+            try {
+                imagePickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            } catch (_: Exception) {
+                try {
+                    imageFallbackLauncher.launch("image/*")
+                } catch (_: Exception) {
+                    Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             if (playbackController.playhead.mode != PlayMode.PLAYING) {
@@ -398,6 +455,64 @@ fun EditorScreen(
     var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var isBackgroundSheetVisible by remember { mutableStateOf(false) }
     var isOpacitySheetVisible by remember { mutableStateOf(false) }
+    var isTextSheetVisible by remember { mutableStateOf(false) }
+    var editingTextOverlayId by remember { mutableStateOf<String?>(null) }
+    var isNewTextOverlay by remember { mutableStateOf(false) }
+    var isStickerSheetVisible by remember { mutableStateOf(false) }
+
+    val handleOpenText: () -> Unit = {
+        val vm = resolvedViewModel
+        if (vm != null) {
+            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.TEXT)) {
+                Toast.makeText(context, "Maximum 20 text overlays reached", Toast.LENGTH_SHORT).show()
+            } else {
+                if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                    playbackController.pause()
+                    frameDriver.wake()
+                    onPlaybackStateChange(false)
+                }
+                val playheadUs = playbackController.playhead.timeUs
+                val newItem = vm.addTextOverlay("Your Text", 0xFFFFFFFF.toInt(), 0, playheadUs, 3_000_000L)
+                if (newItem != null) {
+                    isNewTextOverlay = true
+                    editingTextOverlayId = newItem.id
+                    isVolumeSheetVisible = false
+                    isSpeedSheetVisible = false
+                    isAdjustSheetVisible = false
+                    isBackgroundSheetVisible = false
+                    isOpacitySheetVisible = false
+                    isTrimSheetVisible = false
+                    isStickerSheetVisible = false
+                    isTextSheetVisible = true
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                }
+            }
+        }
+    }
+
+    val handleOpenSticker: () -> Unit = {
+        val vm = resolvedViewModel
+        if (vm != null) {
+            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.STICKER)) {
+                Toast.makeText(context, "Maximum 20 sticker overlays reached", Toast.LENGTH_SHORT).show()
+            } else {
+                if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                    playbackController.pause()
+                    frameDriver.wake()
+                    onPlaybackStateChange(false)
+                }
+                isVolumeSheetVisible = false
+                isSpeedSheetVisible = false
+                isAdjustSheetVisible = false
+                isBackgroundSheetVisible = false
+                isOpacitySheetVisible = false
+                isTrimSheetVisible = false
+                isTextSheetVisible = false
+                isStickerSheetVisible = true
+            }
+        }
+    }
 
     val handleOpenTrim: () -> Unit = {
         var targetIdx = selectedClipIndex
@@ -1501,9 +1616,13 @@ fun EditorScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             // 7. Bottom toolbar: 64 dp + navigation bar inset (Contextual Main vs Clip vs Overlay toolbar)
+            val activeOverlayForToolbar = vmUiState?.selectedOverlayId?.let { resolvedViewModel?.getOverlayItem(it) }
+            val isTextOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.TEXT
+
             BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
                 isOverlaySelected = vmUiState?.selectedOverlayId != null,
+                isTextOverlaySelected = isTextOverlay,
                 onSplitClick = onSplitClick ?: {
                     if (vmUiState?.selectedOverlayId != null) {
                         val playheadUs = playbackController.playhead.timeUs
@@ -1653,6 +1772,17 @@ fun EditorScreen(
                 onClearSelection = onDeselectAll,
                 onLockedItemClick = {
                     Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
+                },
+                onTextClick = handleOpenText,
+                onStickerClick = handleOpenSticker,
+                onImageClick = openImagePicker,
+                onEditTextOverlayClick = {
+                    val selId = vmUiState?.selectedOverlayId
+                    if (selId != null) {
+                        isNewTextOverlay = false
+                        editingTextOverlayId = selId
+                        isTextSheetVisible = true
+                    }
                 }
             )
         }
@@ -2022,5 +2152,88 @@ fun EditorScreen(
                 }
             }
         }
+
+        // Text Editor BottomSheet (Phase 3 Overlays)
+        if (isTextSheetVisible && editingTextOverlayId != null) {
+            val targetId = editingTextOverlayId!!
+            val textItem = resolvedViewModel?.getOverlayItem(targetId)
+            if (textItem != null) {
+                val origText = remember(targetId) { textItem.text }
+                val origColor = remember(targetId) { textItem.textColorArgb }
+                val origStyle = remember(targetId) { textItem.bgStyle }
+
+                TextEditorSheet(
+                    initialText = textItem.text,
+                    initialColorArgb = textItem.textColorArgb,
+                    initialBgStyle = textItem.bgStyle,
+                    onLiveChange = { txt, col, sty ->
+                        resolvedViewModel?.liveUpdateTextOverlay(targetId, txt, col, sty)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    },
+                    onDone = { txt, col, sty ->
+                        if (txt.isBlank()) {
+                            resolvedViewModel?.removeLayerItem(targetId)
+                        } else {
+                            resolvedViewModel?.updateTextOverlay(targetId, txt, col, sty)
+                        }
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextSheetVisible = false
+                        editingTextOverlayId = null
+                        isNewTextOverlay = false
+                    },
+                    onCancel = {
+                        if (isNewTextOverlay) {
+                            resolvedViewModel?.removeLayerItem(targetId)
+                        } else {
+                            resolvedViewModel?.liveUpdateTextOverlay(targetId, origText, origColor, origStyle)
+                        }
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextSheetVisible = false
+                        editingTextOverlayId = null
+                        isNewTextOverlay = false
+                    }
+                )
+            } else {
+                isTextSheetVisible = false
+                editingTextOverlayId = null
+                isNewTextOverlay = false
+            }
+        }
+
+        // Sticker Picker BottomSheet (Phase 3 Overlays)
+        if (isStickerSheetVisible) {
+            StickerPickerSheet(
+                onSelectSticker = { glyph ->
+                    val playheadUs = playbackController.playhead.timeUs
+                    resolvedViewModel?.addStickerOverlay(glyph, playheadUs, 3_000_000L)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isStickerSheetVisible = false
+                },
+                onAddImageClick = {
+                    isStickerSheetVisible = false
+                    openImagePicker()
+                },
+                onDismiss = { isStickerSheetVisible = false }
+            )
+        }
+    }
+}
+
+private fun copyUriToCacheFile(context: android.content.Context, uri: android.net.Uri, prefix: String): String? {
+    return try {
+        val extension = context.contentResolver.getType(uri)?.substringAfterLast('/')?.let { ".$it" } ?: ".jpg"
+        val cacheFile = java.io.File(context.cacheDir, "${prefix}${System.currentTimeMillis()}${extension}")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            java.io.FileOutputStream(cacheFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+        cacheFile.absolutePath
+    } catch (_: Exception) {
+        null
     }
 }

@@ -192,6 +192,7 @@ class ExportEngine(private val context: Context) {
         var eglContext: EGLContext? = null
         var eglSurface: EGLSurface? = null
         var renderer: TransitionRenderer? = null
+        var overlayTextureCache: OverlayTextureCache? = null
         var surfaceTextureA: SurfaceTexture? = null
         var surfaceTextureB: SurfaceTexture? = null
         var frameSourceA: FrameSource? = null
@@ -276,6 +277,8 @@ class ExportEngine(private val context: Context) {
             val rnd = TransitionRenderer()
             renderer = rnd
             rnd.init()
+            val otc = OverlayTextureCache()
+            overlayTextureCache = otc
 
             val frameSyncObjectA = java.lang.Object()
             var frameAvailableA = false
@@ -678,10 +681,12 @@ class ExportEngine(private val context: Context) {
                             val itemIndex = activeLayerSet.activeVisualIndices[v]
                             val item = plan.items.getOrNull(itemIndex) ?: continue
                             if (item.transform.opacity <= 0.001f) continue
-                            val texId = PreviewRenderer.getOverlayTextureId(item.id)
-                            if (texId > 0) {
+                            val cached = otc.getOrBakeTexture(item) ?: continue
+                            if (cached.texId > 0) {
                                 rnd.drawOverlayQuad(
-                                    texId = texId,
+                                    texId = cached.texId,
+                                    texWidth = cached.width,
+                                    texHeight = cached.height,
                                     transform = item.transform,
                                     opacity = item.transform.opacity,
                                     displayWidth = EXPORT_W,
@@ -774,6 +779,7 @@ class ExportEngine(private val context: Context) {
             frameSourceB?.release()
             surfaceTextureA?.release()
             surfaceTextureB?.release()
+            overlayTextureCache?.release()
             renderer?.release()
 
             if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {

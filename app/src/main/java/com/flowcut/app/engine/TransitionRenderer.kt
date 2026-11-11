@@ -524,6 +524,8 @@ class TransitionRenderer {
      */
     fun drawOverlayQuad(
         texId: Int,
+        texWidth: Int,
+        texHeight: Int,
         transform: ClipTransform,
         opacity: Float = 1.0f,
         displayWidth: Int = 1080,
@@ -533,7 +535,7 @@ class TransitionRenderer {
         val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
         if (effectiveOpacity <= 0.001f) return
 
-        if (isOverlayOffScreen(transform, displayWidth, displayHeight)) {
+        if (isOverlayOffScreen(transform, texWidth, texHeight, displayWidth, displayHeight)) {
             return
         }
 
@@ -546,7 +548,7 @@ class TransitionRenderer {
         GLES30.glUniform1i(uOverlayTexLoc, 0)
         GLES30.glUniform1f(uOverlayOpacityLoc, effectiveOpacity)
 
-        computeOverlayMvp(overlayMvp, transform, displayWidth, displayHeight)
+        computeOverlayMvp(overlayMvp, transform, texWidth, texHeight, displayWidth, displayHeight)
         GLES30.glUniformMatrix4fv(uOverlayMatLoc, 1, false, overlayMvp, 0)
 
         GLES30.glBindVertexArray(vaoId)
@@ -556,6 +558,16 @@ class TransitionRenderer {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         GLES30.glUseProgram(0)
         GLES30.glDisable(GLES30.GL_BLEND)
+    }
+
+    fun drawOverlayQuad(
+        texId: Int,
+        transform: ClipTransform,
+        opacity: Float = 1.0f,
+        displayWidth: Int = 1080,
+        displayHeight: Int = 1920
+    ) {
+        drawOverlayQuad(texId, 1, 1, transform, opacity, displayWidth, displayHeight)
     }
 
     fun release() {
@@ -624,60 +636,73 @@ class TransitionRenderer {
 
         fun isOverlayOffScreen(
             transform: ClipTransform,
+            texWidth: Int = 1,
+            texHeight: Int = 1,
             displayWidth: Int = 1080,
             displayHeight: Int = 1920
         ): Boolean {
-            val aScreen = 9.0f / 16.0f
-            val w = if (displayWidth > 0) displayWidth else 1080
-            val h = if (displayHeight > 0) displayHeight else 1920
-            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+            val aScreen = if (displayHeight > 0) displayWidth.toFloat() / displayHeight.toFloat() else (9.0f / 16.0f)
+            val tw = if (texWidth > 0) texWidth.toFloat() else 1f
+            val th = if (texHeight > 0) texHeight.toFloat() else 1f
+            val aTex = (tw / th).coerceIn(0.01f, 100f)
 
-            val baseHw = if (aClip >= aScreen) 0.5f * (aClip / aScreen) else 0.5f
-            val baseHh = if (aClip >= aScreen) 0.5f else 0.5f * (aScreen / aClip)
+            var hw = 0.6f
+            var hh = hw / aTex
+            if (hh * aScreen > 0.6f) {
+                val factor = 0.6f / (hh * aScreen)
+                hw *= factor
+                hh *= factor
+            }
 
             val scale = transform.scale.coerceIn(0.01f, 10.0f)
-            val hw = baseHw * scale
-            val hh = baseHh * scale
+            val diag = kotlin.math.sqrt(hw * hw + hh * hh) * scale
+            val rx = diag
+            val ry = diag * aScreen
 
-            val rad = Math.toRadians(transform.rotationDeg.toDouble())
-            val cos = Math.abs(Math.cos(rad)).toFloat()
-            val sin = Math.abs(Math.sin(rad)).toFloat()
+            val cx = transform.panX * 2.0f
+            val cy = transform.panY * 2.0f
 
-            val rx = hw * cos + (hh * sin / aScreen)
-            val ry = (hw * aScreen * sin) + (hh * cos)
+            val left = cx - rx
+            val right = cx + rx
+            val bottom = cy - ry
+            val top = cy + ry
 
-            val leftNorm = 0.5f + transform.panX - rx
-            val rightNorm = 0.5f + transform.panX + rx
-            val bottomNorm = 0.5f + transform.panY - ry
-            val topNorm = 0.5f + transform.panY + ry
-
-            return rightNorm <= 0f || leftNorm >= 1f || topNorm <= 0f || bottomNorm >= 1f
+            return right < -1.0f || left > 1.0f || top < -1.0f || bottom > 1.0f
         }
 
         fun computeOverlayMvp(
             outMvp: FloatArray,
             transform: ClipTransform,
+            texWidth: Int = 1,
+            texHeight: Int = 1,
             displayWidth: Int = 1080,
             displayHeight: Int = 1920
         ) {
-            val aScreen = 9.0f / 16.0f
-            val w = if (displayWidth > 0) displayWidth else 1080
-            val h = if (displayHeight > 0) displayHeight else 1920
-            val aClip = (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+            val aScreen = if (displayHeight > 0) displayWidth.toFloat() / displayHeight.toFloat() else (9.0f / 16.0f)
+            val tw = if (texWidth > 0) texWidth.toFloat() else 1f
+            val th = if (texHeight > 0) texHeight.toFloat() else 1f
+            val aTex = (tw / th).coerceIn(0.01f, 100f)
 
-            val baseHw = if (aClip >= aScreen) 0.5f * (aClip / aScreen) else 0.5f
-            val baseHh = if (aClip >= aScreen) 0.5f else 0.5f * (aScreen / aClip)
+            var hw = 0.6f
+            var hh = hw / aTex
+            if (hh * aScreen > 0.6f) {
+                val factor = 0.6f / (hh * aScreen)
+                hw *= factor
+                hh *= factor
+            }
+
             val scale = transform.scale.coerceIn(0.01f, 10.0f)
 
             android.opengl.Matrix.setIdentityM(outMvp, 0)
             android.opengl.Matrix.translateM(outMvp, 0, transform.panX * 2.0f, transform.panY * 2.0f, 0f)
+            android.opengl.Matrix.scaleM(outMvp, 0, 1.0f, aScreen, 1.0f)
             if (transform.rotationDeg != 0f) {
                 android.opengl.Matrix.rotateM(outMvp, 0, transform.rotationDeg, 0f, 0f, 1f)
             }
             if (transform.isFlippedH) {
                 android.opengl.Matrix.scaleM(outMvp, 0, -1f, 1f, 1f)
             }
-            android.opengl.Matrix.scaleM(outMvp, 0, baseHw * scale, baseHh * scale, 1f)
+            android.opengl.Matrix.scaleM(outMvp, 0, hw * scale, hh * scale, 1f)
         }
     }
 }

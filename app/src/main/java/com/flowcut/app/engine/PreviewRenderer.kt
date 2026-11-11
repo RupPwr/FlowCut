@@ -254,6 +254,7 @@ class PreviewRenderer(
     }
 
     private val renderer = TransitionRenderer()
+    private val overlayTextureCache = OverlayTextureCache()
     private var surfaceTextureA: SurfaceTexture? = null
     private var surfaceTextureB: SurfaceTexture? = null
 
@@ -1051,10 +1052,12 @@ class PreviewRenderer(
             val itemIndex = activeLayerSet.activeVisualIndices[i]
             val item = plan.items.getOrNull(itemIndex) ?: continue
             if (item.transform.opacity <= 0.001f) continue
-            val texId = getOverlayTextureId(item.id)
-            if (texId > 0) {
+            val cached = overlayTextureCache.getOrBakeTexture(item) ?: continue
+            if (cached.texId > 0) {
                 renderer.drawOverlayQuad(
-                    texId = texId,
+                    texId = cached.texId,
+                    texWidth = cached.width,
+                    texHeight = cached.height,
                     transform = item.transform,
                     opacity = item.transform.opacity,
                     displayWidth = viewportWidth,
@@ -1091,6 +1094,9 @@ class PreviewRenderer(
         surfaceTextureB = null
         hasPendingSurfaceFrameA.set(false)
         hasPendingSurfaceFrameB.set(false)
+        try {
+            overlayTextureCache.release()
+        } catch (_: Throwable) {}
         try {
             renderer.release()
         } catch (_: Throwable) {}
