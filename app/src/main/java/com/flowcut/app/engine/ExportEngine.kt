@@ -279,6 +279,7 @@ class ExportEngine(private val context: Context) {
             rnd.init()
             val otc = OverlayTextureCache()
             overlayTextureCache = otc
+            val animEvaluator = AnimatedTransformEvaluator()
 
             val frameSyncObjectA = java.lang.Object()
             var frameAvailableA = false
@@ -680,15 +681,16 @@ class ExportEngine(private val context: Context) {
                         for (v in 0 until activeLayerSet.visualCount) {
                             val itemIndex = activeLayerSet.activeVisualIndices[v]
                             val item = plan.items.getOrNull(itemIndex) ?: continue
-                            if (item.transform.opacity <= 0.001f) continue
+                            val effTransform = animEvaluator.evaluate(item, res.tUs)
+                            if (effTransform.opacity <= 0.001f) continue
                             val cached = otc.getOrBakeTexture(item) ?: continue
                             if (cached.texId > 0) {
                                 rnd.drawOverlayQuad(
                                     texId = cached.texId,
                                     texWidth = cached.width,
                                     texHeight = cached.height,
-                                    transform = item.transform,
-                                    opacity = item.transform.opacity,
+                                    transform = effTransform,
+                                    opacity = effTransform.opacity,
                                     displayWidth = EXPORT_W,
                                     displayHeight = EXPORT_H
                                 )

@@ -20,27 +20,38 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
+import androidx.compose.material.icons.automirrored.filled.FormatAlignRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,13 +60,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import java.io.File
+import java.util.Locale
 
 data class OverlayTextColor(val name: String, val argb: Int)
 
@@ -100,11 +119,12 @@ fun TextEditorSheet(
 ) {
     val colors = FlowCutTheme.colors
 
+    val startText = if (initialText == "Your Text" || initialText.isBlank()) "" else initialText
     var textFieldValue by remember {
         mutableStateOf(
             TextFieldValue(
-                text = initialText,
-                selection = TextRange(initialText.length)
+                text = startText,
+                selection = TextRange(startText.length)
             )
         )
     }
@@ -125,21 +145,30 @@ fun TextEditorSheet(
         onCancel()
     }
 
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.BottomCenter
-    ) {
-        // Scrim above sheet
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() }
-                ) { onCancel() }
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
         )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            // Scrim above sheet
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onCancel() }
+            )
 
-        Surface(
+            Surface(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars)
@@ -210,14 +239,14 @@ fun TextEditorSheet(
                         .fillMaxWidth()
                         .focusRequester(focusRequester),
                     placeholder = {
-                        Text("Enter text overlay...", color = colors.textSecondary)
+                        Text("Your Text", color = colors.textSecondary)
                     },
                     textStyle = TextStyle(
                         color = colors.textPrimary,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold
                     ),
-                    maxLines = 3,
+                    maxLines = 4,
                     colors = TextFieldDefaults.colors(
                         focusedContainerColor = colors.surface1,
                         unfocusedContainerColor = colors.surface1,
@@ -227,113 +256,10 @@ fun TextEditorSheet(
                     ),
                     shape = RoundedCornerShape(12.dp)
                 )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // 3. Style Toggle Selector (Outline, Dark Pill, Solid Pill)
-                Text(
-                    text = "Style",
-                    color = colors.textSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val styles = listOf(
-                        0 to "Outline",
-                        1 to "Dark Pill",
-                        2 to "Solid Pill"
-                    )
-                    styles.forEach { (styleId, label) ->
-                        val isSelected = selectedBgStyle == styleId
-                        Surface(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(38.dp)
-                                .clickable {
-                                    selectedBgStyle = styleId
-                                    notifyChange(textFieldValue.text, selectedColorArgb, styleId)
-                                },
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (isSelected) colors.accent.copy(alpha = 0.2f) else colors.surface2,
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) colors.accent else colors.border
-                            )
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = label,
-                                    color = if (isSelected) colors.accent else colors.textPrimary,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // 4. Curated 14 Text Colors Palette
-                Text(
-                    text = "Text Color",
-                    color = colors.textSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CURATED_OVERLAY_COLORS.forEach { colorItem ->
-                        val isSelected = selectedColorArgb == colorItem.argb
-                        val swatchColor = Color(colorItem.argb)
-                        val isWhiteOrVeryLight = colorItem.argb == 0xFFFFFFFF.toInt()
-
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(swatchColor)
-                                .border(
-                                    BorderStroke(
-                                        if (isSelected) 2.5.dp else 1.dp,
-                                        if (isSelected) colors.accent else if (isWhiteOrVeryLight) colors.border else Color.Transparent
-                                    ),
-                                    CircleShape
-                                )
-                                .clickable {
-                                    selectedColorArgb = colorItem.argb
-                                    notifyChange(textFieldValue.text, colorItem.argb, selectedBgStyle)
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (isSelected) {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "Selected",
-                                    tint = if (colorItem.argb == 0xFF000000.toInt()) Color.White else Color.Black,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-                }
             }
         }
     }
+}
 }
 
 /**
@@ -468,6 +394,1487 @@ fun StickerPickerSheet(
                                     Text(
                                         text = glyph,
                                         fontSize = 22.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Design Constants for Text Tool Suite Sheets (Matches CapCut / Reference UI)
+// ---------------------------------------------------------------------------
+val PINK_RED_ACCENT = Color(0xFFFF2D55)
+val DARK_SHEET_BG = Color(0xFF1C1C1E)
+val DARK_CARD_BG = Color(0xFF2B2B2E)
+val DARK_SURFACE_BORDER = Color(0xFF38383A)
+
+val TEXT_COLOR_PALETTE = listOf(
+    0xFFFFFFFF.toInt(), // White
+    0xFF000000.toInt(), // Black
+    0xFF8E8E93.toInt(), // Gray
+    0xFFD1D1D6.toInt(), // Light Gray
+    0xFFFFEB3B.toInt(), // Yellow
+    0xFFFFC107.toInt(), // Amber
+    0xFFFF9800.toInt(), // Orange
+    0xFFFF5722.toInt(), // Coral
+    0xFFFF1744.toInt(), // Red
+    0xFFFF4081.toInt(), // Pink
+    0xFF9C27B0.toInt(), // Purple
+    0xFF673AB7.toInt(), // Deep Purple
+    0xFF2196F3.toInt(), // Blue
+    0xFF00E5FF.toInt(), // Cyan
+    0xFF009688.toInt(), // Teal
+    0xFF4CAF50.toInt()  // Green
+)
+
+val RICH_CUSTOM_PALETTE_40 = listOf(
+    // Row 1: Grayscale & Neutrals
+    0xFFFFFFFF.toInt(), 0xFFE0E0E0.toInt(), 0xFFBDBDBD.toInt(), 0xFF9E9E9E.toInt(), 
+    0xFF757575.toInt(), 0xFF616161.toInt(), 0xFF424242.toInt(), 0xFF000000.toInt(),
+    // Row 2: Warm Reds & Oranges
+    0xFFFF1744.toInt(), 0xFFFF5252.toInt(), 0xFFFF6E40.toInt(), 0xFFFF9100.toInt(), 
+    0xFFFFAB00.toInt(), 0xFFFFD700.toInt(), 0xFFFFEB3B.toInt(), 0xFFFFF176.toInt(),
+    // Row 3: Limes, Greens & Teals
+    0xFFAEEA00.toInt(), 0xFF76FF03.toInt(), 0xFF00E676.toInt(), 0xFF1DE9B6.toInt(), 
+    0xFF00BFA5.toInt(), 0xFF009688.toInt(), 0xFF4CAF50.toInt(), 0xFF2E7D32.toInt(),
+    // Row 4: Cyans, Blues & Indigos
+    0xFF00E5FF.toInt(), 0xFF00B0FF.toInt(), 0xFF2979FF.toInt(), 0xFF3D5AFE.toInt(), 
+    0xFF536DFE.toInt(), 0xFF1976D2.toInt(), 0xFF0D47A1.toInt(), 0xFF303F9F.toInt(),
+    // Row 5: Purples, Magentas & Pinks
+    0xFF651FFF.toInt(), 0xFF7C4DFF.toInt(), 0xFFD500F9.toInt(), 0xFFE040FB.toInt(), 
+    0xFFFF4081.toInt(), 0xFFFF80AB.toInt(), 0xFFF50057.toInt(), 0xFF880E4F.toInt()
+)
+
+data class FontPreset(
+    val id: String,
+    val displayName: String,
+    val previewText: String = "FlowCut Video Editor",
+    val typeface: android.graphics.Typeface
+)
+
+data class AnimPreset(
+    val id: Int,
+    val name: String
+)
+
+/**
+ * 1. TextColorSheet (Matches Screenshot 1):
+ * - Top horizontal scroll: Rainbow spectrum wheel + 16 circular swatches (38.dp) with pink active ring.
+ * - Middle row: Opacity label + percentage + pink slider controlling active tab's alpha.
+ * - Bottom row: 4 tabs (TEXT | LABEL | BORDER | SHADOW), auto-bumping alpha from 0 to 1.0f on color pick.
+ */
+@Composable
+fun TextColorSheet(
+    initialTextColor: Int = 0xFFFFFFFF.toInt(),
+    initialTextAlpha: Float = 1.0f,
+    initialLabelColor: Int = 0x00000000,
+    initialLabelAlpha: Float = 0.0f,
+    initialBorderColor: Int = 0xFF000000.toInt(),
+    initialBorderAlpha: Float = 0.0f,
+    initialShadowColor: Int = 0xFF000000.toInt(),
+    initialShadowAlpha: Float = 0.6f,
+    onLiveChange: (
+        textColor: Int, textAlpha: Float,
+        labelColor: Int, labelAlpha: Float,
+        borderColor: Int, borderAlpha: Float,
+        shadowColor: Int, shadowAlpha: Float
+    ) -> Unit,
+    onDone: (
+        textColor: Int, textAlpha: Float,
+        labelColor: Int, labelAlpha: Float,
+        borderColor: Int, borderAlpha: Float,
+        shadowColor: Int, shadowAlpha: Float
+    ) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var textColor by remember { mutableIntStateOf(initialTextColor) }
+    var textAlpha by remember { mutableFloatStateOf(initialTextAlpha) }
+    var labelColor by remember { mutableIntStateOf(initialLabelColor) }
+    var labelAlpha by remember { mutableFloatStateOf(initialLabelAlpha) }
+    var borderColor by remember { mutableIntStateOf(initialBorderColor) }
+    var borderAlpha by remember { mutableFloatStateOf(initialBorderAlpha) }
+    var shadowColor by remember { mutableIntStateOf(initialShadowColor) }
+    var shadowAlpha by remember { mutableFloatStateOf(initialShadowAlpha) }
+
+    var activeTab by remember { mutableIntStateOf(0) } // 0: TEXT, 1: LABEL, 2: BORDER, 3: SHADOW
+    var isCustomPaletteOpen by remember { mutableStateOf(false) }
+    var customHue by remember { mutableFloatStateOf(0f) }
+
+    fun notifyChange() {
+        onLiveChange(textColor, textAlpha, labelColor, labelAlpha, borderColor, borderAlpha, shadowColor, shadowAlpha)
+    }
+
+    fun pickColor(colorArgb: Int) {
+        when (activeTab) {
+            0 -> {
+                textColor = colorArgb
+                if (textAlpha <= 0.01f) textAlpha = 1.0f
+            }
+            1 -> {
+                labelColor = colorArgb
+                if (labelAlpha <= 0.01f) labelAlpha = 1.0f
+            }
+            2 -> {
+                borderColor = colorArgb
+                if (borderAlpha <= 0.01f) borderAlpha = 1.0f
+            }
+            3 -> {
+                shadowColor = colorArgb
+                if (shadowAlpha <= 0.01f) shadowAlpha = 0.8f
+            }
+        }
+        notifyChange()
+    }
+
+    fun changeAlpha(newAlpha: Float) {
+        when (activeTab) {
+            0 -> textAlpha = newAlpha
+            1 -> labelAlpha = newAlpha
+            2 -> borderAlpha = newAlpha
+            3 -> shadowAlpha = newAlpha
+        }
+        notifyChange()
+    }
+
+    val currentSelectedColor = when (activeTab) {
+        0 -> textColor
+        1 -> labelColor
+        2 -> borderColor
+        else -> shadowColor
+    }
+    val currentSelectedAlpha = when (activeTab) {
+        0 -> textAlpha
+        1 -> labelAlpha
+        2 -> borderAlpha
+        else -> shadowAlpha
+    }
+
+    BackHandler { onCancel() }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onCancel() }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) {},
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = DARK_SHEET_BG,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp,
+                border = BorderStroke(0.5.dp, DARK_SURFACE_BORDER)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(top = 10.dp, bottom = 18.dp, start = 16.dp, end = 16.dp)
+                ) {
+                    // Header Row (Close ✕, Title, Done ✓)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(onClick = onCancel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "Color",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        IconButton(
+                            onClick = {
+                                onDone(textColor, textAlpha, labelColor, labelAlpha, borderColor, borderAlpha, shadowColor, shadowAlpha)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Done",
+                                tint = PINK_RED_ACCENT,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Row 1: Rainbow Spectrum Wheel + 16 Circular Color Swatches (Horizontal Scroll)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        // Rainbow Spectrum Wheel (Toggles interactive Custom Color Palette)
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.sweepGradient(
+                                        listOf(
+                                            Color.Red,
+                                            Color.Yellow,
+                                            Color.Green,
+                                            Color.Cyan,
+                                            Color.Blue,
+                                            Color.Magenta,
+                                            Color.Red
+                                        )
+                                    )
+                                )
+                                .border(
+                                    BorderStroke(
+                                        if (isCustomPaletteOpen) 2.5.dp else 1.dp,
+                                        if (isCustomPaletteOpen) PINK_RED_ACCENT else Color.White.copy(alpha = 0.4f)
+                                    ),
+                                    CircleShape
+                                )
+                                .clickable {
+                                    isCustomPaletteOpen = !isCustomPaletteOpen
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.9f))
+                            )
+                        }
+
+                        // 16 Curated Swatches
+                        TEXT_COLOR_PALETTE.forEach { colorArgb ->
+                            val isSelected = currentSelectedColor == colorArgb
+                            val isWhiteOrLight = colorArgb == 0xFFFFFFFF.toInt() || colorArgb == 0xFFD1D1D6.toInt()
+
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(colorArgb))
+                                    .border(
+                                        BorderStroke(
+                                            if (isSelected) 2.5.dp else 1.dp,
+                                            if (isSelected) PINK_RED_ACCENT else if (isWhiteOrLight) Color(0x33FFFFFF) else Color.Transparent
+                                        ),
+                                        CircleShape
+                                    )
+                                    .clickable {
+                                        pickColor(colorArgb)
+                                        isCustomPaletteOpen = false
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Selected",
+                                        tint = if (colorArgb == 0xFF000000.toInt()) Color.White else Color.Black,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Interactive Custom Color Palette (40-Color Spectrum Grid + Continuous Rainbow Hue Bar)
+                    if (isCustomPaletteOpen) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            color = DARK_CARD_BG,
+                            border = BorderStroke(1.dp, DARK_SURFACE_BORDER)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Swatch & Hex preview row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(currentSelectedColor))
+                                                .border(1.dp, Color.White.copy(alpha = 0.4f), CircleShape)
+                                        )
+                                        val hexStr = String.format(Locale.US, "#%06X", 0xFFFFFF and currentSelectedColor)
+                                        Text(
+                                            text = hexStr,
+                                            color = Color.White,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .height(28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(PINK_RED_ACCENT.copy(alpha = 0.15f))
+                                            .clickable { isCustomPaletteOpen = false }
+                                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("Close", color = PINK_RED_ACCENT, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+
+                                // Continuous Rainbow Hue Slider
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(28.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(10.dp)
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(
+                                                Brush.horizontalGradient(
+                                                    listOf(
+                                                        Color.Red, Color.Yellow, Color.Green,
+                                                        Color.Cyan, Color.Blue, Color.Magenta, Color.Red
+                                                    )
+                                                )
+                                            )
+                                    )
+                                    Slider(
+                                        value = customHue,
+                                        onValueChange = { h ->
+                                            customHue = h
+                                            val hsv = floatArrayOf(h, 1.0f, 1.0f)
+                                            val rgb = android.graphics.Color.HSVToColor(hsv)
+                                            pickColor(rgb)
+                                        },
+                                        valueRange = 0f..360f,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = Color.White,
+                                            activeTrackColor = Color.Transparent,
+                                            inactiveTrackColor = Color.Transparent
+                                        )
+                                    )
+                                }
+
+                                // 40-Color Full Spectrum Grid
+                                val gridRows = RICH_CUSTOM_PALETTE_40.chunked(8)
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    gridRows.forEach { rowColors ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            rowColors.forEach { cArgb ->
+                                                val isPicked = currentSelectedColor == cArgb
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(28.dp)
+                                                        .clip(CircleShape)
+                                                        .background(Color(cArgb))
+                                                        .border(
+                                                            BorderStroke(
+                                                                if (isPicked) 2.dp else 0.5.dp,
+                                                                if (isPicked) PINK_RED_ACCENT else Color.White.copy(alpha = 0.2f)
+                                                            ),
+                                                            CircleShape
+                                                        )
+                                                        .clickable { pickColor(cArgb) },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    if (isPicked) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .size(6.dp)
+                                                                .clip(CircleShape)
+                                                                .background(if (cArgb == 0xFF000000.toInt()) Color.White else Color.Black)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // Row 2: Opacity Slider (Pink)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Opacity",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "${(currentSelectedAlpha * 100).toInt()}%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Slider(
+                        value = currentSelectedAlpha,
+                        onValueChange = { changeAlpha(it) },
+                        valueRange = 0.0f..1.0f,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = PINK_RED_ACCENT,
+                            activeTrackColor = PINK_RED_ACCENT,
+                            inactiveTrackColor = Color(0xFF3A3A3C)
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Row 3: 4 Tabs (TEXT | LABEL | BORDER | SHADOW)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val tabs = listOf("TEXT", "LABEL", "BORDER", "SHADOW")
+                        tabs.forEachIndexed { index, title ->
+                            val isTabSelected = activeTab == index
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .clickable {
+                                        activeTab = index
+                                        isCustomPaletteOpen = false
+                                    },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isTabSelected) PINK_RED_ACCENT.copy(alpha = 0.18f) else DARK_CARD_BG,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isTabSelected) PINK_RED_ACCENT else Color.Transparent
+                                )
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = title,
+                                        color = if (isTabSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.6f),
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isTabSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 2. TextFontSheet (Matches Screenshot 2):
+ * - Vertical list of fonts rendered in actual Typeface at 20sp.
+ * - Bottom bar: RECENT and FONTS tabs, plus pink (+) FAB for .ttf/.otf document picker.
+ */
+@Composable
+fun TextFontSheet(
+    initialFontName: String = "Roboto-Medium",
+    initialCustomFontPath: String = "",
+    customFonts: List<String> = emptyList(),
+    onPickCustomFont: () -> Unit,
+    onLiveChange: (fontName: String, customFontPath: String) -> Unit,
+    onDone: (fontName: String, customFontPath: String) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var selectedFontName by remember { mutableStateOf(initialFontName) }
+    var selectedCustomPath by remember { mutableStateOf(initialCustomFontPath) }
+    var selectedTab by remember { mutableIntStateOf(1) } // 0: RECENT, 1: FONTS
+
+    val builtInPresets = remember {
+        listOf(
+            FontPreset("Roboto-Medium", "Roboto Medium", "The quick brown fox jumps", android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)),
+            FontPreset("PermanentMarker", "Permanent Marker", "FlowCut Creative Video", android.graphics.Typeface.create("casual", android.graphics.Typeface.NORMAL)),
+            FontPreset("BEBAS", "Bebas Bold", "HEADLINE BLOCK TITLE", android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.BOLD)),
+            FontPreset("Aileron", "Aileron Light", "Clean Modern Aesthetic", android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL)),
+            FontPreset("Roboto-Thin", "Roboto Thin", "Minimal Elegance", android.graphics.Typeface.create("sans-serif-thin", android.graphics.Typeface.NORMAL)),
+            FontPreset("Serif-Bold", "Serif Bold", "Classic Editorial Type", android.graphics.Typeface.create(android.graphics.Typeface.SERIF, android.graphics.Typeface.BOLD)),
+            FontPreset("Monospace", "Monospace Code", "0123456789 ABCDEF", android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.NORMAL))
+        )
+    }
+
+    fun selectBuiltin(preset: FontPreset) {
+        selectedFontName = preset.id
+        selectedCustomPath = ""
+        onLiveChange(preset.id, "")
+    }
+
+    fun selectCustom(path: String) {
+        selectedFontName = "Custom"
+        selectedCustomPath = path
+        onLiveChange("Custom", path)
+    }
+
+    BackHandler { onCancel() }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onCancel() }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) {},
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = DARK_SHEET_BG,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp,
+                border = BorderStroke(0.5.dp, DARK_SURFACE_BORDER)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 18.dp, start = 16.dp, end = 16.dp)
+                ) {
+                    // Header Row (Close ✕, Title, Done ✓)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(onClick = onCancel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "Font",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        IconButton(
+                            onClick = {
+                                onDone(selectedFontName, selectedCustomPath)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Done",
+                                tint = PINK_RED_ACCENT,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Scrollable vertical list of fonts (Height-constrained, e.g. 260.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(260.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Custom fonts (if any)
+                        customFonts.forEach { customPath ->
+                            val file = File(customPath)
+                            if (file.exists()) {
+                                val fontName = file.nameWithoutExtension
+                                val isSelected = selectedCustomPath == customPath
+                                val customTf = remember(customPath) {
+                                    try {
+                                        android.graphics.Typeface.createFromFile(file)
+                                    } catch (_: Exception) {
+                                        android.graphics.Typeface.DEFAULT
+                                    }
+                                }
+
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { selectCustom(customPath) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.15f) else DARK_CARD_BG,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) PINK_RED_ACCENT else Color.Transparent
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = fontName,
+                                                color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = "Custom Imported Font",
+                                                color = Color.White.copy(alpha = 0.85f),
+                                                fontSize = 20.sp,
+                                                fontFamily = FontFamily(customTf)
+                                            )
+                                        }
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = "Selected",
+                                                tint = PINK_RED_ACCENT,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Built-in presets
+                        builtInPresets.forEach { preset ->
+                            val isSelected = selectedFontName == preset.id && selectedCustomPath.isEmpty()
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectBuiltin(preset) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.15f) else DARK_CARD_BG,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) PINK_RED_ACCENT else Color.Transparent
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = preset.displayName,
+                                            color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.6f),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = preset.previewText,
+                                            color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                            fontSize = 20.sp,
+                                            fontFamily = FontFamily(preset.typeface)
+                                        )
+                                    }
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "Selected",
+                                            tint = PINK_RED_ACCENT,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Bottom Row: [RECENT | FONTS] Tabs + Pink (+) FAB for custom .ttf/.otf
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("RECENT", "FONTS").forEachIndexed { idx, tabTitle ->
+                                val isTabSelected = selectedTab == idx
+                                Surface(
+                                    modifier = Modifier
+                                        .height(36.dp)
+                                        .clickable { selectedTab = idx },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isTabSelected) PINK_RED_ACCENT.copy(alpha = 0.18f) else DARK_CARD_BG,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isTabSelected) PINK_RED_ACCENT else Color.Transparent
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier.padding(horizontal = 16.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = tabTitle,
+                                            color = if (isTabSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.6f),
+                                            fontSize = 12.sp,
+                                            fontWeight = if (isTabSelected) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Pink (+) FAB
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(PINK_RED_ACCENT)
+                                .clickable { onPickCustomFont() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Import Font (.ttf, .otf)",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 3. TextAnimationSheet (Matches Screenshot 3):
+ * - Horizontal cards (72.dp x 72.dp, 0xFF2B2B2E) with "ABC" badge, IN/OUT/LOOP presets.
+ * - Pink Color(0xFFFF2D55) active selection and live evaluation on GL canvas.
+ * - Duration slider for IN and OUT tabs.
+ */
+@Composable
+fun TextAnimationSheet(
+    initialAnimInType: Int = 0,
+    initialAnimInDurationUs: Long = 500_000L,
+    initialAnimOutType: Int = 0,
+    initialAnimOutDurationUs: Long = 500_000L,
+    initialAnimLoopType: Int = 0,
+    onLiveChange: (inType: Int, inDurationUs: Long, outType: Int, outDurationUs: Long, loopType: Int) -> Unit,
+    onDone: (inType: Int, inDurationUs: Long, outType: Int, outDurationUs: Long, loopType: Int) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var animInType by remember { mutableIntStateOf(initialAnimInType) }
+    var animInDurationUs by remember { mutableLongStateOf(initialAnimInDurationUs) }
+    var animOutType by remember { mutableIntStateOf(initialAnimOutType) }
+    var animOutDurationUs by remember { mutableLongStateOf(initialAnimOutDurationUs) }
+    var animLoopType by remember { mutableIntStateOf(initialAnimLoopType) }
+    var activeTab by remember { mutableIntStateOf(0) } // 0: IN, 1: OUT, 2: LOOP
+
+    val inPresets = remember {
+        listOf(
+            AnimPreset(0, "None"),
+            AnimPreset(1, "Fade In"),
+            AnimPreset(2, "Zoom In"),
+            AnimPreset(3, "Slide Up"),
+            AnimPreset(4, "Slide Down"),
+            AnimPreset(5, "Slide Left"),
+            AnimPreset(6, "Slide Right"),
+            AnimPreset(7, "Bounce In"),
+            AnimPreset(8, "Spin In"),
+            AnimPreset(9, "Pop In")
+        )
+    }
+
+    val outPresets = remember {
+        listOf(
+            AnimPreset(0, "None"),
+            AnimPreset(1, "Fade Out"),
+            AnimPreset(2, "Zoom Out"),
+            AnimPreset(3, "Slide Up"),
+            AnimPreset(4, "Slide Down"),
+            AnimPreset(5, "Slide Left"),
+            AnimPreset(6, "Slide Right"),
+            AnimPreset(7, "Spin Out")
+        )
+    }
+
+    val loopPresets = remember {
+        listOf(
+            AnimPreset(0, "None"),
+            AnimPreset(1, "Pulse"),
+            AnimPreset(2, "Shake"),
+            AnimPreset(3, "Float"),
+            AnimPreset(4, "Spin"),
+            AnimPreset(5, "Flash"),
+            AnimPreset(6, "Rainbow Glow")
+        )
+    }
+
+    fun notifyChange() {
+        onLiveChange(animInType, animInDurationUs, animOutType, animOutDurationUs, animLoopType)
+    }
+
+    BackHandler { onCancel() }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onCancel() }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) {},
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = DARK_SHEET_BG,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp,
+                border = BorderStroke(0.5.dp, DARK_SURFACE_BORDER)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 18.dp, start = 16.dp, end = 16.dp)
+                ) {
+                    // Header Row (Close ✕, Title, Done ✓)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(onClick = onCancel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "Animation",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        IconButton(
+                            onClick = {
+                                onDone(animInType, animInDurationUs, animOutType, animOutDurationUs, animLoopType)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Done",
+                                tint = PINK_RED_ACCENT,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Horizontal cards row (72.dp x 72.dp, 0xFF2B2B2E)
+                    val currentPresets = when (activeTab) {
+                        0 -> inPresets
+                        1 -> outPresets
+                        else -> loopPresets
+                    }
+                    val currentSelectedPresetId = when (activeTab) {
+                        0 -> animInType
+                        1 -> animOutType
+                        else -> animLoopType
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        currentPresets.forEach { preset ->
+                            val isSelected = currentSelectedPresetId == preset.id
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(DARK_CARD_BG)
+                                    .border(
+                                        BorderStroke(
+                                            if (isSelected) 2.dp else 1.dp,
+                                            if (isSelected) PINK_RED_ACCENT else Color.Transparent
+                                        ),
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable {
+                                        when (activeTab) {
+                                            0 -> animInType = preset.id
+                                            1 -> animOutType = preset.id
+                                            2 -> animLoopType = preset.id
+                                        }
+                                        notifyChange()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(4.dp)
+                                ) {
+                                    if (preset.id == 0) {
+                                        Icon(
+                                            imageVector = Icons.Default.Block,
+                                            contentDescription = "None",
+                                            tint = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    } else {
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.12f)
+                                        ) {
+                                            Text(
+                                                text = "ABC",
+                                                color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = preset.name,
+                                        color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Optional Duration Slider for IN or OUT
+                    val showDurationSlider = (activeTab == 0 && animInType > 0) || (activeTab == 1 && animOutType > 0)
+                    if (showDurationSlider) {
+                        val currentDurUs = if (activeTab == 0) animInDurationUs else animOutDurationUs
+                        val currentDurSec = currentDurUs / 1_000_000.0f
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Duration",
+                                color = Color.White.copy(alpha = 0.8f),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = String.format(Locale.US, "%.1fs", currentDurSec),
+                                color = PINK_RED_ACCENT,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Slider(
+                            value = currentDurSec,
+                            onValueChange = { newSec ->
+                                val newUs = (newSec * 1_000_000L).toLong()
+                                if (activeTab == 0) {
+                                    animInDurationUs = newUs
+                                } else {
+                                    animOutDurationUs = newUs
+                                }
+                                notifyChange()
+                            },
+                            valueRange = 0.1f..2.0f,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            )
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.height(20.dp))
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Bottom Row: 3 Tabs (IN | OUT | LOOP)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val tabs = listOf("IN", "OUT", "LOOP")
+                        tabs.forEachIndexed { idx, tabTitle ->
+                            val isTabSelected = activeTab == idx
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .clickable { activeTab = idx },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isTabSelected) PINK_RED_ACCENT.copy(alpha = 0.18f) else DARK_CARD_BG,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isTabSelected) PINK_RED_ACCENT else Color.Transparent
+                                )
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = tabTitle,
+                                        color = if (isTabSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.6f),
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isTabSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 4. TextAdjustSheet (Matches Screenshot 4):
+ * - Top bar: Alignment icons (Left, Center, Right) with pink active tint.
+ * - 3 Pink sliders: Character (-0.05f..0.5f), Line (0.7f..2.0f), Opacity (0.0f..1.0f).
+ * - 4 Format toggle buttons: B, I, U, AA.
+ */
+@Composable
+fun TextAdjustSheet(
+    initialTextAlign: Int = 1,
+    initialLetterSpacing: Float = 0.0f,
+    initialLineSpacing: Float = 1.0f,
+    initialTextAlpha: Float = 1.0f,
+    initialIsBold: Boolean = false,
+    initialIsItalic: Boolean = false,
+    initialIsUnderline: Boolean = false,
+    initialIsUppercase: Boolean = false,
+    onLiveChange: (
+        align: Int, letterSpacing: Float, lineSpacing: Float, textAlpha: Float,
+        isBold: Boolean, isItalic: Boolean, isUnderline: Boolean, isUppercase: Boolean
+    ) -> Unit,
+    onDone: (
+        align: Int, letterSpacing: Float, lineSpacing: Float, textAlpha: Float,
+        isBold: Boolean, isItalic: Boolean, isUnderline: Boolean, isUppercase: Boolean
+    ) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var textAlign by remember { mutableIntStateOf(initialTextAlign) }
+    var letterSpacing by remember { mutableFloatStateOf(initialLetterSpacing) }
+    var lineSpacing by remember { mutableFloatStateOf(initialLineSpacing) }
+    var textAlpha by remember { mutableFloatStateOf(initialTextAlpha) }
+    var isBold by remember { mutableStateOf(initialIsBold) }
+    var isItalic by remember { mutableStateOf(initialIsItalic) }
+    var isUnderline by remember { mutableStateOf(initialIsUnderline) }
+    var isUppercase by remember { mutableStateOf(initialIsUppercase) }
+
+    fun notifyChange() {
+        onLiveChange(textAlign, letterSpacing, lineSpacing, textAlpha, isBold, isItalic, isUnderline, isUppercase)
+    }
+
+    BackHandler { onCancel() }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onCancel() }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) {},
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = DARK_SHEET_BG,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp,
+                border = BorderStroke(0.5.dp, DARK_SURFACE_BORDER)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 18.dp, start = 16.dp, end = 16.dp)
+                ) {
+                    // Header Row (Close ✕, Title, Done ✓)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(onClick = onCancel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "Adjust",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        IconButton(
+                            onClick = {
+                                onDone(textAlign, letterSpacing, lineSpacing, textAlpha, isBold, isItalic, isUnderline, isUppercase)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Done",
+                                tint = PINK_RED_ACCENT,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Top Row: Alignment Icons (Left, Center, Right)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val aligns = listOf(
+                            0 to Icons.AutoMirrored.Filled.FormatAlignLeft,
+                            1 to Icons.Default.FormatAlignCenter,
+                            2 to Icons.AutoMirrored.Filled.FormatAlignRight
+                        )
+                        aligns.forEach { (alignVal, icon) ->
+                            val isSelected = textAlign == alignVal
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(38.dp)
+                                    .clickable {
+                                        textAlign = alignVal
+                                        notifyChange()
+                                    },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.18f) else DARK_CARD_BG,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) PINK_RED_ACCENT else Color.Transparent
+                                )
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = "Align",
+                                        tint = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Slider 1: Character Spacing (-0.05f..0.5f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Character",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "${(letterSpacing * 100).toInt()}%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = letterSpacing,
+                        onValueChange = {
+                            letterSpacing = it
+                            notifyChange()
+                        },
+                        valueRange = -0.08f..1.40f,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = PINK_RED_ACCENT,
+                            activeTrackColor = PINK_RED_ACCENT,
+                            inactiveTrackColor = Color(0xFF3A3A3C)
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Slider 2: Line Spacing (0.55f..2.80f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Line",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = String.format(Locale.US, "%.1fx", lineSpacing),
+                            color = PINK_RED_ACCENT,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = lineSpacing,
+                        onValueChange = {
+                            lineSpacing = it
+                            notifyChange()
+                        },
+                        valueRange = 0.55f..2.80f,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = PINK_RED_ACCENT,
+                            activeTrackColor = PINK_RED_ACCENT,
+                            inactiveTrackColor = Color(0xFF3A3A3C)
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Slider 3: Opacity (0.0f..1.0f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Opacity",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "${(textAlpha * 100).toInt()}%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = textAlpha,
+                        onValueChange = {
+                            textAlpha = it
+                            notifyChange()
+                        },
+                        valueRange = 0.0f..1.0f,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = PINK_RED_ACCENT,
+                            activeTrackColor = PINK_RED_ACCENT,
+                            inactiveTrackColor = Color(0xFF3A3A3C)
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Format Toggle Buttons: B, I, U, AA
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val toggles = listOf(
+                            "B" to isBold,
+                            "I" to isItalic,
+                            "U" to isUnderline,
+                            "AA" to isUppercase
+                        )
+                        toggles.forEachIndexed { idx, (label, active) ->
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .clickable {
+                                        when (idx) {
+                                            0 -> isBold = !isBold
+                                            1 -> isItalic = !isItalic
+                                            2 -> isUnderline = !isUnderline
+                                            3 -> isUppercase = !isUppercase
+                                        }
+                                        notifyChange()
+                                    },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (active) PINK_RED_ACCENT.copy(alpha = 0.18f) else DARK_CARD_BG,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (active) PINK_RED_ACCENT else Color.Transparent
+                                )
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = label,
+                                        color = if (active) PINK_RED_ACCENT else Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (active || idx == 0) FontWeight.Bold else FontWeight.Medium,
+                                        fontStyle = if (idx == 1) FontStyle.Italic else FontStyle.Normal,
+                                        textDecoration = if (idx == 2) TextDecoration.Underline else TextDecoration.None
                                     )
                                 }
                             }

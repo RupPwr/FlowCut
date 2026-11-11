@@ -174,12 +174,12 @@ class PrefetchCoordinator(
  * and horizontal mirror (isFlippedH).
  */
 data class ClipTransform(
-    val rotationDeg: Float = 0f,
-    val isFlippedH: Boolean = false,
-    val scale: Float = 1.0f, // 0.25f to 5.0f
-    val panX: Float = 0.0f,  // normalized screen offset
-    val panY: Float = 0.0f,  // normalized screen offset
-    val opacity: Float = 1.0f // 0.0f to 1.0f, default 1.0f = 100%
+    var rotationDeg: Float = 0f,
+    var isFlippedH: Boolean = false,
+    var scale: Float = 1.0f, // 0.25f to 5.0f
+    var panX: Float = 0.0f,  // normalized screen offset
+    var panY: Float = 0.0f,  // normalized screen offset
+    var opacity: Float = 1.0f // 0.0f to 1.0f, default 1.0f = 100%
 ) {
     companion object {
         val DEFAULT = ClipTransform(0f, false, 1.0f, 0.0f, 0.0f, 1.0f)
@@ -255,6 +255,7 @@ class PreviewRenderer(
 
     private val renderer = TransitionRenderer()
     private val overlayTextureCache = OverlayTextureCache()
+    private val animEvaluator = AnimatedTransformEvaluator()
     private var surfaceTextureA: SurfaceTexture? = null
     private var surfaceTextureB: SurfaceTexture? = null
 
@@ -1051,15 +1052,16 @@ class PreviewRenderer(
         for (i in 0 until activeLayerSet.visualCount) {
             val itemIndex = activeLayerSet.activeVisualIndices[i]
             val item = plan.items.getOrNull(itemIndex) ?: continue
-            if (item.transform.opacity <= 0.001f) continue
+            val effTransform = animEvaluator.evaluate(item, tUs)
+            if (effTransform.opacity <= 0.001f) continue
             val cached = overlayTextureCache.getOrBakeTexture(item) ?: continue
             if (cached.texId > 0) {
                 renderer.drawOverlayQuad(
                     texId = cached.texId,
                     texWidth = cached.width,
                     texHeight = cached.height,
-                    transform = item.transform,
-                    opacity = item.transform.opacity,
+                    transform = effTransform,
+                    opacity = effTransform.opacity,
                     displayWidth = viewportWidth,
                     displayHeight = viewportHeight
                 )

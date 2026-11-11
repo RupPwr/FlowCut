@@ -3,44 +3,78 @@ package com.flowcut.app.ui.timeline
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
 import kotlin.math.abs
+
+/**
+ * Unified Focus & Selection State Machine (VideoGuru / CapCut Reference Architecture).
+ * Single source of truth driving vertical layout, toolbar, and preview gizmo.
+ */
+sealed interface TimelineFocusState {
+    data object S0_NONE : TimelineFocusState
+    data object S1_PIP_GROUP : TimelineFocusState
+    data class S2_PIP_ITEM(val itemId: String) : TimelineFocusState
+    data class S3_STICKER_ITEM(val itemId: String) : TimelineFocusState
+    data class S4_TEXT_ITEM(val itemId: String) : TimelineFocusState
+    data object S5_AUDIO_GROUP : TimelineFocusState
+    data class S6_AUDIO_ITEM(val itemId: String) : TimelineFocusState
+
+    val currentSelectedItemId: String?
+        get() = when (this) {
+            is S2_PIP_ITEM -> itemId
+            is S3_STICKER_ITEM -> itemId
+            is S4_TEXT_ITEM -> itemId
+            is S6_AUDIO_ITEM -> itemId
+            else -> null
+        }
+}
 
 /**
  * Result of a timeline hit-test (Section 8).
  */
 sealed interface TimelineSelection {
-    object None : TimelineSelection
+    data object None : TimelineSelection
     data class ClipSelected(val index: Int) : TimelineSelection
     data class JunctionSelected(val index: Int) : TimelineSelection
     data class LaneItemSelected(val laneIndex: Int, val itemIndex: Int) : TimelineSelection
     data class TrimHandleLeft(val index: Int) : TimelineSelection
     data class TrimHandleRight(val index: Int) : TimelineSelection
     data object TrackMuteClicked : TimelineSelection
+    data object CoverClicked : TimelineSelection
+    data object AddClipClicked : TimelineSelection
+    data object PipGroupClicked : TimelineSelection
     data class OverlaySelected(val itemId: String) : TimelineSelection
+    data object AudioGroupClicked : TimelineSelection
 }
 
 /**
- * Pure O(log n) hit-tester for TimelineCanvas (Section 8).
- * Evaluates touch hits with strict priority:
- * 0. Trim handles of currently selected clip (~28 dp touch target)
- * 1. Junction / transition nodes (48 dp touch target wins)
- * 2. Main track clips
- * 3. Feature lane items
+ * Pure O(log n) hit-tester for TimelineCanvas (Section 8 & VideoGuru Timeline System).
  */
 object TimelineHitTester {
 
     const val JUNCTION_BOX_SIZE_DP = 20f
     const val JUNCTION_TOUCH_TARGET_DP = 20f
     const val RULER_HEIGHT_DP = 22f
-    const val MAIN_TRACK_HEIGHT_DP = 64f
-    const val LANE_HEIGHT_DP = 40f
-    const val LANES_PADDING_TOP_DP = 8f
+    const val ROW_A_PINS_HEIGHT_DP = 30f
+    const val ROW_B_BAR_HEIGHT_DP = 30f
+    const val MAIN_TRACK_HEIGHT_DP = 48f
+    const val ROW_D_PIP_COLLAPSED_HEIGHT_DP = 32f
+    const val ROW_D_PIP_EXPANDED_LANE_HEIGHT_DP = 36f
+    const val ROW_D_PIP_EXPANDED_LANE_STEP_DP = 42f
+    const val ROW_D_PIP_EXPANDED_TOTAL_HEIGHT_DP = 168f
+    const val ROW_E_SOUND_BAR_HEIGHT_DP = 26f
+    const val COVER_BOX_WIDTH_DP = 36f
+    const val COVER_BOX_HEIGHT_DP = 42f
+    const val ADD_BTN_WIDTH_DP = 28f
+    const val ADD_BTN_HEIGHT_DP = 36f
+    const val PIN_WIDTH_DP = 24f
+    const val PIN_HEIGHT_DP = 26f
     const val TRIM_HANDLE_WIDTH_DP = 15f
     const val TRIM_HANDLE_HEIGHT_DP = 38f
     const val TRIM_HANDLE_TOUCH_TARGET_DP = 28f
-    const val OVERLAY_LANE_HEIGHT_DP = 32f
-    const val OVERLAY_LANE_GAP_DP = 6f
+    const val LANE_HEIGHT_DP = 40f
+    const val LANES_PADDING_TOP_DP = 8f
 
     enum class TrimHandleType {
         NONE,
@@ -55,9 +89,7 @@ object TimelineHitTester {
     }
 
     /**
-     * Hit-tests Left or Right trim handle of a currently selected clip with a generous touch target.
-     * Left hit zone: [leftX - handleWidthPx - 16.dp .. leftX + 12.dp]
-     * Right hit zone: [rightX - 12.dp .. rightX + handleWidthPx + 16.dp]
+     * Hit-tests Left or Right trim handle of a currently selected clip in Row C.
      */
     fun hitTestTrimHandle(
         tapX: Float,
@@ -68,20 +100,19 @@ object TimelineHitTester {
         density: Float,
         snapshot: TimelineSnapshot,
         zoomState: TimelineZoomState,
-        rulerHeightDp: Float = RULER_HEIGHT_DP,
+        rowCTopDp: Float = RULER_HEIGHT_DP + ROW_A_PINS_HEIGHT_DP,
         mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
         handleWidthDp: Float = TRIM_HANDLE_WIDTH_DP
     ): TrimHandleType {
         val n = snapshot.main.n
         if (selectedClipIndex !in 0 until n) return TrimHandleType.NONE
 
-        val rulerHeightPx = rulerHeightDp * density
+        val rowCTopPx = rowCTopDp * density
         val mainTrackHeightPx = mainTrackHeightDp * density
-        val mainTrackBottomPx = rulerHeightPx + mainTrackHeightPx
+        val rowCBottomPx = rowCTopPx + mainTrackHeightPx
 
-        // Generous vertical touch tolerance around the main track
         val vertMarginPx = 8f * density
-        if (tapY < rulerHeightPx - vertMarginPx || tapY > mainTrackBottomPx + vertMarginPx) {
+        if (tapY < rowCTopPx - vertMarginPx || tapY > rowCBottomPx + vertMarginPx) {
             return TrimHandleType.NONE
         }
 
@@ -92,7 +123,6 @@ object TimelineHitTester {
 
         val handleWidthPx = handleWidthDp * density
 
-        // Exact touch hit zones per Bug #2:
         val leftHitMin = leftX - handleWidthPx - (16f * density)
         val leftHitMax = leftX + (12f * density)
         val rightHitMin = rightX - (12f * density)
@@ -118,7 +148,8 @@ object TimelineHitTester {
     }
 
     /**
-     * Hit-tests Left or Right chevron trim handle of a currently selected OverlayItem (~28dp touch target).
+     * Hit-tests Left or Right chevron trim handle of a currently selected OverlayItem
+     * in Row B (for Text/Sticker) or Row D (for PIP Video/Image).
      */
     fun hitTestOverlayTrimHandle(
         tapX: Float,
@@ -129,21 +160,33 @@ object TimelineHitTester {
         halfWidthPx: Float,
         density: Float,
         zoomState: TimelineZoomState,
-        rulerHeightDp: Float = RULER_HEIGHT_DP,
-        mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
-        overlayLaneHeightDp: Float = OVERLAY_LANE_HEIGHT_DP,
-        overlayLaneGapDp: Float = OVERLAY_LANE_GAP_DP,
+        focusMode: TimelineFocusState = TimelineFocusState.S0_NONE,
         handleWidthDp: Float = TRIM_HANDLE_WIDTH_DP
     ): OverlayTrimEdge {
         if (selectedOverlayId == null) return OverlayTrimEdge.NONE
         val item = overlayItems.firstOrNull { it.id == selectedOverlayId } ?: return OverlayTrimEdge.NONE
 
-        val rulerHeightPx = rulerHeightDp * density
-        val mainTrackHeightPx = mainTrackHeightDp * density
-        val overlayTopPx = rulerHeightPx + mainTrackHeightPx + (LANES_PADDING_TOP_DP * density)
-        val laneStepPx = (overlayLaneHeightDp + overlayLaneGapDp) * density
-        val itemTopPx = overlayTopPx + item.laneIndex * laneStepPx
-        val itemBottomPx = itemTopPx + (overlayLaneHeightDp * density)
+        val isTextOrSticker = item.type == LayerType.TEXT || item.type == LayerType.STICKER
+        val itemTopPx: Float
+        val itemBottomPx: Float
+
+        if (isTextOrSticker) {
+            // Row B bounds: immediately below Row A
+            val rowBTopPx = (RULER_HEIGHT_DP + ROW_A_PINS_HEIGHT_DP) * density
+            val rowBBottomPx = rowBTopPx + (ROW_B_BAR_HEIGHT_DP * density)
+            itemTopPx = rowBTopPx
+            itemBottomPx = rowBBottomPx
+        } else {
+            // Row D PIP lane bounds
+            val isRowBOpen = focusMode is TimelineFocusState.S3_STICKER_ITEM || focusMode is TimelineFocusState.S4_TEXT_ITEM
+            val rowBHeightDp = if (isRowBOpen) ROW_B_BAR_HEIGHT_DP else 0f
+            val rowCTopDp = RULER_HEIGHT_DP + ROW_A_PINS_HEIGHT_DP + rowBHeightDp
+            val rowDTopDp = rowCTopDp + MAIN_TRACK_HEIGHT_DP + 4f
+            val lane = item.laneIndex.coerceIn(0, 3)
+            val pipLaneTopDp = rowDTopDp + 3f + (lane * ROW_D_PIP_EXPANDED_LANE_STEP_DP)
+            itemTopPx = pipLaneTopDp * density
+            itemBottomPx = itemTopPx + (ROW_D_PIP_EXPANDED_LANE_HEIGHT_DP * density)
+        }
 
         val vertMarginPx = 8f * density
         if (tapY < itemTopPx - vertMarginPx || tapY > itemBottomPx + vertMarginPx) {
@@ -178,49 +221,6 @@ object TimelineHitTester {
         }
     }
 
-    /**
-     * Hit-tests tapping inside any overlay item pill to select it.
-     */
-    fun hitTestOverlayItem(
-        tapX: Float,
-        tapY: Float,
-        overlayItems: List<OverlayItem>,
-        playheadUs: Long,
-        halfWidthPx: Float,
-        density: Float,
-        zoomState: TimelineZoomState,
-        rulerHeightDp: Float = RULER_HEIGHT_DP,
-        mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
-        overlayLaneHeightDp: Float = OVERLAY_LANE_HEIGHT_DP,
-        overlayLaneGapDp: Float = OVERLAY_LANE_GAP_DP
-    ): OverlayItem? {
-        if (overlayItems.isEmpty()) return null
-        val rulerHeightPx = rulerHeightDp * density
-        val mainTrackHeightPx = mainTrackHeightDp * density
-        val overlayTopPx = rulerHeightPx + mainTrackHeightPx + (LANES_PADDING_TOP_DP * density)
-        val laneStepPx = (overlayLaneHeightDp + overlayLaneGapDp) * density
-
-        // Check for highest zIndex item under touch so top layer wins tap
-        var bestItem: OverlayItem? = null
-        var bestZIndex = Int.MIN_VALUE
-        for (idx in overlayItems.indices) {
-            val item = overlayItems[idx]
-            val itemTopPx = overlayTopPx + item.laneIndex * laneStepPx
-            val itemBottomPx = itemTopPx + (overlayLaneHeightDp * density)
-            if (tapY in itemTopPx..itemBottomPx) {
-                val leftX = zoomState.timeUsToX(item.startUs, playheadUs, halfWidthPx, density)
-                val rightX = zoomState.timeUsToX(item.endUs, playheadUs, halfWidthPx, density)
-                if (tapX in leftX..rightX) {
-                    if (item.zIndex > bestZIndex) {
-                        bestZIndex = item.zIndex
-                        bestItem = item
-                    }
-                }
-            }
-        }
-        return bestItem
-    }
-
     fun hitTestTrackMuteButton(
         tapX: Float,
         tapY: Float,
@@ -228,21 +228,119 @@ object TimelineHitTester {
         halfWidthPx: Float,
         density: Float,
         zoomState: TimelineZoomState,
-        rulerHeightDp: Float = RULER_HEIGHT_DP,
-        mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP
+        rowCTopPx: Float,
+        mainTrackHeightPx: Float
     ): Boolean {
         val clip0LeftX = zoomState.timeUsToX(0L, playheadUs, halfWidthPx, density)
-        val muteBtnCenterX = clip0LeftX - (32f * density)
-        val rulerHeightPx = rulerHeightDp * density
-        val mainTrackHeightPx = mainTrackHeightDp * density
-        val muteBtnCenterY = rulerHeightPx + mainTrackHeightPx / 2f
+        val coverRight = clip0LeftX - (10f * density)
+        val coverLeft = coverRight - (COVER_BOX_WIDTH_DP * density)
+        val muteBtnCenterX = coverLeft - (20f * density)
+        val muteBtnCenterY = rowCTopPx + mainTrackHeightPx / 2f
 
-        val touchRadiusPx = 24f * density // 48dp touch target
+        val touchRadiusPx = 24f * density
         val dx = abs(tapX - muteBtnCenterX)
         val dy = abs(tapY - muteBtnCenterY)
         return dx <= touchRadiusPx && dy <= touchRadiusPx
     }
 
+    fun hitTestCoverButton(
+        tapX: Float,
+        tapY: Float,
+        playheadUs: Long,
+        halfWidthPx: Float,
+        density: Float,
+        zoomState: TimelineZoomState,
+        rowCTopPx: Float,
+        mainTrackHeightPx: Float
+    ): Boolean {
+        val clip0LeftX = zoomState.timeUsToX(0L, playheadUs, halfWidthPx, density)
+        val coverRight = clip0LeftX - (10f * density)
+        val coverLeft = coverRight - (COVER_BOX_WIDTH_DP * density)
+        val coverTop = rowCTopPx + (mainTrackHeightPx - (COVER_BOX_HEIGHT_DP * density)) / 2f
+        val coverBottom = coverTop + (COVER_BOX_HEIGHT_DP * density)
+        val margin = 6f * density
+
+        return tapX in (coverLeft - margin)..(coverRight + margin) &&
+                tapY in (coverTop - margin)..(coverBottom + margin)
+    }
+
+    fun hitTestAddClipButton(
+        tapX: Float,
+        tapY: Float,
+        totalUs: Long,
+        playheadUs: Long,
+        halfWidthPx: Float,
+        density: Float,
+        zoomState: TimelineZoomState,
+        rowCTopPx: Float,
+        mainTrackHeightPx: Float
+    ): Boolean {
+        val lastClipRightX = zoomState.timeUsToX(totalUs, playheadUs, halfWidthPx, density)
+        val addBtnLeft = lastClipRightX + (10f * density)
+        val addBtnRight = addBtnLeft + (ADD_BTN_WIDTH_DP * density)
+        val addBtnTop = rowCTopPx + (mainTrackHeightPx - (ADD_BTN_HEIGHT_DP * density)) / 2f
+        val addBtnBottom = addBtnTop + (ADD_BTN_HEIGHT_DP * density)
+        val margin = 8f * density
+
+        return tapX in (addBtnLeft - margin)..(addBtnRight + margin) &&
+                tapY in (addBtnTop - margin)..(addBtnBottom + margin)
+    }
+
+    /**
+     * Hit-tests Row A (Pins Row): Pin markers (24.dp x 26.dp) and duration underlines.
+     */
+    fun hitTestRowAPins(
+        tapX: Float,
+        tapY: Float,
+        overlayItems: List<OverlayItem>,
+        playheadUs: Long,
+        halfWidthPx: Float,
+        density: Float,
+        zoomState: TimelineZoomState,
+        rowATopPx: Float,
+        rowABottomPx: Float
+    ): OverlayItem? {
+        val margin = 4f * density
+        if (tapY < rowATopPx - margin || tapY > rowABottomPx + margin) return null
+
+        val pinTouchRadiusPx = 18f * density
+        var bestItem: OverlayItem? = null
+        var minDistance = Float.MAX_VALUE
+
+        // 1. First priority: Direct pin marker hit (near startX)
+        for (idx in overlayItems.indices) {
+            val item = overlayItems[idx]
+            if (item.type != LayerType.TEXT && item.type != LayerType.STICKER) continue
+            val startX = zoomState.timeUsToX(item.startUs, playheadUs, halfWidthPx, density)
+            val dx = abs(tapX - startX)
+            if (dx <= pinTouchRadiusPx && dx < minDistance) {
+                minDistance = dx
+                bestItem = item
+            }
+        }
+        if (bestItem != null) return bestItem
+
+        // 2. Second priority: Duration underline hit (startX .. endX)
+        for (idx in overlayItems.indices.reversed()) {
+            val item = overlayItems[idx]
+            if (item.type != LayerType.TEXT && item.type != LayerType.STICKER) continue
+            val startX = zoomState.timeUsToX(item.startUs, playheadUs, halfWidthPx, density)
+            val endX = zoomState.timeUsToX(item.endUs, playheadUs, halfWidthPx, density)
+            if (tapX in (startX - 8f * density)..(endX + 8f * density)) {
+                return item
+            }
+        }
+        return null
+    }
+
+    /**
+     * Master hit test evaluating priorities across all rows:
+     * - Row A: Pins Row
+     * - Row B: Dynamic Selected Text/Sticker Bar
+     * - Row C: Main Track (Track Mute, Cover, Clips, Junctions, Add "+")
+     * - Row D: PIP Area (Thin Lines in S0/S3/S4 vs Expanded 4 lanes in S1/S2)
+     * - Row E: Sound collection bar
+     */
     fun hitTest(
         tapX: Float,
         tapY: Float,
@@ -256,18 +354,60 @@ object TimelineHitTester {
         laneHeightDp: Float = LANE_HEIGHT_DP,
         selectedClipIndex: Int = -1,
         selectedOverlayId: String? = null,
-        overlayItems: List<OverlayItem> = emptyList()
+        overlayItems: List<OverlayItem> = emptyList(),
+        focusMode: TimelineFocusState = TimelineFocusState.S0_NONE
     ): TimelineSelection {
         val n = snapshot.main.n
+        val totalUs = msToUs(snapshot.totalMs)
+
+        // Calculate dynamic vertical row coordinates
+        val rulerHeightPx = rulerHeightDp * density
+        val rowATopPx = rulerHeightPx
+        val rowAPinsHeightPx = ROW_A_PINS_HEIGHT_DP * density
+        val rowABottomPx = rowATopPx + rowAPinsHeightPx
+
+        val isRowBOpen = focusMode is TimelineFocusState.S3_STICKER_ITEM || focusMode is TimelineFocusState.S4_TEXT_ITEM
+        val rowBTopPx = rowABottomPx
+        val rowBHeightPx = if (isRowBOpen) ROW_B_BAR_HEIGHT_DP * density else 0f
+        val rowBBottomPx = rowBTopPx + rowBHeightPx
+
+        val rowCTopPx = rowBBottomPx + (2f * density)
+        val mainTrackHeightPx = mainTrackHeightDp * density
+        val rowCBottomPx = rowCTopPx + mainTrackHeightPx
+
+        val isPipExpanded = focusMode is TimelineFocusState.S1_PIP_GROUP || focusMode is TimelineFocusState.S2_PIP_ITEM
+        val rowDTopPx = rowCBottomPx + (4f * density)
+        val rowDHeightPx = if (isPipExpanded) {
+            ROW_D_PIP_EXPANDED_TOTAL_HEIGHT_DP * density
+        } else {
+            ROW_D_PIP_COLLAPSED_HEIGHT_DP * density
+        }
+        val rowDBottomPx = rowDTopPx + rowDHeightPx
+
+        val rowETopPx = rowDBottomPx + (4f * density)
+        val rowEHeightPx = ROW_E_SOUND_BAR_HEIGHT_DP * density
+        val rowEBottomPx = rowETopPx + rowEHeightPx
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY -1: Track Audio Mute/Unmute Button (Anchored left of clip 0)
+        // PRIORITY -1: Track Audio Mute/Unmute Button (Anchored left of clip 0 in Row C)
         // -----------------------------------------------------------------------------------------
-        if (hitTestTrackMuteButton(tapX, tapY, playheadUs, halfWidthPx, density, zoomState, rulerHeightDp, mainTrackHeightDp)) {
+        if (hitTestTrackMuteButton(tapX, tapY, playheadUs, halfWidthPx, density, zoomState, rowCTopPx, mainTrackHeightPx)) {
             return TimelineSelection.TrackMuteClicked
         }
 
-        if (n == 0 && snapshot.lanes.isEmpty() && overlayItems.isEmpty()) return TimelineSelection.None
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY -0.5: Cover Box (Anchored left of clip 0 in Row C)
+        // -----------------------------------------------------------------------------------------
+        if (hitTestCoverButton(tapX, tapY, playheadUs, halfWidthPx, density, zoomState, rowCTopPx, mainTrackHeightPx)) {
+            return TimelineSelection.CoverClicked
+        }
+
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY -0.2: Append Media Pink "+" Button (Anchored right of total duration in Row C)
+        // -----------------------------------------------------------------------------------------
+        if (hitTestAddClipButton(tapX, tapY, totalUs, playheadUs, halfWidthPx, density, zoomState, rowCTopPx, mainTrackHeightPx)) {
+            return TimelineSelection.AddClipClicked
+        }
 
         // -----------------------------------------------------------------------------------------
         // PRIORITY 0: Trim Handles of Currently Selected Main Clip (~28 dp touch target)
@@ -282,18 +422,18 @@ object TimelineHitTester {
                 density = density,
                 snapshot = snapshot,
                 zoomState = zoomState,
-                rulerHeightDp = rulerHeightDp,
+                rowCTopDp = (rowCTopPx / density),
                 mainTrackHeightDp = mainTrackHeightDp
             )
             when (handleHit) {
                 TrimHandleType.LEFT -> return TimelineSelection.TrimHandleLeft(selectedClipIndex)
                 TrimHandleType.RIGHT -> return TimelineSelection.TrimHandleRight(selectedClipIndex)
-                TrimHandleType.NONE -> { /* fall through to normal gestures */ }
+                TrimHandleType.NONE -> { /* fall through */ }
             }
         }
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY 0.5: Trim Handles of Currently Selected Overlay Item (~28 dp touch target)
+        // PRIORITY 0.5: Trim Handles of Currently Selected Overlay Item (Row B or Row D)
         // -----------------------------------------------------------------------------------------
         if (selectedOverlayId != null) {
             val overlayTrimHit = hitTestOverlayTrimHandle(
@@ -305,31 +445,58 @@ object TimelineHitTester {
                 halfWidthPx = halfWidthPx,
                 density = density,
                 zoomState = zoomState,
-                rulerHeightDp = rulerHeightDp,
-                mainTrackHeightDp = mainTrackHeightDp
+                focusMode = focusMode
             )
             if (overlayTrimHit != OverlayTrimEdge.NONE) {
                 return TimelineSelection.OverlaySelected(selectedOverlayId)
             }
         }
 
-        val rulerHeightPx = rulerHeightDp * density
-        val mainTrackHeightPx = mainTrackHeightDp * density
-        val mainTrackBottomPx = rulerHeightPx + mainTrackHeightPx
-        val junctionCenterY = rulerHeightPx + mainTrackHeightPx / 2f
-        val junctionTouchHalfSizePx = (JUNCTION_BOX_SIZE_DP / 2f) * density
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY 1: Row A — Top Pins Row for Text & Stickers
+        // -----------------------------------------------------------------------------------------
+        val hitPin = hitTestRowAPins(
+            tapX = tapX,
+            tapY = tapY,
+            overlayItems = overlayItems,
+            playheadUs = playheadUs,
+            halfWidthPx = halfWidthPx,
+            density = density,
+            zoomState = zoomState,
+            rowATopPx = rowATopPx,
+            rowABottomPx = rowABottomPx
+        )
+        if (hitPin != null) {
+            return TimelineSelection.OverlaySelected(hitPin.id)
+        }
+
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY 1.5: Row B — Dynamic Selected Text / Sticker Bar
+        // -----------------------------------------------------------------------------------------
+        if (isRowBOpen && selectedOverlayId != null && tapY in rowBTopPx..rowBBottomPx) {
+            val selItem = overlayItems.firstOrNull { it.id == selectedOverlayId }
+            if (selItem != null) {
+                val leftX = zoomState.timeUsToX(selItem.startUs, playheadUs, halfWidthPx, density)
+                val rightX = zoomState.timeUsToX(selItem.endUs, playheadUs, halfWidthPx, density)
+                if (tapX in leftX..rightX) {
+                    return TimelineSelection.OverlaySelected(selItem.id)
+                }
+            }
+        }
+
         val tapTimeUs = zoomState.xToTimeUs(tapX, playheadUs, halfWidthPx, density)
         val tapTimeMs = usToMs(tapTimeUs)
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY 1: Junction / Transition nodes (strictly inside the 20 dp icon bounds)
+        // PRIORITY 2: Transition Junction Nodes in Row C
         // -----------------------------------------------------------------------------------------
+        val junctionCenterY = rowCTopPx + mainTrackHeightPx / 2f
+        val junctionTouchHalfSizePx = (JUNCTION_BOX_SIZE_DP / 2f) * density
         if (n > 1) {
             val k = snapshot.main.lastStartAtOrBefore(tapTimeMs)
             val minJ = maxOf(0, k - 1)
             val maxJ = minOf(n - 2, k + 1)
             for (j in minJ..maxJ) {
-                // Auto-hide: ignore junctions flanking the currently selected clip
                 if (selectedClipIndex >= 0 && (j == selectedClipIndex - 1 || j == selectedClipIndex)) {
                     continue
                 }
@@ -345,12 +512,11 @@ object TimelineHitTester {
         }
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY 2: Main Track Clips
+        // PRIORITY 3: Main Track Clips in Row C
         // -----------------------------------------------------------------------------------------
-        if (n > 0 && tapY in rulerHeightPx..mainTrackBottomPx) {
+        if (n > 0 && tapY in rowCTopPx..rowCBottomPx) {
             val k = snapshot.main.lastStartAtOrBefore(tapTimeMs)
             if (k in 0 until n) {
-                // If tap is in overlap with next clip, pick the one whose center is closer
                 if (k + 1 < n && tapTimeMs >= snapshot.main.startMs[k + 1] && tapTimeMs <= snapshot.main.endMs[k]) {
                     val centerK = (snapshot.main.startMs[k] + snapshot.main.endMs[k]) / 2L
                     val centerNext = (snapshot.main.startMs[k + 1] + snapshot.main.endMs[k + 1]) / 2L
@@ -367,34 +533,53 @@ object TimelineHitTester {
         }
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY 3: Overlay Items (Tapping inside pill)
+        // PRIORITY 4: Row D — 4-Lane PIP Area (Thin Lines vs. Expanded Thumbnail Lanes)
         // -----------------------------------------------------------------------------------------
-        val hitOverlay = hitTestOverlayItem(
-            tapX = tapX,
-            tapY = tapY,
-            overlayItems = overlayItems,
-            playheadUs = playheadUs,
-            halfWidthPx = halfWidthPx,
-            density = density,
-            zoomState = zoomState,
-            rulerHeightDp = rulerHeightDp,
-            mainTrackHeightDp = mainTrackHeightDp
-        )
-        if (hitOverlay != null) {
-            return TimelineSelection.OverlaySelected(hitOverlay.id)
+        if (tapY in rowDTopPx..rowDBottomPx) {
+            val pipItems = overlayItems.filter { it.type == LayerType.VIDEO || it.type == LayerType.IMAGE }
+            if (isPipExpanded) {
+                // Expanded 4 thumbnail lanes: check each lane
+                val relativeY = tapY - rowDTopPx - (3f * density)
+                val laneIndex = (relativeY / (ROW_D_PIP_EXPANDED_LANE_STEP_DP * density)).toInt().coerceIn(0, 3)
+                val candidateItem = pipItems.firstOrNull {
+                    it.laneIndex.coerceIn(0, 3) == laneIndex &&
+                            tapTimeUs in it.startUs..it.endUs
+                }
+                if (candidateItem != null) {
+                    return TimelineSelection.OverlaySelected(candidateItem.id)
+                }
+                // Tapping expanded PIP area outside specific item keeps PIP group focused
+                return TimelineSelection.PipGroupClicked
+            } else {
+                // Collapsed 4 thin lines: check if directly tapping a PIP bar
+                for (lane in 0..3) {
+                    val lineY = rowDTopPx + (3f * density) + (lane * 8f * density)
+                    if (abs(tapY - lineY) <= 8f * density) {
+                        val hitItem = pipItems.firstOrNull {
+                            it.laneIndex.coerceIn(0, 3) == lane &&
+                                    tapTimeUs in it.startUs..it.endUs
+                        }
+                        if (hitItem != null) {
+                            return TimelineSelection.OverlaySelected(hitItem.id)
+                        }
+                    }
+                }
+                // Tapping anywhere in collapsed PIP zone expands to S1_PIP_GROUP
+                return TimelineSelection.PipGroupClicked
+            }
         }
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY 4: Feature Lane Items
+        // PRIORITY 5: Row E — Sound Collection Bar
         // -----------------------------------------------------------------------------------------
-        var maxOverlayLane = -1
-        for (idx in overlayItems.indices) {
-            val l = overlayItems[idx].laneIndex
-            if (l > maxOverlayLane) maxOverlayLane = l
+        if (tapY in rowETopPx..rowEBottomPx) {
+            return TimelineSelection.AudioGroupClicked
         }
-        val overlayRowsCount = if (maxOverlayLane >= 0) maxOverlayLane + 1 else 0
-        val overlayZoneHeightPx = overlayRowsCount * ((OVERLAY_LANE_HEIGHT_DP + OVERLAY_LANE_GAP_DP) * density)
-        val lanesTopPx = mainTrackBottomPx + (LANES_PADDING_TOP_DP * density) + overlayZoneHeightPx
+
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY 6: Feature Lanes (below Row E)
+        // -----------------------------------------------------------------------------------------
+        val lanesTopPx = rowEBottomPx + (LANES_PADDING_TOP_DP * density)
         val laneHeightPx = laneHeightDp * density
         if (tapY >= lanesTopPx && snapshot.lanes.isNotEmpty()) {
             val relativeY = tapY - lanesTopPx
@@ -410,4 +595,3 @@ object TimelineHitTester {
         return TimelineSelection.None
     }
 }
-

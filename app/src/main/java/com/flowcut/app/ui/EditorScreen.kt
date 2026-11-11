@@ -48,6 +48,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,7 +58,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.StrokeCap
 import kotlin.math.roundToInt
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -66,6 +71,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.io.File
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -95,6 +101,7 @@ import com.flowcut.app.model.Project
 import com.flowcut.app.model.Transition
 import com.flowcut.app.model.TransitionType
 import com.flowcut.app.ui.timeline.TimelineCanvas
+import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.ui.timeline.TimelineSelection
 import com.flowcut.app.ui.timeline.TimelineZoomState
 
@@ -360,62 +367,101 @@ fun EditorScreen(
         }
     }
 
-    val imagePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
+    val overlayPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 6)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
-                Toast.makeText(context, "Maximum 6 image overlays reached", Toast.LENGTH_SHORT).show()
-                return@rememberLauncherForActivityResult
+            var addedCount = 0
+            val playheadUs = playbackController.playhead.timeUs
+            for (uri in uris) {
+                val currentOverlayCount = vm.layerItems.count {
+                    it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
+                }
+                if (currentOverlayCount >= 6) {
+                    Toast.makeText(context, "Maximum 6 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+                    break
+                }
+                val mimeType = context.contentResolver.getType(uri) ?: ""
+                val isVideo = mimeType.startsWith("video/")
+                val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
+                val cachePath = copyUriToCacheFile(context, uri, prefix)
+                if (cachePath != null) {
+                    val offsetUs = playheadUs + (addedCount * 500_000L)
+                    if (isVideo) {
+                        vm.addVideoOverlay(cachePath, offsetUs, 3_000_000L)
+                    } else {
+                        vm.addImageOverlay(cachePath, offsetUs, 3_000_000L)
+                    }
+                    addedCount++
+                }
             }
-            val cachePath = copyUriToCacheFile(context, uri, "overlay_img_")
-            if (cachePath != null) {
-                val playheadUs = playbackController.playhead.timeUs
-                vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
+            if (addedCount > 0) {
                 previewRenderer.requestRender()
                 frameDriver.wake()
             }
         }
     }
 
-    val imageFallbackLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
+    val overlayFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
-                Toast.makeText(context, "Maximum 6 image overlays reached", Toast.LENGTH_SHORT).show()
-                return@rememberLauncherForActivityResult
+            var addedCount = 0
+            val playheadUs = playbackController.playhead.timeUs
+            for (uri in uris) {
+                val currentOverlayCount = vm.layerItems.count {
+                    it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
+                }
+                if (currentOverlayCount >= 6) {
+                    Toast.makeText(context, "Maximum 6 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+                    break
+                }
+                val mimeType = context.contentResolver.getType(uri) ?: ""
+                val isVideo = mimeType.startsWith("video/")
+                val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
+                val cachePath = copyUriToCacheFile(context, uri, prefix)
+                if (cachePath != null) {
+                    val offsetUs = playheadUs + (addedCount * 500_000L)
+                    if (isVideo) {
+                        vm.addVideoOverlay(cachePath, offsetUs, 3_000_000L)
+                    } else {
+                        vm.addImageOverlay(cachePath, offsetUs, 3_000_000L)
+                    }
+                    addedCount++
+                }
             }
-            val cachePath = copyUriToCacheFile(context, uri, "overlay_img_")
-            if (cachePath != null) {
-                val playheadUs = playbackController.playhead.timeUs
-                vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
+            if (addedCount > 0) {
                 previewRenderer.requestRender()
                 frameDriver.wake()
             }
         }
     }
 
-    val openImagePicker: () -> Unit = {
+    val openOverlayPicker: () -> Unit = {
         val vm = resolvedViewModel
-        if (vm != null && !com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
-            Toast.makeText(context, "Maximum 6 image overlays reached", Toast.LENGTH_SHORT).show()
+        val currentOverlayCount = vm?.layerItems?.count {
+            it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
+        } ?: 0
+        if (currentOverlayCount >= 6) {
+            Toast.makeText(context, "Maximum 6 photo/video overlays reached", Toast.LENGTH_SHORT).show()
         } else {
             try {
-                imagePickerLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                overlayPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                 )
             } catch (_: Exception) {
                 try {
-                    imageFallbackLauncher.launch("image/*")
+                    overlayFallbackLauncher.launch("*/*")
                 } catch (_: Exception) {
-                    Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Cannot open media picker", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
+
+    val openImagePicker: () -> Unit = openOverlayPicker
 
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
@@ -456,9 +502,66 @@ fun EditorScreen(
     var isBackgroundSheetVisible by remember { mutableStateOf(false) }
     var isOpacitySheetVisible by remember { mutableStateOf(false) }
     var isTextSheetVisible by remember { mutableStateOf(false) }
+    var isTextToolbarActive by remember { mutableStateOf(false) }
+    var trimTargetClipIndex by remember { mutableIntStateOf(-1) }
     var editingTextOverlayId by remember { mutableStateOf<String?>(null) }
     var isNewTextOverlay by remember { mutableStateOf(false) }
     var isStickerSheetVisible by remember { mutableStateOf(false) }
+    var isTextColorSheetVisible by remember { mutableStateOf(false) }
+    var isTextFontSheetVisible by remember { mutableStateOf(false) }
+    var isTextAnimationSheetVisible by remember { mutableStateOf(false) }
+    var isTextAdjustSheetVisible by remember { mutableStateOf(false) }
+    var activeTextOverlayId by remember { mutableStateOf<String?>(null) }
+    var customFontPaths by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        val fontsDir = File(context.filesDir, "fonts")
+        if (fontsDir.exists() && fontsDir.isDirectory) {
+            val files = fontsDir.listFiles { f -> f.extension.equals("ttf", true) || f.extension.equals("otf", true) }
+            if (files != null) {
+                customFontPaths = files.map { it.absolutePath }
+            }
+        }
+    }
+
+    val fontPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val extension = uri.path?.substringAfterLast('.', "")?.lowercase() ?: ""
+            val ext = if (extension == "otf") ".otf" else ".ttf"
+            val fontsDir = File(context.filesDir, "fonts").apply { mkdirs() }
+            val fontFile = File(fontsDir, "font_${System.currentTimeMillis()}$ext")
+            try {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    fontFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                if (fontFile.exists() && fontFile.length() > 0) {
+                    customFontPaths = customFontPaths + fontFile.absolutePath
+                    val targetId = activeTextOverlayId
+                    if (targetId != null) {
+                        resolvedViewModel?.updateTextFont(targetId, "Custom", fontFile.absolutePath)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    }
+                    Toast.makeText(context, "Imported font: ${fontFile.nameWithoutExtension}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Failed to load font: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val resolveTextOverlayOrToast: () -> com.flowcut.app.engine.OverlayItem? = {
+        val playheadUs = playbackController.playhead.timeUs
+        val item = resolvedViewModel?.getOrResolveTextOverlayAt(playheadUs)
+        if (item == null) {
+            Toast.makeText(context, "No text layer at playhead", Toast.LENGTH_SHORT).show()
+        }
+        item
+    }
 
     val handleOpenText: () -> Unit = {
         val vm = resolvedViewModel
@@ -472,7 +575,7 @@ fun EditorScreen(
                     onPlaybackStateChange(false)
                 }
                 val playheadUs = playbackController.playhead.timeUs
-                val newItem = vm.addTextOverlay("Your Text", 0xFFFFFFFF.toInt(), 0, playheadUs, 3_000_000L)
+                val newItem = vm.addTextOverlay("", 0xFFFFFFFF.toInt(), 0, playheadUs, 3_000_000L)
                 if (newItem != null) {
                     isNewTextOverlay = true
                     editingTextOverlayId = newItem.id
@@ -484,6 +587,7 @@ fun EditorScreen(
                     isTrimSheetVisible = false
                     isStickerSheetVisible = false
                     isTextSheetVisible = true
+                    isTextToolbarActive = true
                     previewRenderer.requestRender()
                     frameDriver.wake()
                 }
@@ -515,24 +619,13 @@ fun EditorScreen(
     }
 
     val handleOpenTrim: () -> Unit = {
-        var targetIdx = selectedClipIndex
-        if (targetIdx == null) {
-            val playheadMs = usToMs(playbackController.playhead.timeUs)
-            val main = snapshotHolder.current.main
-            for (i in 0 until main.n) {
-                if (playheadMs >= main.startMs[i] && playheadMs < main.endMs[i]) {
-                    targetIdx = i
-                    onSelectClip(i)
-                    break
-                }
-            }
-        }
-        if (targetIdx != null && targetIdx in 0 until snapshotHolder.current.main.n) {
+        if (hasClips) {
             if (playbackController.playhead.mode == PlayMode.PLAYING) {
                 playbackController.pause()
                 frameDriver.wake()
                 onPlaybackStateChange(false)
             }
+            trimTargetClipIndex = selectedClipIndex ?: -1
             isVolumeSheetVisible = false
             isSpeedSheetVisible = false
             isAdjustSheetVisible = false
@@ -540,7 +633,7 @@ fun EditorScreen(
             isOpacitySheetVisible = false
             isTrimSheetVisible = true
         } else {
-            Toast.makeText(context, "No clip selected or under playhead", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "No clips in project", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1049,6 +1142,79 @@ fun EditorScreen(
                                             var currentTransform = initialTransform
                                             var totalMovedPx = 0f
 
+                                            val outerW = size.width.toFloat().coerceAtLeast(1f)
+                                            val outerH = size.height.toFloat().coerceAtLeast(1f)
+                                            val previewH = outerH
+                                            val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+                                            val previewLeft = (outerW - previewW) / 2f
+
+                                            // Calculate aspect-correct overlay dimensions and center in outer gesture coordinates
+                                            val displayText = if (activeOverlay.text.isBlank()) "Your Text" else activeOverlay.text
+                                            val aTex: Float = when (activeOverlay.type) {
+                                                com.flowcut.app.engine.LayerType.STICKER -> 1.0f
+                                                com.flowcut.app.engine.LayerType.TEXT -> {
+                                                    val lines = displayText.split("\n")
+                                                    val maxLen = lines.maxOfOrNull { it.length } ?: 6
+                                                    val lineCount = lines.size.coerceAtLeast(1)
+                                                    (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
+                                                }
+                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> 1.0f
+                                                else -> 1.0f
+                                            }
+                                            val aScreen = 9.0f / 16.0f
+                                            var hwInit = 0.6f
+                                            var hhInit = hwInit / aTex
+                                            if (hhInit * aScreen > 0.6f) {
+                                                val factor = 0.6f / (hhInit * aScreen)
+                                                hwInit *= factor
+                                                hhInit *= factor
+                                            }
+                                            val rawQuadW = hwInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
+                                            val rawQuadH = hhInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
+                                            val padPx = 12.dp.toPx()
+                                            val minWPx = 96.dp.toPx()
+                                            val minHPx = 64.dp.toPx()
+                                            val initBoxW = (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
+                                            val initBoxH = (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val cx_outer = previewLeft + previewW / 2f + initialTransform.panX * previewW
+                                            val cy_outer = previewH / 2f - initialTransform.panY * previewH
+
+                                            // Calculate handle badge positions rotated around center (cx_outer, cy_outer)
+                                            val rad = Math.toRadians(initialTransform.rotationDeg.toDouble())
+                                            val cosR = kotlin.math.cos(rad).toFloat()
+                                            val sinR = kotlin.math.sin(rad).toFloat()
+
+                                            fun toOuterPos(dx: Float, dy: Float): Offset {
+                                                val rotX = dx * cosR - dy * sinR
+                                                val rotY = dx * sinR + dy * cosR
+                                                return Offset(cx_outer + rotX, cy_outer + rotY)
+                                            }
+
+                                            val tlPos = toOuterPos(-initBoxW / 2f, -initBoxH / 2f)
+                                            val trPos = toOuterPos(initBoxW / 2f, -initBoxH / 2f)
+                                            val blPos = toOuterPos(-initBoxW / 2f, initBoxH / 2f)
+                                            val brPos = toOuterPos(initBoxW / 2f, initBoxH / 2f)
+                                            val rmPos = toOuterPos(initBoxW / 2f, 0f)
+
+                                            val hitRadius = 28.dp.toPx()
+                                            val distTL = (downPos - tlPos).getDistance()
+                                            val distTR = (downPos - trPos).getDistance()
+                                            val distBL = (downPos - blPos).getDistance()
+                                            val distBR = (downPos - brPos).getDistance()
+                                            val distRM = (downPos - rmPos).getDistance()
+
+                                            // Determine active handle mode:
+                                            // 1: Top-Left Delete, 2: Top-Right Edit (Text only), 3: Bottom-Left Copy,
+                                            // 4: Bottom-Right Scale/Rotate, 5: Right Midpoint Scale, 0: Normal Body
+                                            val activeHandle = when {
+                                                distTL <= hitRadius -> 1
+                                                activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT && distTR <= hitRadius -> 2
+                                                distBL <= hitRadius -> 3
+                                                distBR <= hitRadius -> 4
+                                                distRM <= hitRadius -> 5
+                                                else -> 0
+                                            }
+
                                             var prevSnapCenterX = false
                                             var prevSnapCenterY = false
                                             var prevSnapEdgeLeft = false
@@ -1063,11 +1229,6 @@ fun EditorScreen(
                                                 val pressedList = event.changes.filter { it.pressed }
                                                 if (pressedList.isEmpty()) break
 
-                                                val outerW = size.width.toFloat().coerceAtLeast(1f)
-                                                val outerH = size.height.toFloat().coerceAtLeast(1f)
-                                                val previewH = outerH
-                                                val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
-
                                                 if (pressedList.size == 1) {
                                                     val p = pressedList[0]
                                                     val dx = p.position.x - p.previousPosition.x
@@ -1075,14 +1236,62 @@ fun EditorScreen(
                                                     val moveDist = kotlin.math.sqrt(dx * dx + dy * dy)
                                                     totalMovedPx += moveDist
 
-                                                    if (totalMovedPx > 10f) {
-                                                        isDragOrTransform = true
-                                                        p.consume()
+                                                    when (activeHandle) {
+                                                        4 -> { // BOTTOM_RIGHT_SCALE_ROTATE: 1-finger simultaneous scale & rotate!
+                                                            if (totalMovedPx > 4f) {
+                                                                isDragOrTransform = true
+                                                                p.consume()
 
-                                                        rawPanX = (rawPanX + dx / previewW).coerceIn(-1.5f, 1.5f)
-                                                        rawPanY = (rawPanY - dy / previewH).coerceIn(-1.5f, 1.5f)
+                                                                val prevPos = p.previousPosition
+                                                                val currPos = p.position
+                                                                val centerOffset = Offset(cx_outer, cy_outer)
+                                                                val prevDist = (prevPos - centerOffset).getDistance()
+                                                                val currDist = (currPos - centerOffset).getDistance()
+                                                                if (prevDist > 1f && currDist > 1f) {
+                                                                    val scaleRatio = currDist / prevDist
+                                                                    rawScale = (rawScale * scaleRatio).coerceIn(0.2f, 8.0f)
+                                                                }
+
+                                                                val prevAngle = Math.toDegrees(kotlin.math.atan2((prevPos.y - cy_outer).toDouble(), (prevPos.x - cx_outer).toDouble())).toFloat()
+                                                                val currAngle = Math.toDegrees(kotlin.math.atan2((currPos.y - cy_outer).toDouble(), (currPos.x - cx_outer).toDouble())).toFloat()
+                                                                var angleDelta = currAngle - prevAngle
+                                                                while (angleDelta > 180f) angleDelta -= 360f
+                                                                while (angleDelta < -180f) angleDelta += 360f
+                                                                rawRotationDeg += angleDelta
+                                                            }
+                                                        }
+                                                        5 -> { // RIGHT_MID_SCALE: 1-finger uniform scaling
+                                                            if (totalMovedPx > 4f) {
+                                                                isDragOrTransform = true
+                                                                p.consume()
+
+                                                                val prevPos = p.previousPosition
+                                                                val currPos = p.position
+                                                                val centerOffset = Offset(cx_outer, cy_outer)
+                                                                val prevDist = (prevPos - centerOffset).getDistance()
+                                                                val currDist = (currPos - centerOffset).getDistance()
+                                                                if (prevDist > 1f && currDist > 1f) {
+                                                                    val scaleRatio = currDist / prevDist
+                                                                    rawScale = (rawScale * scaleRatio).coerceIn(0.2f, 8.0f)
+                                                                }
+                                                            }
+                                                        }
+                                                        1, 2, 3 -> {
+                                                            if (totalMovedPx > 15f) {
+                                                                isDragOrTransform = true
+                                                            }
+                                                        }
+                                                        else -> { // BODY: 1-finger Pan
+                                                            if (totalMovedPx > 10f) {
+                                                                isDragOrTransform = true
+                                                                p.consume()
+
+                                                                rawPanX = (rawPanX + dx / previewW).coerceIn(-1.5f, 1.5f)
+                                                                rawPanY = (rawPanY - dy / previewH).coerceIn(-1.5f, 1.5f)
+                                                            }
+                                                        }
                                                     }
-                                                } else if (pressedList.size >= 2) {
+                                                } else if (pressedList.size >= 2 && activeHandle == 0) {
                                                     isDragOrTransform = true
                                                     val p1 = pressedList[0]
                                                     val p2 = pressedList[1]
@@ -1116,7 +1325,7 @@ fun EditorScreen(
                                                     rawRotationDeg += angleDelta
                                                 }
 
-                                                if (isDragOrTransform) {
+                                                if (isDragOrTransform && (activeHandle == 0 || activeHandle == 4 || activeHandle == 5)) {
                                                     // --- Compute Snapping from Raw Accumulators ---
                                                     // 1. Rotation Snap
                                                     val normRot = ((rawRotationDeg % 360f) + 360f) % 360f
@@ -1131,13 +1340,7 @@ fun EditorScreen(
                                                     val snappedScale = if (snapScale100) 1.0f else rawScale
 
                                                     // 3. Effective Dimensions for Edge Snapping
-                                                    val aScreen = 9.0f / 16.0f
-                                                    val aClip = 1.0f
-
-                                                    val cardinalAngle = ((Math.round(snappedRotationDeg / 90f) * 90) % 360 + 360) % 360
-                                                    val isRot90or270 = (cardinalAngle == 90 || cardinalAngle == 270) && kotlin.math.abs(snappedRotationDeg - cardinalAngle) < 15f
-                                                    val effAspect = if (isRot90or270) (1.0f / aClip) else aClip
-
+                                                    val effAspect = aTex
                                                     val baseHw = if (effAspect >= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
                                                     val baseHh = if (effAspect >= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
                                                     val hw = baseHw * snappedScale
@@ -1221,6 +1424,10 @@ fun EditorScreen(
                                                     guideBadgeText = when {
                                                         snapRotationCardinal -> "${snappedRotationDeg.toInt()}°"
                                                         snapScale100 -> "100%"
+                                                        activeHandle == 4 && kotlin.math.abs(rawRotationDeg - initialTransform.rotationDeg) > 1.5f ->
+                                                            "${Math.round(snappedRotationDeg)}°"
+                                                        (activeHandle == 4 || activeHandle == 5) && kotlin.math.abs(rawScale - initialTransform.scale) > 0.03f ->
+                                                            "${Math.round(snappedScale * 100f)}%"
                                                         pressedList.size >= 2 && kotlin.math.abs(rawRotationDeg - initialTransform.rotationDeg) > 1.5f ->
                                                             "${Math.round(snappedRotationDeg)}°"
                                                         pressedList.size >= 2 && kotlin.math.abs(rawScale - initialTransform.scale) > 0.03f ->
@@ -1253,30 +1460,59 @@ fun EditorScreen(
 
                                             // Gesture completed (all fingers up)
                                             if (isDragOrTransform) {
-                                                resolvedViewModel?.commitOverlayTransform(activeOverlayId, currentTransform)
-                                                previewRenderer.requestRender()
-                                                frameDriver.wake()
-                                            } else {
-                                                // Check for double-tap
-                                                val upTime = System.currentTimeMillis()
-                                                val tapDuration = upTime - downTime
-                                                val tapDist = (downPos - lastTapPosition).getDistance()
-
-                                                if (tapDuration < 300L && (upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
-                                                    // Double-tap detected: reset transform!
-                                                    val resetTransform = currentTransform.copy(
-                                                        scale = 1.0f,
-                                                        panX = 0f,
-                                                        panY = 0f,
-                                                        rotationDeg = 0f
-                                                    )
-                                                    resolvedViewModel?.commitOverlayTransform(activeOverlayId, resetTransform)
+                                                if (activeHandle == 0 || activeHandle == 4 || activeHandle == 5) {
+                                                    resolvedViewModel?.commitOverlayTransform(activeOverlayId, currentTransform)
                                                     previewRenderer.requestRender()
                                                     frameDriver.wake()
-                                                    lastTapTimeMs = 0L
-                                                } else if (tapDuration < 300L) {
-                                                    lastTapTimeMs = upTime
-                                                    lastTapPosition = downPos
+                                                }
+                                            } else {
+                                                val upTime = System.currentTimeMillis()
+                                                val tapDuration = upTime - downTime
+                                                if (tapDuration < 400L) {
+                                                    when (activeHandle) {
+                                                        1 -> { // Top-Left: Delete Overlay
+                                                            try {
+                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                            } catch (_: Throwable) {}
+                                                            resolvedViewModel?.deleteSelectedOverlay()
+                                                            previewRenderer.requestRender()
+                                                            frameDriver.wake()
+                                                        }
+                                                        2 -> { // Top-Right: Edit Text Overlay
+                                                            try {
+                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                            } catch (_: Throwable) {}
+                                                            editingTextOverlayId = activeOverlayId
+                                                            isNewTextOverlay = false
+                                                            isTextSheetVisible = true
+                                                        }
+                                                        3 -> { // Bottom-Left: Duplicate / Copy Overlay
+                                                            try {
+                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                            } catch (_: Throwable) {}
+                                                            resolvedViewModel?.copySelectedOverlay()
+                                                            previewRenderer.requestRender()
+                                                            frameDriver.wake()
+                                                        }
+                                                        else -> { // Double-tap on Body resets transform
+                                                            val tapDist = (downPos - lastTapPosition).getDistance()
+                                                            if ((upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
+                                                                val resetTransform = currentTransform.copy(
+                                                                    scale = 1.0f,
+                                                                    panX = 0f,
+                                                                    panY = 0f,
+                                                                    rotationDeg = 0f
+                                                                )
+                                                                resolvedViewModel?.commitOverlayTransform(activeOverlayId, resetTransform)
+                                                                previewRenderer.requestRender()
+                                                                frameDriver.wake()
+                                                                lastTapTimeMs = 0L
+                                                            } else {
+                                                                lastTapTimeMs = upTime
+                                                                lastTapPosition = downPos
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1289,6 +1525,203 @@ fun EditorScreen(
                                         .aspectRatio(9f / 16f)
                                         .align(Alignment.Center)
                                 ) {
+                                    // Interactive CapCut-Style Selection Frame + 5 Action Badges around Selected Overlay
+                                    Canvas(modifier = Modifier.fillMaxSize()) {
+                                        val selOverlay = activeOverlay
+                                        val displayText = if (selOverlay.text.isBlank()) "Your Text" else selOverlay.text
+                                        val aTex: Float = when (selOverlay.type) {
+                                                com.flowcut.app.engine.LayerType.STICKER -> 1.0f
+                                                com.flowcut.app.engine.LayerType.TEXT -> {
+                                                    val lines = displayText.split("\n")
+                                                    val maxLen = lines.maxOfOrNull { it.length } ?: 6
+                                                    val lineCount = lines.size.coerceAtLeast(1)
+                                                    (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
+                                                }
+                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> 1.0f
+                                                else -> 1.0f
+                                            }
+
+                                            val aScreen = 9.0f / 16.0f
+                                            var hw = 0.6f
+                                            var hh = hw / aTex
+                                            if (hh * aScreen > 0.6f) {
+                                                val factor = 0.6f / (hh * aScreen)
+                                                hw *= factor
+                                                hh *= factor
+                                            }
+
+                                            val scale = selOverlay.transform.scale.coerceIn(0.01f, 10.0f)
+                                            val rawQuadW = hw * scale * size.width
+                                            val rawQuadH = hh * scale * size.width
+                                            val padPx = 12.dp.toPx()
+                                            val minWPx = 96.dp.toPx()
+                                            val minHPx = 64.dp.toPx()
+                                            val boxW = (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
+                                            val boxH = (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+
+                                            val cx = size.width / 2f + selOverlay.transform.panX * size.width
+                                            val cy = size.height / 2f - selOverlay.transform.panY * size.height
+
+                                            withTransform({
+                                                rotate(selOverlay.transform.rotationDeg, pivot = Offset(cx, cy))
+                                            }) {
+                                                val left = cx - boxW / 2f
+                                                val top = cy - boxH / 2f
+                                                val strokeWidth = 1.5.dp.toPx()
+                                                val cornerBadgeRadius = 12.dp.toPx()
+                                                val midDotRadius = 7.dp.toPx()
+
+                                                // 1.5.dp White stroke bounding frame (guaranteed >= 96.dp x 64.dp)
+                                                drawRect(
+                                                    color = Color.White,
+                                                    topLeft = Offset(left, top),
+                                                    size = Size(boxW, boxH),
+                                                    style = Stroke(width = strokeWidth)
+                                                )
+
+                                                // 1. Top-Left: Delete Button (✕) - Dark circle + white outline + white ✕
+                                                val topLeftCenter = Offset(left, top)
+                                                drawCircle(
+                                                    color = Color(0xFF1E1E24),
+                                                    radius = cornerBadgeRadius,
+                                                    center = topLeftCenter
+                                                )
+                                                drawCircle(
+                                                    color = Color.White,
+                                                    radius = cornerBadgeRadius,
+                                                    center = topLeftCenter,
+                                                    style = Stroke(width = 1.5.dp.toPx())
+                                                )
+                                                val crossSpan = 4.dp.toPx()
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = topLeftCenter + Offset(-crossSpan, -crossSpan),
+                                                    end = topLeftCenter + Offset(crossSpan, crossSpan),
+                                                    strokeWidth = 2.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = topLeftCenter + Offset(crossSpan, -crossSpan),
+                                                    end = topLeftCenter + Offset(-crossSpan, crossSpan),
+                                                    strokeWidth = 2.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+
+                                                // 2. Top-Right: Edit Button (✎ Pencil) - Pink circle + white pencil (Text overlays only)
+                                                val topRightCenter = Offset(left + boxW, top)
+                                                if (selOverlay.type == com.flowcut.app.engine.LayerType.TEXT) {
+                                                    drawCircle(
+                                                        color = Color(0xFFFF2D55),
+                                                        radius = cornerBadgeRadius,
+                                                        center = topRightCenter
+                                                    )
+                                                    // White diagonal pencil icon
+                                                    drawLine(
+                                                        color = Color.White,
+                                                        start = topRightCenter + Offset(-4.dp.toPx(), 4.dp.toPx()),
+                                                        end = topRightCenter + Offset(3.5.dp.toPx(), -3.5.dp.toPx()),
+                                                        strokeWidth = 2.5.dp.toPx(),
+                                                        cap = StrokeCap.Round
+                                                    )
+                                                    drawLine(
+                                                        color = Color.White,
+                                                        start = topRightCenter + Offset(-4.dp.toPx(), 4.dp.toPx()),
+                                                        end = topRightCenter + Offset(-5.dp.toPx(), 5.dp.toPx()),
+                                                        strokeWidth = 1.5.dp.toPx(),
+                                                        cap = StrokeCap.Round
+                                                    )
+                                                }
+
+                                                // 3. Bottom-Left: Duplicate / Copy Button (❐) - Pink circle + overlapping squares
+                                                val bottomLeftCenter = Offset(left, top + boxH)
+                                                drawCircle(
+                                                    color = Color(0xFFFF2D55),
+                                                    radius = cornerBadgeRadius,
+                                                    center = bottomLeftCenter
+                                                )
+                                                val sqSize = 6.dp.toPx()
+                                                drawRect(
+                                                    color = Color.White,
+                                                    topLeft = bottomLeftCenter + Offset(-2.dp.toPx(), -5.dp.toPx()),
+                                                    size = Size(sqSize, sqSize),
+                                                    style = Stroke(width = 1.2.dp.toPx())
+                                                )
+                                                drawRect(
+                                                    color = Color(0xFFFF2D55),
+                                                    topLeft = bottomLeftCenter + Offset(-5.dp.toPx(), -2.dp.toPx()),
+                                                    size = Size(sqSize, sqSize)
+                                                )
+                                                drawRect(
+                                                    color = Color.White,
+                                                    topLeft = bottomLeftCenter + Offset(-5.dp.toPx(), -2.dp.toPx()),
+                                                    size = Size(sqSize, sqSize),
+                                                    style = Stroke(width = 1.2.dp.toPx())
+                                                )
+
+                                                // 4. Bottom-Right: 1-Finger Scale & Rotate Handle (⤡) - Pink circle + diagonal double arrow
+                                                val bottomRightCenter = Offset(left + boxW, top + boxH)
+                                                drawCircle(
+                                                    color = Color(0xFFFF2D55),
+                                                    radius = cornerBadgeRadius,
+                                                    center = bottomRightCenter
+                                                )
+                                                val arrowSpan = 5.dp.toPx()
+                                                val arrowHead = 2.5.dp.toPx()
+                                                // Diagonal line shaft
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = bottomRightCenter + Offset(-arrowSpan, -arrowSpan),
+                                                    end = bottomRightCenter + Offset(arrowSpan, arrowSpan),
+                                                    strokeWidth = 1.8.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+                                                // Top-left arrowhead
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = bottomRightCenter + Offset(-arrowSpan, -arrowSpan),
+                                                    end = bottomRightCenter + Offset(-arrowSpan + arrowHead, -arrowSpan),
+                                                    strokeWidth = 1.8.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = bottomRightCenter + Offset(-arrowSpan, -arrowSpan),
+                                                    end = bottomRightCenter + Offset(-arrowSpan, -arrowSpan + arrowHead),
+                                                    strokeWidth = 1.8.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+                                                // Bottom-right arrowhead
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = bottomRightCenter + Offset(arrowSpan, arrowSpan),
+                                                    end = bottomRightCenter + Offset(arrowSpan - arrowHead, arrowSpan),
+                                                    strokeWidth = 1.8.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = bottomRightCenter + Offset(arrowSpan, arrowSpan),
+                                                    end = bottomRightCenter + Offset(arrowSpan, arrowSpan - arrowHead),
+                                                    strokeWidth = 1.8.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+
+                                                // 5. Right Edge Midpoint: Pink Handle Dot - Solid pink circle
+                                                val rightMidCenter = Offset(left + boxW, top + boxH / 2f)
+                                                drawCircle(
+                                                    color = Color(0xFFFF2D55),
+                                                    radius = midDotRadius,
+                                                    center = rightMidCenter
+                                                )
+                                                drawCircle(
+                                                    color = Color.White.copy(alpha = 0.5f),
+                                                    radius = midDotRadius,
+                                                    center = rightMidCenter,
+                                                    style = Stroke(width = 1.dp.toPx())
+                                                )
+                                            }
+                                        }
                                     if (isTransforming) {
                                         Canvas(modifier = Modifier.fillMaxSize()) {
                                             val strokeWidth1_5 = 1.5.dp.toPx()
@@ -1489,8 +1922,12 @@ fun EditorScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // 4. Timeline block: 240 dp (New Core TimelineCanvas or legacy TimelineBlock)
+                // 4. Timeline block: dynamic height (New Core TimelineCanvas or legacy TimelineBlock)
                 if (USE_NEW_CORE) {
+                    val currentFocus = vmUiState?.focusMode ?: TimelineFocusState.S0_NONE
+                    val isPipExpanded = currentFocus is TimelineFocusState.S1_PIP_GROUP || currentFocus is TimelineFocusState.S2_PIP_ITEM
+                    val timelineHeight = if (isPipExpanded) 280.dp else 240.dp
+
                     val selection = remember(selectedClipIndex, selectedJunctionIndex, vmUiState?.selectedOverlayId) {
                         selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
                             ?: selectedJunctionIndex?.let { TimelineSelection.JunctionSelected(it) }
@@ -1500,7 +1937,7 @@ fun EditorScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(240.dp)
+                            .height(timelineHeight)
                             .background(colors.surface1, RoundedCornerShape(8.dp))
                     ) {
                         TimelineCanvas(
@@ -1510,6 +1947,7 @@ fun EditorScreen(
                             zoomState = zoomState,
                             frameTick = frameTick,
                             selection = selection,
+                            focusMode = currentFocus,
                             overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
                             onSelect = { sel ->
                                 when (sel) {
@@ -1517,6 +1955,18 @@ fun EditorScreen(
                                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
                                     is TimelineSelection.OverlaySelected -> {
                                         resolvedViewModel?.selectOverlay(sel.itemId)
+                                    }
+                                    TimelineSelection.PipGroupClicked -> {
+                                        resolvedViewModel?.setFocusMode(TimelineFocusState.S1_PIP_GROUP)
+                                    }
+                                    TimelineSelection.CoverClicked -> {
+                                        resolvedViewModel?.showToast("Cover selected")
+                                    }
+                                    TimelineSelection.AddClipClicked -> {
+                                        onAddClipsClick()
+                                    }
+                                    TimelineSelection.AudioGroupClicked -> {
+                                        resolvedViewModel?.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
                                     }
                                     TimelineSelection.None -> onDeselectAll()
                                     is TimelineSelection.LaneItemSelected -> {}
@@ -1583,6 +2033,7 @@ fun EditorScreen(
                             onWakeFrameDriver = { frameDriver.wake() },
                             isMainTrackMuted = isMainTrackMuted,
                             onToggleTrackMute = { resolvedViewModel?.toggleTrackMute() },
+                            onToast = { resolvedViewModel?.showToast(it) },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -1623,8 +2074,17 @@ fun EditorScreen(
                 isClipSelected = selectedClipIndex != null,
                 isOverlaySelected = vmUiState?.selectedOverlayId != null,
                 isTextOverlaySelected = isTextOverlay,
+                isTextToolbarActive = isTextToolbarActive,
                 onSplitClick = onSplitClick ?: {
-                    if (vmUiState?.selectedOverlayId != null) {
+                    if (isTextToolbarActive) {
+                        val textItem = resolveTextOverlayOrToast()
+                        if (textItem != null) {
+                            val playheadUs = playbackController.playhead.timeUs
+                            resolvedViewModel?.splitOverlay(textItem.id, playheadUs)
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    } else if (vmUiState?.selectedOverlayId != null) {
                         val playheadUs = playbackController.playhead.timeUs
                         resolvedViewModel?.splitSelectedOverlayAtPlayhead(playheadUs)
                         previewRenderer.requestRender()
@@ -1649,12 +2109,29 @@ fun EditorScreen(
                         frameDriver.wake()
                         onPlaybackStateChange(false)
                     }
-                    isVolumeSheetVisible = false
-                    isSpeedSheetVisible = false
-                    isBackgroundSheetVisible = false
-                    isTrimSheetVisible = false
-                    isOpacitySheetVisible = false
-                    isAdjustSheetVisible = true
+                    if (isTextToolbarActive) {
+                        val textItem = resolveTextOverlayOrToast()
+                        if (textItem != null) {
+                            activeTextOverlayId = textItem.id
+                            isVolumeSheetVisible = false
+                            isSpeedSheetVisible = false
+                            isAdjustSheetVisible = false
+                            isBackgroundSheetVisible = false
+                            isTrimSheetVisible = false
+                            isOpacitySheetVisible = false
+                            isTextColorSheetVisible = false
+                            isTextFontSheetVisible = false
+                            isTextAnimationSheetVisible = false
+                            isTextAdjustSheetVisible = true
+                        }
+                    } else {
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isAdjustSheetVisible = true
+                    }
                 },
                 onBackgroundClick = {
                     if (playbackController.playhead.mode == PlayMode.PLAYING) {
@@ -1709,15 +2186,39 @@ fun EditorScreen(
                         frameDriver.wake()
                         onPlaybackStateChange(false)
                     }
-                    isVolumeSheetVisible = false
-                    isSpeedSheetVisible = false
-                    isAdjustSheetVisible = false
-                    isBackgroundSheetVisible = false
-                    isTrimSheetVisible = false
-                    isOpacitySheetVisible = true
+                    if (isTextToolbarActive) {
+                        val textItem = resolveTextOverlayOrToast()
+                        if (textItem != null) {
+                            activeTextOverlayId = textItem.id
+                            isVolumeSheetVisible = false
+                            isSpeedSheetVisible = false
+                            isAdjustSheetVisible = false
+                            isBackgroundSheetVisible = false
+                            isTrimSheetVisible = false
+                            isOpacitySheetVisible = false
+                            isTextColorSheetVisible = false
+                            isTextFontSheetVisible = false
+                            isTextAnimationSheetVisible = false
+                            isTextAdjustSheetVisible = true
+                        }
+                    } else {
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = true
+                    }
                 },
                 onCopyClick = {
-                    if (vmUiState?.selectedOverlayId != null) {
+                    if (isTextToolbarActive) {
+                        val textItem = resolveTextOverlayOrToast()
+                        if (textItem != null) {
+                            resolvedViewModel?.copySelectedOverlay()
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    } else if (vmUiState?.selectedOverlayId != null) {
                         resolvedViewModel?.copySelectedOverlay()
                         previewRenderer.requestRender()
                         frameDriver.wake()
@@ -1752,7 +2253,16 @@ fun EditorScreen(
                         }
                     }
                 },
-                onDeleteClipClick = if (vmUiState?.selectedOverlayId != null) {
+                onDeleteClipClick = if (isTextToolbarActive) {
+                    {
+                        val textItem = resolveTextOverlayOrToast()
+                        if (textItem != null) {
+                            resolvedViewModel?.removeLayerItem(textItem.id)
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    }
+                } else if (vmUiState?.selectedOverlayId != null) {
                     {
                         resolvedViewModel?.deleteSelectedOverlay()
                         previewRenderer.requestRender()
@@ -1769,19 +2279,104 @@ fun EditorScreen(
                         }
                     }
                 },
-                onClearSelection = onDeselectAll,
+                onClearSelection = {
+                    isTextToolbarActive = false
+                    onDeselectAll()
+                },
                 onLockedItemClick = {
                     Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
                 },
-                onTextClick = handleOpenText,
+                onTextClick = {
+                    isTextToolbarActive = true
+                },
+                onAddTextClick = handleOpenText,
                 onStickerClick = handleOpenSticker,
-                onImageClick = openImagePicker,
+                onImageClick = openOverlayPicker,
+                onOverlayClick = openOverlayPicker,
                 onEditTextOverlayClick = {
-                    val selId = vmUiState?.selectedOverlayId
-                    if (selId != null) {
+                    val textItem = resolveTextOverlayOrToast()
+                    if (textItem != null) {
+                        if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                            playbackController.pause()
+                            frameDriver.wake()
+                            onPlaybackStateChange(false)
+                        }
                         isNewTextOverlay = false
-                        editingTextOverlayId = selId
+                        editingTextOverlayId = textItem.id
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isTextColorSheetVisible = false
+                        isTextFontSheetVisible = false
+                        isTextAnimationSheetVisible = false
+                        isTextAdjustSheetVisible = false
                         isTextSheetVisible = true
+                    }
+                },
+                onFontClick = {
+                    val textItem = resolveTextOverlayOrToast()
+                    if (textItem != null) {
+                        if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                            playbackController.pause()
+                            frameDriver.wake()
+                            onPlaybackStateChange(false)
+                        }
+                        activeTextOverlayId = textItem.id
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isTextColorSheetVisible = false
+                        isTextAnimationSheetVisible = false
+                        isTextAdjustSheetVisible = false
+                        isTextFontSheetVisible = true
+                    }
+                },
+                onColorClick = {
+                    val textItem = resolveTextOverlayOrToast()
+                    if (textItem != null) {
+                        if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                            playbackController.pause()
+                            frameDriver.wake()
+                            onPlaybackStateChange(false)
+                        }
+                        activeTextOverlayId = textItem.id
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isTextFontSheetVisible = false
+                        isTextAnimationSheetVisible = false
+                        isTextAdjustSheetVisible = false
+                        isTextColorSheetVisible = true
+                    }
+                },
+                onAnimationClick = {
+                    val textItem = resolveTextOverlayOrToast()
+                    if (textItem != null) {
+                        if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                            playbackController.pause()
+                            frameDriver.wake()
+                            onPlaybackStateChange(false)
+                        }
+                        activeTextOverlayId = textItem.id
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isTextColorSheetVisible = false
+                        isTextFontSheetVisible = false
+                        isTextAdjustSheetVisible = false
+                        isTextAnimationSheetVisible = true
                     }
                 }
             )
@@ -1816,10 +2411,11 @@ fun EditorScreen(
             )
         }
 
-        // Trim BottomSheet / Panel for selected clip
-        if (isTrimSheetVisible && selectedClipIndex != null) {
+        // Trim BottomSheet / Panel for selected clip OR global timeline trim
+        if (isTrimSheetVisible) {
+            val activeTrimIndex = trimTargetClipIndex
             TrimSheet(
-                clipIndex = selectedClipIndex,
+                clipIndex = activeTrimIndex,
                 snapshotHolder = snapshotHolder,
                 previewRenderer = previewRenderer,
                 frameDriver = frameDriver,
@@ -1851,6 +2447,14 @@ fun EditorScreen(
                         snapshotHolder.current = vm.getSnapshot()
                         frameDriver.wake()
                     }
+                },
+                onCommitGlobalTrim = { startUs, endUs ->
+                    resolvedViewModel?.commitGlobalTimelineTrim(startUs, endUs)
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                    }
+                    previewRenderer.requestRender()
                 },
                 onDismiss = {
                     isTrimSheetVisible = false
@@ -2172,11 +2776,7 @@ fun EditorScreen(
                         frameDriver.wake()
                     },
                     onDone = { txt, col, sty ->
-                        if (txt.isBlank()) {
-                            resolvedViewModel?.removeLayerItem(targetId)
-                        } else {
-                            resolvedViewModel?.updateTextOverlay(targetId, txt, col, sty)
-                        }
+                        resolvedViewModel?.updateTextOverlay(targetId, txt, col, sty)
                         previewRenderer.requestRender()
                         frameDriver.wake()
                         isTextSheetVisible = false
@@ -2219,6 +2819,198 @@ fun EditorScreen(
                 },
                 onDismiss = { isStickerSheetVisible = false }
             )
+        }
+
+        // Text Color BottomSheet (Phase 3 Typography Suite)
+        if (isTextColorSheetVisible && activeTextOverlayId != null) {
+            val targetId = activeTextOverlayId!!
+            val textItem = resolvedViewModel?.getOverlayItem(targetId)
+            if (textItem != null) {
+                val origTextColor = remember(targetId) { textItem.textColorArgb }
+                val origTextAlpha = remember(targetId) { textItem.textAlpha }
+                val origLabelColor = remember(targetId) { textItem.labelColorArgb }
+                val origLabelAlpha = remember(targetId) { textItem.labelAlpha }
+                val origBorderColor = remember(targetId) { textItem.borderColorArgb }
+                val origBorderAlpha = remember(targetId) { textItem.borderAlpha }
+                val origShadowColor = remember(targetId) { textItem.shadowColorArgb }
+                val origShadowAlpha = remember(targetId) { textItem.shadowAlpha }
+
+                TextColorSheet(
+                    initialTextColor = textItem.textColorArgb,
+                    initialTextAlpha = textItem.textAlpha,
+                    initialLabelColor = textItem.labelColorArgb,
+                    initialLabelAlpha = textItem.labelAlpha,
+                    initialBorderColor = textItem.borderColorArgb,
+                    initialBorderAlpha = textItem.borderAlpha,
+                    initialShadowColor = textItem.shadowColorArgb,
+                    initialShadowAlpha = textItem.shadowAlpha,
+                    onLiveChange = { tc, ta, lc, la, bc, ba, sc, sa ->
+                        resolvedViewModel?.liveUpdateTextColorAndAlpha(targetId, tc, ta, lc, la, bc, ba, sc, sa)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    },
+                    onDone = { tc, ta, lc, la, bc, ba, sc, sa ->
+                        resolvedViewModel?.updateTextColorAndAlpha(targetId, tc, ta, lc, la, bc, ba, sc, sa)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextColorSheetVisible = false
+                        activeTextOverlayId = null
+                    },
+                    onCancel = {
+                        resolvedViewModel?.liveUpdateTextColorAndAlpha(
+                            targetId,
+                            origTextColor, origTextAlpha,
+                            origLabelColor, origLabelAlpha,
+                            origBorderColor, origBorderAlpha,
+                            origShadowColor, origShadowAlpha
+                        )
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextColorSheetVisible = false
+                        activeTextOverlayId = null
+                    }
+                )
+            } else {
+                isTextColorSheetVisible = false
+                activeTextOverlayId = null
+            }
+        }
+
+        // Text Font BottomSheet (Phase 3 Typography Suite)
+        if (isTextFontSheetVisible && activeTextOverlayId != null) {
+            val targetId = activeTextOverlayId!!
+            val textItem = resolvedViewModel?.getOverlayItem(targetId)
+            if (textItem != null) {
+                val origFontName = remember(targetId) { textItem.fontName }
+                val origCustomPath = remember(targetId) { textItem.customFontPath }
+
+                TextFontSheet(
+                    initialFontName = textItem.fontName,
+                    initialCustomFontPath = textItem.customFontPath,
+                    customFonts = customFontPaths,
+                    onPickCustomFont = {
+                        fontPickerLauncher.launch(arrayOf("font/*", "application/x-font-ttf", "application/x-font-otf", "*/*"))
+                    },
+                    onLiveChange = { fontName, customFontPath ->
+                        resolvedViewModel?.updateTextFont(targetId, fontName, customFontPath)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    },
+                    onDone = { fontName, customFontPath ->
+                        resolvedViewModel?.updateTextFont(targetId, fontName, customFontPath)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextFontSheetVisible = false
+                        activeTextOverlayId = null
+                    },
+                    onCancel = {
+                        resolvedViewModel?.updateTextFont(targetId, origFontName, origCustomPath)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextFontSheetVisible = false
+                        activeTextOverlayId = null
+                    }
+                )
+            } else {
+                isTextFontSheetVisible = false
+                activeTextOverlayId = null
+            }
+        }
+
+        // Text Animation BottomSheet (Phase 3 Typography Suite)
+        if (isTextAnimationSheetVisible && activeTextOverlayId != null) {
+            val targetId = activeTextOverlayId!!
+            val textItem = resolvedViewModel?.getOverlayItem(targetId)
+            if (textItem != null) {
+                val origInType = remember(targetId) { textItem.animInType }
+                val origInDur = remember(targetId) { textItem.animInDurationUs }
+                val origOutType = remember(targetId) { textItem.animOutType }
+                val origOutDur = remember(targetId) { textItem.animOutDurationUs }
+                val origLoopType = remember(targetId) { textItem.animLoopType }
+
+                TextAnimationSheet(
+                    initialAnimInType = textItem.animInType,
+                    initialAnimInDurationUs = textItem.animInDurationUs,
+                    initialAnimOutType = textItem.animOutType,
+                    initialAnimOutDurationUs = textItem.animOutDurationUs,
+                    initialAnimLoopType = textItem.animLoopType,
+                    onLiveChange = { inType, inDur, outType, outDur, loopType ->
+                        resolvedViewModel?.liveUpdateTextAnimation(targetId, inType, inDur, outType, outDur, loopType)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    },
+                    onDone = { inType, inDur, outType, outDur, loopType ->
+                        resolvedViewModel?.updateTextAnimation(targetId, inType, inDur, outType, outDur, loopType)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextAnimationSheetVisible = false
+                        activeTextOverlayId = null
+                    },
+                    onCancel = {
+                        resolvedViewModel?.liveUpdateTextAnimation(targetId, origInType, origInDur, origOutType, origOutDur, origLoopType)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextAnimationSheetVisible = false
+                        activeTextOverlayId = null
+                    }
+                )
+            } else {
+                isTextAnimationSheetVisible = false
+                activeTextOverlayId = null
+            }
+        }
+
+        // Text Adjust BottomSheet (Phase 3 Typography Suite)
+        if (isTextAdjustSheetVisible && activeTextOverlayId != null) {
+            val targetId = activeTextOverlayId!!
+            val textItem = resolvedViewModel?.getOverlayItem(targetId)
+            if (textItem != null) {
+                val origAlign = remember(targetId) { textItem.textAlign }
+                val origLetter = remember(targetId) { textItem.letterSpacing }
+                val origLine = remember(targetId) { textItem.lineSpacing }
+                val origAlpha = remember(targetId) { textItem.textAlpha }
+                val origBold = remember(targetId) { textItem.isBold }
+                val origItalic = remember(targetId) { textItem.isItalic }
+                val origUnderline = remember(targetId) { textItem.isUnderline }
+                val origUppercase = remember(targetId) { textItem.isUppercase }
+
+                TextAdjustSheet(
+                    initialTextAlign = textItem.textAlign,
+                    initialLetterSpacing = textItem.letterSpacing,
+                    initialLineSpacing = textItem.lineSpacing,
+                    initialTextAlpha = textItem.textAlpha,
+                    initialIsBold = textItem.isBold,
+                    initialIsItalic = textItem.isItalic,
+                    initialIsUnderline = textItem.isUnderline,
+                    initialIsUppercase = textItem.isUppercase,
+                    onLiveChange = { align, letter, line, alpha, bold, italic, underline, uppercase ->
+                        resolvedViewModel?.liveUpdateTextAdjust(targetId, align, letter, line, alpha, bold, italic, underline, uppercase)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    },
+                    onDone = { align, letter, line, alpha, bold, italic, underline, uppercase ->
+                        resolvedViewModel?.updateTextAdjust(targetId, align, letter, line, alpha, bold, italic, underline, uppercase)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextAdjustSheetVisible = false
+                        activeTextOverlayId = null
+                    },
+                    onCancel = {
+                        resolvedViewModel?.liveUpdateTextAdjust(
+                            targetId,
+                            origAlign, origLetter, origLine, origAlpha,
+                            origBold, origItalic, origUnderline, origUppercase
+                        )
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        isTextAdjustSheetVisible = false
+                        activeTextOverlayId = null
+                    }
+                )
+            } else {
+                isTextAdjustSheetVisible = false
+                activeTextOverlayId = null
+            }
         }
     }
 }

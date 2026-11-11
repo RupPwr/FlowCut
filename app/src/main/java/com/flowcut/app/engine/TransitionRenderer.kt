@@ -342,7 +342,7 @@ class TransitionRenderer {
         out vec2 vUV;
         void main() {
             gl_Position = uOverlayMat * aPos;
-            vUV = aUV;
+            vUV = vec2(aUV.x, 1.0 - aUV.y);
         }
     """.trimIndent()
 
@@ -697,7 +697,7 @@ class TransitionRenderer {
             android.opengl.Matrix.translateM(outMvp, 0, transform.panX * 2.0f, transform.panY * 2.0f, 0f)
             android.opengl.Matrix.scaleM(outMvp, 0, 1.0f, aScreen, 1.0f)
             if (transform.rotationDeg != 0f) {
-                android.opengl.Matrix.rotateM(outMvp, 0, transform.rotationDeg, 0f, 0f, 1f)
+                android.opengl.Matrix.rotateM(outMvp, 0, -transform.rotationDeg, 0f, 0f, 1f)
             }
             if (transform.isFlippedH) {
                 android.opengl.Matrix.scaleM(outMvp, 0, -1f, 1f, 1f)

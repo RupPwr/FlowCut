@@ -47,6 +47,23 @@ class OverlayTextureCache {
         h = 31 * h + item.textColorArgb
         h = 31 * h + item.bgStyle
         h = 31 * h + item.mediaPath.hashCode()
+        h = 31 * h + item.fontIndex
+        h = 31 * h + item.textAlpha.toBits()
+        h = 31 * h + item.labelColorArgb
+        h = 31 * h + item.labelAlpha.toBits()
+        h = 31 * h + item.borderColorArgb
+        h = 31 * h + item.borderAlpha.toBits()
+        h = 31 * h + item.shadowColorArgb
+        h = 31 * h + item.shadowAlpha.toBits()
+        h = 31 * h + item.fontName.hashCode()
+        h = 31 * h + item.customFontPath.hashCode()
+        h = 31 * h + item.textAlign
+        h = 31 * h + item.letterSpacing.toBits()
+        h = 31 * h + item.lineSpacing.toBits()
+        h = 31 * h + if (item.isBold) 1 else 0
+        h = 31 * h + if (item.isItalic) 1 else 0
+        h = 31 * h + if (item.isUnderline) 1 else 0
+        h = 31 * h + if (item.isUppercase) 1 else 0
         return h
     }
 
@@ -105,99 +122,172 @@ class OverlayTextureCache {
         return entry
     }
 
+    private fun resolveTypeface(fontName: String, customFontPath: String, isBold: Boolean, isItalic: Boolean): Typeface {
+        val style = when {
+            isBold && isItalic -> Typeface.BOLD_ITALIC
+            isBold -> Typeface.BOLD
+            isItalic -> Typeface.ITALIC
+            else -> Typeface.NORMAL
+        }
+
+        if (customFontPath.isNotEmpty()) {
+            val file = java.io.File(customFontPath)
+            if (file.exists()) {
+                try {
+                    val tf = Typeface.createFromFile(file)
+                    return Typeface.create(tf, style)
+                } catch (_: Throwable) {}
+            }
+        }
+
+        return when (fontName.lowercase()) {
+            "permanentmarker", "marker", "casual" -> Typeface.create("casual", style)
+            "bebas", "condensed" -> Typeface.create("sans-serif-condensed", if (isBold) Typeface.BOLD else style)
+            "aileron" -> Typeface.create("sans-serif", style)
+            "roboto-thin", "thin" -> Typeface.create("sans-serif-light", style)
+            "serif-bold", "serif" -> Typeface.create(Typeface.SERIF, if (isBold) Typeface.BOLD else style)
+            "monospace", "mono" -> Typeface.create(Typeface.MONOSPACE, style)
+            else -> Typeface.create("sans-serif-medium", style)
+        }
+    }
+
     private fun bakeText(item: OverlayItem): Bitmap? {
-        val rawText = item.text
+        val displayText = if (item.text.isBlank()) "Your Text" else item.text
+        val rawText = if (item.isUppercase) displayText.uppercase() else displayText
         if (rawText.isEmpty()) return null
 
-        val fillTextColor = if (item.bgStyle == 2) {
-            0xFF111111.toInt()
-        } else {
-            item.textColorArgb
-        }
+        val textA = (item.textAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
+        val fillTextColor = (item.textColorArgb and 0x00FFFFFF) or (textA shl 24)
+
+        val typeface = resolveTypeface(item.fontName, item.customFontPath, item.isBold, item.isItalic)
 
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = fillTextColor
             textSize = 68f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            this.typeface = typeface
+            letterSpacing = item.letterSpacing.coerceIn(-0.08f, 1.40f)
+            isUnderlineText = item.isUnderline
+            isFakeBoldText = item.isBold
         }
 
-        // Measure text with a 900px line limit to wrap naturally
-        val measureLayout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, textPaint, 900)
-            .setAlignment(Layout.Alignment.ALIGN_CENTER)
-            .setLineSpacing(4f, 1.15f)
-            .setIncludePad(true)
-            .build()
-
-        var maxLineWidth = 0f
-        for (i in 0 until measureLayout.lineCount) {
-            maxLineWidth = maxOf(maxLineWidth, measureLayout.getLineWidth(i))
+        val alignment = when (item.textAlign) {
+            0 -> Layout.Alignment.ALIGN_NORMAL
+            2 -> Layout.Alignment.ALIGN_OPPOSITE
+            else -> Layout.Alignment.ALIGN_CENTER
         }
-        val textW = ceil(maxLineWidth).toInt().coerceAtLeast(1)
+
+        val lineSpacingMultiplier = item.lineSpacing.coerceIn(0.55f, 2.80f)
+
+        // Measure text using full desired width so wide character spacing never clips
+        val desiredWidth = ceil(StaticLayout.getDesiredWidth(rawText, textPaint)).toInt().coerceAtLeast(1)
+        val textW = desiredWidth.coerceIn(1, 1920)
 
         val layout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, textPaint, textW)
-            .setAlignment(Layout.Alignment.ALIGN_CENTER)
-            .setLineSpacing(4f, 1.15f)
+            .setAlignment(alignment)
+            .setLineSpacing(0f, lineSpacingMultiplier)
             .setIncludePad(true)
             .build()
 
         val textH = layout.height.coerceAtLeast(1)
 
-        val padX = if (item.bgStyle == 0) 28 else 48
-        val padY = if (item.bgStyle == 0) 20 else 32
+        val hasLabel = item.labelAlpha > 0.01f || item.bgStyle in 1..2
+        val strokeOffset = (item.borderAlpha.coerceIn(0f, 1f) * 20f).toInt() + 16
+        val padX = if (hasLabel) 64 else (40 + strokeOffset)
+        val padY = if (hasLabel) 44 else (28 + strokeOffset)
 
         val bmpW = (textW + padX * 2).coerceAtMost(2048)
         val bmpH = (textH + padY * 2).coerceAtMost(2048)
         val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
-        // Background Style Rendering
-        when (item.bgStyle) {
-            1 -> {
-                // Rounded translucent dark pill background 0xCC000000
-                val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = 0xCC000000.toInt()
-                    style = Paint.Style.FILL
-                }
-                val rect = RectF(10f, 8f, bmpW - 10f, bmpH - 8f)
-                val cornerRadius = 24f
-                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
+        // 1. Label / Background Pill
+        if (item.labelAlpha > 0.01f) {
+            val labelA = (item.labelAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
+            val labelColor = (item.labelColorArgb and 0x00FFFFFF) or (labelA shl 24)
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = labelColor
+                style = Paint.Style.FILL
             }
-            2 -> {
-                // Rounded solid white pill background with contrasting text
-                val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = 0xFFFFFFFF.toInt()
-                    style = Paint.Style.FILL
-                }
-                val rect = RectF(10f, 8f, bmpW - 10f, bmpH - 8f)
-                val cornerRadius = 24f
-                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
+            val rect = RectF(12f, 10f, bmpW - 12f, bmpH - 10f)
+            val cornerRadius = 32f
+            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
+        } else if (item.bgStyle == 1) {
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xCC000000.toInt()
+                style = Paint.Style.FILL
             }
-            else -> {
-                // Style 0: Crisp dark drop-shadow + stroke outline
-                val strokePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = 0xEE000000.toInt()
-                    textSize = textPaint.textSize
-                    typeface = textPaint.typeface
-                    style = Paint.Style.STROKE
-                    strokeWidth = 10f
-                    strokeJoin = Paint.Join.ROUND
-                    strokeCap = Paint.Cap.ROUND
-                    setShadowLayer(8f, 2f, 4f, 0x88000000.toInt())
-                }
-                val strokeLayout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, strokePaint, textW)
-                    .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                    .setLineSpacing(4f, 1.15f)
-                    .setIncludePad(true)
-                    .build()
-
-                canvas.save()
-                canvas.translate(padX.toFloat(), padY.toFloat())
-                strokeLayout.draw(canvas)
-                canvas.restore()
+            val rect = RectF(12f, 10f, bmpW - 12f, bmpH - 10f)
+            val cornerRadius = 32f
+            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
+        } else if (item.bgStyle == 2) {
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xFFFFFFFF.toInt()
+                style = Paint.Style.FILL
             }
+            val rect = RectF(12f, 10f, bmpW - 12f, bmpH - 10f)
+            val cornerRadius = 32f
+            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
         }
 
-        // Draw primary text fill
+        // 2. Border / Stroke Outline with dynamic stroke width up to 20px
+        if (item.borderAlpha > 0.01f) {
+            val borderA = (item.borderAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
+            val borderColor = (item.borderColorArgb and 0x00FFFFFF) or (borderA shl 24)
+            val dynamicStrokeWidth = (item.borderAlpha.coerceIn(0f, 1f) * 20f).coerceAtLeast(1.5f)
+            val strokePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = borderColor
+                textSize = textPaint.textSize
+                this.typeface = textPaint.typeface
+                letterSpacing = textPaint.letterSpacing
+                isFakeBoldText = textPaint.isFakeBoldText
+                style = Paint.Style.STROKE
+                strokeWidth = dynamicStrokeWidth
+                strokeJoin = Paint.Join.ROUND
+                strokeCap = Paint.Cap.ROUND
+            }
+            val strokeLayout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, strokePaint, textW)
+                .setAlignment(alignment)
+                .setLineSpacing(0f, lineSpacingMultiplier)
+                .setIncludePad(true)
+                .build()
+
+            canvas.save()
+            canvas.translate(padX.toFloat(), padY.toFloat())
+            strokeLayout.draw(canvas)
+            canvas.restore()
+        } else if (item.bgStyle == 0 && item.labelAlpha <= 0.01f && item.shadowAlpha <= 0.01f) {
+            val strokePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xEE000000.toInt()
+                textSize = textPaint.textSize
+                this.typeface = textPaint.typeface
+                letterSpacing = textPaint.letterSpacing
+                style = Paint.Style.STROKE
+                strokeWidth = 10f
+                strokeJoin = Paint.Join.ROUND
+                strokeCap = Paint.Cap.ROUND
+                setShadowLayer(8f, 2f, 4f, 0x88000000.toInt())
+            }
+            val strokeLayout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, strokePaint, textW)
+                .setAlignment(alignment)
+                .setLineSpacing(0f, lineSpacingMultiplier)
+                .setIncludePad(true)
+                .build()
+
+            canvas.save()
+            canvas.translate(padX.toFloat(), padY.toFloat())
+            strokeLayout.draw(canvas)
+            canvas.restore()
+        }
+
+        // 3. Drop Shadow with dynamic radius up to 22f and (8f, 8f) offset
+        if (item.shadowAlpha > 0.01f) {
+            val shadowA = (item.shadowAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
+            val shadowColor = (item.shadowColorArgb and 0x00FFFFFF) or (shadowA shl 24)
+            val shadowRadius = (item.shadowAlpha.coerceIn(0f, 1f) * 22f).coerceAtLeast(1f)
+            textPaint.setShadowLayer(shadowRadius, 8f, 8f, shadowColor)
+        }
+
+        // 4. Draw primary text fill
         canvas.save()
         canvas.translate(padX.toFloat(), padY.toFloat())
         layout.draw(canvas)

@@ -9,6 +9,7 @@ import com.flowcut.app.audio.ClipAudioContributor
 import com.flowcut.app.core.time.TimeMap
 import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
+import com.flowcut.app.core.timeline.MainIndex
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.ActiveLayerSet
 import com.flowcut.app.engine.BackgroundType
@@ -22,6 +23,7 @@ import com.flowcut.app.engine.OverlayItem
 import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.engine.canAddLayer
+import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.MAX_CLIPS
@@ -56,6 +58,7 @@ data class EditorUiState(
     val selectedClipIndex: Int? = null,
     val selectedJunctionIndex: Int? = null,
     val selectedOverlayId: String? = null,
+    val focusMode: TimelineFocusState = TimelineFocusState.S0_NONE,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val isImporting: Boolean = false,
@@ -416,11 +419,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pushUndoState()
         _layerItems.add(resolvedItem)
         syncLayerPlan()
+        val newFocus = when (resolvedItem.type) {
+            LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(resolvedItem.id)
+            LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(resolvedItem.id)
+            LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(resolvedItem.id)
+            else -> TimelineFocusState.S0_NONE
+        }
         _uiState.update {
             it.copy(
                 selectedOverlayId = resolvedItem.id,
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                focusMode = newFocus
             )
         }
         updateProject(_uiState.value.project, recordUndo = false)
@@ -428,7 +438,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun addTextOverlay(
-        text: String,
+        text: String = "",
         textColorArgb: Int = 0xFFFFFFFF.toInt(),
         bgStyle: Int = 0,
         startUs: Long,
@@ -488,25 +498,262 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
 
-    fun updateTextOverlay(itemId: String, text: String, textColorArgb: Int, bgStyle: Int): Boolean {
+    fun addVideoOverlay(
+        mediaPath: String,
+        startUs: Long,
+        durationUs: Long = 3_000_000L
+    ): OverlayItem? {
+        if (!canAddLayer(_layerItems, LayerType.VIDEO)) return null
+        val endUs = startUs + durationUs
+        val item = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.VIDEO,
+            laneIndex = -1,
+            zIndex = 0,
+            startUs = startUs,
+            endUs = endUs,
+            mediaPath = mediaPath
+        )
+        return if (addLayerItem(item)) _layerItems.lastOrNull() else null
+    }
+
+    fun updateTextOverlay(itemId: String, text: String, textColorArgb: Int, bgStyle: Int, fontIndex: Int = 0): Boolean {
         val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
         val updated = item.copy(
             text = text,
             textColorArgb = textColorArgb,
             bgStyle = bgStyle,
+            fontIndex = fontIndex,
             zIndex = getTopZIndex()
         )
         return updateLayerItem(updated)
     }
 
-    fun liveUpdateTextOverlay(itemId: String, text: String, textColorArgb: Int, bgStyle: Int) {
+    fun updateTextFont(itemId: String, fontIndex: Int): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        val updated = item.copy(fontIndex = fontIndex)
+        return updateLayerItem(updated)
+    }
+
+    fun getOrResolveTextOverlayAt(playheadUs: Long): OverlayItem? {
+        val selectedId = _uiState.value.selectedOverlayId
+        if (selectedId != null) {
+            val item = _layerItems.firstOrNull { it.id == selectedId }
+            if (item != null && item.type == LayerType.TEXT) {
+                return item
+            }
+        }
+        val itemUnderPlayhead = _layerItems
+            .filter { it.type == LayerType.TEXT && it.startUs <= playheadUs && playheadUs <= it.endUs }
+            .maxByOrNull { it.zIndex }
+
+        if (itemUnderPlayhead != null) {
+            selectOverlay(itemUnderPlayhead.id)
+            return itemUnderPlayhead
+        }
+        return null
+    }
+
+    fun splitOverlay(itemId: String, playheadUs: Long): String? {
+        selectOverlay(itemId)
+        return splitSelectedOverlayAtPlayhead(playheadUs)
+    }
+
+    fun updateTextColorAndAlpha(
+        itemId: String,
+        textColor: Int, textAlpha: Float,
+        labelColor: Int, labelAlpha: Float,
+        borderColor: Int, borderAlpha: Float,
+        shadowColor: Int, shadowAlpha: Float
+    ): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        val updated = item.copy(
+            textColorArgb = textColor,
+            textAlpha = textAlpha,
+            labelColorArgb = labelColor,
+            labelAlpha = labelAlpha,
+            borderColorArgb = borderColor,
+            borderAlpha = borderAlpha,
+            shadowColorArgb = shadowColor,
+            shadowAlpha = shadowAlpha
+        )
+        return updateLayerItem(updated)
+    }
+
+    fun liveUpdateTextColorAndAlpha(
+        itemId: String,
+        textColor: Int, textAlpha: Float,
+        labelColor: Int, labelAlpha: Float,
+        borderColor: Int, borderAlpha: Float,
+        shadowColor: Int, shadowAlpha: Float
+    ) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        val updated = cur.copy(
+            textColorArgb = textColor,
+            textAlpha = textAlpha,
+            labelColorArgb = labelColor,
+            labelAlpha = labelAlpha,
+            borderColorArgb = borderColor,
+            borderAlpha = borderAlpha,
+            shadowColorArgb = shadowColor,
+            shadowAlpha = shadowAlpha
+        )
+        _layerItems[idx] = updated
+        syncLayerPlan()
+    }
+
+    fun updateTextColorAndAlpha(
+        itemId: String,
+        tabIndex: Int,
+        colorArgb: Int,
+        alpha: Float
+    ): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        val updated = when (tabIndex) {
+            0 -> item.copy(textColorArgb = colorArgb, textAlpha = alpha)
+            1 -> item.copy(labelColorArgb = colorArgb, labelAlpha = alpha)
+            2 -> item.copy(borderColorArgb = colorArgb, borderAlpha = alpha)
+            else -> item.copy(shadowColorArgb = colorArgb, shadowAlpha = alpha)
+        }
+        return updateLayerItem(updated)
+    }
+
+    fun liveUpdateTextColorAndAlpha(
+        itemId: String,
+        tabIndex: Int,
+        colorArgb: Int,
+        alpha: Float
+    ) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        val updated = when (tabIndex) {
+            0 -> cur.copy(textColorArgb = colorArgb, textAlpha = alpha)
+            1 -> cur.copy(labelColorArgb = colorArgb, labelAlpha = alpha)
+            2 -> cur.copy(borderColorArgb = colorArgb, borderAlpha = alpha)
+            else -> cur.copy(shadowColorArgb = colorArgb, shadowAlpha = alpha)
+        }
+        _layerItems[idx] = updated
+        syncLayerPlan()
+    }
+
+    fun updateTextFont(itemId: String, fontName: String, customPath: String = ""): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        val updated = item.copy(fontName = fontName, customFontPath = customPath)
+        return updateLayerItem(updated)
+    }
+
+    fun updateTextAnimation(
+        itemId: String,
+        inType: Int,
+        inDurUs: Long,
+        outType: Int,
+        outDurUs: Long,
+        loopType: Int
+    ): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        val updated = item.copy(
+            animInType = inType,
+            animInDurationUs = inDurUs,
+            animOutType = outType,
+            animOutDurationUs = outDurUs,
+            animLoopType = loopType
+        )
+        return updateLayerItem(updated)
+    }
+
+    fun liveUpdateTextAnimation(
+        itemId: String,
+        inType: Int,
+        inDurUs: Long,
+        outType: Int,
+        outDurUs: Long,
+        loopType: Int
+    ) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        _layerItems[idx] = cur.copy(
+            animInType = inType,
+            animInDurationUs = inDurUs,
+            animOutType = outType,
+            animOutDurationUs = outDurUs,
+            animLoopType = loopType
+        )
+        syncLayerPlan()
+    }
+
+    fun updateTextAdjust(
+        itemId: String,
+        textAlign: Int,
+        letterSpacing: Float,
+        lineSpacing: Float,
+        opacity: Float,
+        isBold: Boolean,
+        isItalic: Boolean,
+        isUnderline: Boolean,
+        isUppercase: Boolean
+    ): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        val updated = item.copy(
+            textAlign = textAlign,
+            letterSpacing = letterSpacing,
+            lineSpacing = lineSpacing,
+            transform = item.transform.copy(opacity = opacity),
+            isBold = isBold,
+            isItalic = isItalic,
+            isUnderline = isUnderline,
+            isUppercase = isUppercase
+        )
+        return updateLayerItem(updated)
+    }
+
+    fun liveUpdateTextAdjust(
+        itemId: String,
+        textAlign: Int,
+        letterSpacing: Float,
+        lineSpacing: Float,
+        opacity: Float,
+        isBold: Boolean,
+        isItalic: Boolean,
+        isUnderline: Boolean,
+        isUppercase: Boolean
+    ) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        _layerItems[idx] = cur.copy(
+            textAlign = textAlign,
+            letterSpacing = letterSpacing,
+            lineSpacing = lineSpacing,
+            transform = cur.transform.copy(opacity = opacity),
+            isBold = isBold,
+            isItalic = isItalic,
+            isUnderline = isUnderline,
+            isUppercase = isUppercase
+        )
+        syncLayerPlan()
+    }
+
+    fun cycleSelectedTextFont(): Int {
+        val selectedId = _uiState.value.selectedOverlayId ?: return 0
+        val item = _layerItems.firstOrNull { it.id == selectedId } ?: return 0
+        val nextFont = (item.fontIndex + 1) % 6
+        updateTextFont(selectedId, nextFont)
+        return nextFont
+    }
+
+    fun liveUpdateTextOverlay(itemId: String, text: String, textColorArgb: Int, bgStyle: Int, fontIndex: Int = 0) {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val cur = _layerItems[idx]
         _layerItems[idx] = cur.copy(
             text = text,
             textColorArgb = textColorArgb,
-            bgStyle = bgStyle
+            bgStyle = bgStyle,
+            fontIndex = fontIndex
         )
         syncLayerPlan()
     }
@@ -594,11 +841,40 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectOverlay(itemId: String?) {
+        if (itemId == null) {
+            _uiState.update {
+                it.copy(
+                    selectedOverlayId = null,
+                    focusMode = TimelineFocusState.S0_NONE
+                )
+            }
+            return
+        }
+        val item = _layerItems.firstOrNull { it.id == itemId }
+        val newFocus = when (item?.type) {
+            LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(itemId)
+            LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(itemId)
+            LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(itemId)
+            else -> TimelineFocusState.S0_NONE
+        }
         _uiState.update {
             it.copy(
                 selectedOverlayId = itemId,
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                focusMode = newFocus
+            )
+        }
+    }
+
+    fun setFocusMode(mode: TimelineFocusState) {
+        val itemId = mode.currentSelectedItemId
+        _uiState.update {
+            it.copy(
+                focusMode = mode,
+                selectedOverlayId = itemId,
+                selectedClipIndex = if (mode is TimelineFocusState.S0_NONE) it.selectedClipIndex else null,
+                selectedJunctionIndex = if (mode is TimelineFocusState.S0_NONE) it.selectedJunctionIndex else null
             )
         }
     }
@@ -696,7 +972,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedOverlayId = null,
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                focusMode = TimelineFocusState.S0_NONE
             )
         }
         updateProject(_uiState.value.project, recordUndo = false)
@@ -1136,6 +1413,101 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         redoLayerItems.clear()
         clipTimeMaps[oldClip.id] = finalMap
         updateProject(newProject, recordUndo = false)
+    }
+
+    fun commitGlobalTimelineTrim(globalStartUs: Long, globalEndUs: Long): Boolean {
+        val currentProject = _uiState.value.project
+        val n = currentProject.clips.size
+        if (n == 0) return false
+        val snapshot = getSnapshot()
+        val mainIndex = snapshot.main
+        val totalMs = mainIndex.totalMs
+        val totalUs = msToUs(totalMs)
+        val clampedStart = globalStartUs.coerceIn(0L, totalUs)
+        val clampedEnd = globalEndUs.coerceIn(clampedStart + 200_000L, totalUs)
+        if (clampedEnd - clampedStart < 200_000L) return false
+
+        data class KeptClip(
+            val originalIndex: Int,
+            val clip: Clip,
+            val newInUs: Long,
+            val newOutUs: Long,
+            val newDurationMs: Long
+        )
+
+        val kept = mutableListOf<KeptClip>()
+        for (i in 0 until n) {
+            val clipStartUs = msToUs(mainIndex.startMs[i])
+            val clipEndUs = msToUs(mainIndex.endMs[i])
+
+            if (clipEndUs <= clampedStart || clipStartUs >= clampedEnd) {
+                continue
+            }
+
+            val oldClip = currentProject.clips[i]
+            val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
+            val speedNum = oldMap.speedNum
+            val speedDen = oldMap.speedDen
+
+            val trimStartTimelineUs = maxOf(clipStartUs, clampedStart)
+            val trimEndTimelineUs = minOf(clipEndUs, clampedEnd)
+            val remainingTimelineUs = trimEndTimelineUs - trimStartTimelineUs
+
+            val deltaStartTimelineUs = trimStartTimelineUs - clipStartUs
+            val deltaEndTimelineUs = clipEndUs - trimEndTimelineUs
+
+            val newInUs: Long
+            val newOutUs: Long
+            val newDurationMs: Long
+
+            if (speedNum == 0) {
+                newInUs = oldMap.inUs
+                newOutUs = oldMap.inUs
+                newDurationMs = usToMs(remainingTimelineUs).coerceIn(200L, 30_000L)
+            } else {
+                val deltaStartSourceUs = (deltaStartTimelineUs * speedNum.toLong()) / speedDen.toLong()
+                val deltaEndSourceUs = (deltaEndTimelineUs * speedNum.toLong()) / speedDen.toLong()
+                newInUs = oldMap.inUs + deltaStartSourceUs
+                newOutUs = oldMap.outUs - deltaEndSourceUs
+                val timelineDurUs = ((newOutUs - newInUs) * speedDen.toLong()) / speedNum.toLong()
+                newDurationMs = usToMs(timelineDurUs).coerceAtLeast(200L)
+            }
+
+            kept.add(KeptClip(i, oldClip.copy(durationMs = newDurationMs), newInUs, newOutUs, newDurationMs))
+        }
+
+        if (kept.isEmpty()) {
+            val midIdx = (n / 2).coerceIn(0, n - 1)
+            val clip = currentProject.clips[midIdx]
+            val oldMap = clipTimeMaps[clip.id] ?: TimeMap(0L, msToUs(clip.durationMs))
+            kept.add(KeptClip(midIdx, clip.copy(durationMs = 200L), oldMap.inUs, oldMap.inUs + 200_000L, 200L))
+        }
+
+        pushUndoState()
+
+        val newClips = kept.map { it.clip }
+        val newTransitions = mutableListOf<Transition>()
+        for (j in 0 until newClips.size - 1) {
+            val origA = kept[j].originalIndex
+            val origB = kept[j + 1].originalIndex
+            val trans = if (origB == origA + 1 && origA < currentProject.transitions.size) {
+                val existing = currentProject.transitions[origA]
+                val maxAllowed = minOf(newClips[j].durationMs, newClips[j + 1].durationMs) / 2L
+                if (existing.durationMs > maxAllowed) existing.copy(durationMs = maxAllowed) else existing
+            } else {
+                Transition(type = TransitionType.NONE, durationMs = 0L)
+            }
+            newTransitions.add(trans)
+        }
+
+        for (k in kept) {
+            val oldMap = clipTimeMaps[k.clip.id] ?: TimeMap(0L, msToUs(k.clip.durationMs))
+            clipTimeMaps[k.clip.id] = TimeMap(k.newInUs, k.newOutUs, oldMap.speedNum, oldMap.speedDen)
+        }
+
+        val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
+        updateProject(newProject, recordUndo = false)
+        return true
     }
 
     fun getClipSpeed(clipId: String): Float {
@@ -1937,7 +2309,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedClipIndex = index,
                 selectedJunctionIndex = null,
-                selectedOverlayId = null
+                selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE
             )
         }
     }
@@ -1947,7 +2320,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedJunctionIndex = index,
                 selectedClipIndex = null,
-                selectedOverlayId = null
+                selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE
             )
         }
     }
@@ -1957,7 +2331,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
-                selectedOverlayId = null
+                selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE
             )
         }
     }
@@ -1986,6 +2361,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
                 selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE,
                 isMainTrackMuted = isAllMuted
             )
         }
@@ -2288,6 +2664,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
                 selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE,
                 isMainTrackMuted = isAllMuted
             )
         }
@@ -2344,6 +2721,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
                 selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE,
                 isMainTrackMuted = isAllMuted
             )
         }

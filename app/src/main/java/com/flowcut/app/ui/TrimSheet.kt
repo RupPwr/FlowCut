@@ -71,12 +71,13 @@ import kotlin.math.roundToLong
  */
 @Composable
 fun TrimSheet(
-    clipIndex: Int,
+    clipIndex: Int = -1,
     snapshotHolder: SnapshotHolder,
     previewRenderer: PreviewRenderer,
     frameDriver: FrameDriver,
-    getClipNaturalDurationUs: (Int) -> Long,
-    onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long) -> Unit,
+    getClipNaturalDurationUs: (Int) -> Long = { 0L },
+    onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long) -> Unit = { _, _, _ -> },
+    onCommitGlobalTrim: (globalStartUs: Long, globalEndUs: Long) -> Unit = { _, _ -> },
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -85,29 +86,43 @@ fun TrimSheet(
 
     // Capture unmodified snapshot at moment TrimSheet is opened
     val originalSnapshot = remember { snapshotHolder.current }
+    val isGlobal = clipIndex < 0
 
-    val clip = originalSnapshot.project.clips.getOrNull(clipIndex) ?: run {
+    val clip = if (!isGlobal) originalSnapshot.project.clips.getOrNull(clipIndex) else null
+    if (!isGlobal && clip == null) {
         onDismiss()
         return
     }
 
-    val initialMap = remember(clip) { clip.map() }
-    val maxSourceUs = remember(clipIndex, clip, initialMap) {
-        val reported = getClipNaturalDurationUs(clipIndex)
-        maxOf(initialMap.outUs, reported, msToUs(clip.durationMs), 200_000L)
+    val initialMap = remember(clip) { clip?.map() }
+    val maxSourceUs = remember(clipIndex, clip, initialMap, isGlobal, originalSnapshot) {
+        if (isGlobal) {
+            maxOf(msToUs(originalSnapshot.main.totalMs), 200_000L)
+        } else {
+            val reported = getClipNaturalDurationUs(clipIndex)
+            maxOf(initialMap?.outUs ?: 200_000L, reported, msToUs(clip?.durationMs ?: 200L), 200_000L)
+        }
     }
 
     var tempInUs by remember {
-        mutableLongStateOf(initialMap.inUs.coerceIn(0L, maxOf(0L, initialMap.outUs - 200_000L)))
+        mutableLongStateOf(
+            if (isGlobal) 0L else (initialMap?.inUs?.coerceIn(0L, maxOf(0L, (initialMap.outUs) - 200_000L)) ?: 0L)
+        )
     }
     var tempOutUs by remember {
-        mutableLongStateOf(initialMap.outUs.coerceIn(tempInUs + 200_000L, maxSourceUs))
+        mutableLongStateOf(
+            if (isGlobal) maxSourceUs else (initialMap?.outUs?.coerceIn(tempInUs + 200_000L, maxSourceUs) ?: maxSourceUs)
+        )
     }
 
-    // Wakes frame driver and positions preview on the clip start frame upon opening
+    // Wakes frame driver and positions preview on the start frame upon opening
     LaunchedEffect(clipIndex) {
-        val startEdgeUs = msToUs(snapshotHolder.current.main.startMs.getOrElse(clipIndex) { 0L })
-        previewRenderer.trimPreviewTimeUs = startEdgeUs
+        if (isGlobal) {
+            previewRenderer.trimPreviewTimeUs = 0L
+        } else {
+            val startEdgeUs = msToUs(snapshotHolder.current.main.startMs.getOrElse(clipIndex) { 0L })
+            previewRenderer.trimPreviewTimeUs = startEdgeUs
+        }
         frameDriver.wake()
     }
 
@@ -128,7 +143,11 @@ fun TrimSheet(
 
     val handleDone = {
         previewRenderer.trimPreviewTimeUs = -1L
-        onCommitTrim(clipIndex, tempInUs, tempOutUs)
+        if (isGlobal) {
+            onCommitGlobalTrim(tempInUs, tempOutUs)
+        } else {
+            onCommitTrim(clipIndex, tempInUs, tempOutUs)
+        }
         frameDriver.wake()
         onDismiss()
     }
@@ -140,29 +159,35 @@ fun TrimSheet(
 
     // Updates SnapshotHolder.current and triggers live video preview render
     val updateSnapshotAndPreview: (Long, Long, Boolean) -> Unit = { inUs, outUs, isLeft ->
-        val speedNum = initialMap.speedNum
-        val speedDen = initialMap.speedDen
-        val newMap = TimeMap(
-            inUs = inUs,
-            outUs = outUs,
-            speedNum = speedNum,
-            speedDen = speedDen
-        )
-        val newProject = SetTimeMapCommand(
-            clipIndex = clipIndex,
-            timeMap = newMap
-        ).apply(snapshotHolder.current.project)
-        snapshotHolder.current = TimelineSnapshot(System.nanoTime(), newProject)
+        if (isGlobal) {
+            val trimmedEdgeUs = if (isLeft) inUs else maxOf(0L, outUs - 1_000L)
+            previewRenderer.trimPreviewTimeUs = trimmedEdgeUs
+            frameDriver.wake()
+        } else if (initialMap != null) {
+            val speedNum = initialMap.speedNum
+            val speedDen = initialMap.speedDen
+            val newMap = TimeMap(
+                inUs = inUs,
+                outUs = outUs,
+                speedNum = speedNum,
+                speedDen = speedDen
+            )
+            val newProject = SetTimeMapCommand(
+                clipIndex = clipIndex,
+                timeMap = newMap
+            ).apply(snapshotHolder.current.project)
+            snapshotHolder.current = TimelineSnapshot(System.nanoTime(), newProject)
 
-        val trimmedEdgeUs = if (isLeft) {
-            msToUs(snapshotHolder.current.main.startMs.getOrElse(clipIndex) { 0L })
-        } else {
-            val endMs = snapshotHolder.current.main.endMs.getOrElse(clipIndex) { 0L }
-            val startMs = snapshotHolder.current.main.startMs.getOrElse(clipIndex) { 0L }
-            maxOf(msToUs(startMs), msToUs(endMs) - 1_000L)
+            val trimmedEdgeUs = if (isLeft) {
+                msToUs(snapshotHolder.current.main.startMs.getOrElse(clipIndex) { 0L })
+            } else {
+                val endMs = snapshotHolder.current.main.endMs.getOrElse(clipIndex) { 0L }
+                val startMs = snapshotHolder.current.main.startMs.getOrElse(clipIndex) { 0L }
+                maxOf(msToUs(startMs), msToUs(endMs) - 1_000L)
+            }
+            previewRenderer.trimPreviewTimeUs = trimmedEdgeUs
+            frameDriver.wake()
         }
-        previewRenderer.trimPreviewTimeUs = trimmedEdgeUs
-        frameDriver.wake()
     }
 
     // Pre-allocated styling constants (Rule R10 & Section 8 alignment)
@@ -240,7 +265,7 @@ fun TrimSheet(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            text = "Trim Clip",
+                            text = if (isGlobal) "Trim Timeline" else "Trim Clip",
                             color = colors.textPrimary,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold
@@ -385,6 +410,20 @@ fun TrimSheet(
                                 size = Size(sprocketW, sprocketH)
                             )
                             sx += sprocketSpacing
+                        }
+
+                        // Subtle divider ticks where individual clips meet in Global Timeline Trim Mode
+                        if (isGlobal && originalSnapshot.main.n > 1) {
+                            for (i in 0 until originalSnapshot.main.n - 1) {
+                                val tickUs = msToUs(originalSnapshot.main.endMs[i])
+                                val tickX = trackLeft + ((tickUs.toDouble() / maxSourceUs) * (trackRight - trackLeft)).toFloat()
+                                drawLine(
+                                    color = Color(0x66FFFFFF),
+                                    start = Offset(tickX, trackTop + 4f * density),
+                                    end = Offset(tickX, trackBottom - 4f * density),
+                                    strokeWidth = 1.5f * density
+                                )
+                            }
                         }
 
                         // Dimmed overlay on trimmed-out left region [trackLeft .. sLeftX]
