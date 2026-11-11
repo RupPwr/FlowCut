@@ -1,6 +1,9 @@
 package com.flowcut.app.editor
 
 import android.app.Application
+import android.graphics.BitmapFactory
+import android.media.ExifInterface
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.compose.runtime.mutableStateListOf
 import androidx.lifecycle.AndroidViewModel
@@ -18,11 +21,15 @@ import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.ClipTransform
 import com.flowcut.app.engine.CompiledLayerPlan
 import com.flowcut.app.engine.ExportEngine
+import com.flowcut.app.engine.LayerTrackGroup
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
 import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.engine.canAddLayer
+import com.flowcut.app.engine.clampItemTrimBoundsOnRow
+import com.flowcut.app.engine.findAvailableRowOrClamp
+import com.flowcut.app.engine.trackGroup
 import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.Clip
@@ -396,7 +403,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun findNextAvailableLane(startUs: Long, endUs: Long, excludeItemId: String? = null): Int {
         val occupiedLanes = _layerItems
-            .filter { it.id != excludeItemId && it.startUs < endUs && it.endUs > startUs }
+            .filter { (it.type == LayerType.TEXT || it.type == LayerType.STICKER) && it.id != excludeItemId && it.startUs < endUs && it.endUs > startUs }
             .map { it.laneIndex }
             .toSet()
         var lane = 0
@@ -406,15 +413,65 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return lane
     }
 
+    /**
+     * Dedicated PIP lane allocator for LayerType.IMAGE and LayerType.VIDEO.
+     * Strictly packs into lanes 0, 1, 2, 3 without vertical gaps or sharing with text/stickers.
+     */
+    fun findNextAvailablePipLane(startUs: Long, endUs: Long, excludeItemId: String? = null): Int {
+        val occupiedLanes = _layerItems
+            .filter { (it.type == LayerType.IMAGE || it.type == LayerType.VIDEO) && it.id != excludeItemId && it.startUs < endUs && it.endUs > startUs }
+            .map { it.laneIndex.coerceIn(0, 3) }
+            .toSet()
+        for (lane in 0..3) {
+            if (lane !in occupiedLanes) return lane
+        }
+        return 0
+    }
+
     fun getTopZIndex(): Int {
         return (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1
     }
 
     fun addLayerItem(item: OverlayItem): Boolean {
         if (!canAddLayer(_layerItems, item.type)) return false
-        val assignedLane = if (item.laneIndex < 0) findNextAvailableLane(item.startUs, item.endUs) else item.laneIndex
+        val trackGrp = item.trackGroup()
+        val totalDurationUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs })
+
+        val resolvedStartUs: Long
+        val resolvedEndUs: Long
+        val assignedLane: Int
+
+        if (trackGrp != null) {
+            // PIP or AUDIO: use deterministic 4-row non-overlapping allocator
+            val alloc = findAvailableRowOrClamp(
+                items = _layerItems,
+                group = trackGrp,
+                desiredStartUs = item.startUs,
+                desiredDurationUs = item.durationUs,
+                totalProjectDurationUs = totalDurationUs,
+                excludeItemId = item.id
+            )
+            if (alloc == null) {
+                showToast("All 4 tracks are full at this position")
+                return false
+            }
+            assignedLane = alloc.laneIndex
+            resolvedStartUs = alloc.startUs
+            resolvedEndUs = alloc.endUs
+        } else {
+            // Text or Sticker (Row A Pins / Row B Bar)
+            assignedLane = if (item.laneIndex < 0) findNextAvailableLane(item.startUs, item.endUs) else item.laneIndex
+            resolvedStartUs = item.startUs
+            resolvedEndUs = item.endUs
+        }
+
         val assignedZ = if (item.zIndex <= 0) getTopZIndex() else item.zIndex
-        val resolvedItem = item.copy(laneIndex = assignedLane, zIndex = assignedZ)
+        val resolvedItem = item.copy(
+            laneIndex = assignedLane,
+            startUs = resolvedStartUs,
+            endUs = resolvedEndUs,
+            zIndex = assignedZ
+        )
 
         pushUndoState()
         _layerItems.add(resolvedItem)
@@ -423,6 +480,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(resolvedItem.id)
             LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(resolvedItem.id)
             LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(resolvedItem.id)
+            LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(resolvedItem.id)
             else -> TimelineFocusState.S0_NONE
         }
         _uiState.update {
@@ -435,6 +493,26 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         updateProject(_uiState.value.project, recordUndo = false)
         return true
+    }
+
+    fun addAudioOverlay(
+        mediaPath: String,
+        title: String = "Sound",
+        startUs: Long,
+        durationUs: Long = 3_000_000L
+    ): OverlayItem? {
+        val endUs = startUs + durationUs
+        val item = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.AUDIO,
+            laneIndex = -1,
+            zIndex = 0,
+            startUs = startUs,
+            endUs = endUs,
+            text = title,
+            mediaPath = mediaPath
+        )
+        return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
 
     fun addTextOverlay(
@@ -479,6 +557,28 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
 
+    /**
+     * Imports a custom photo sticker from StickerPickerSheet into Row A / Row B as LayerType.STICKER.
+     */
+    fun addImageStickerOverlay(
+        mediaPath: String,
+        startUs: Long,
+        durationUs: Long = 3_000_000L
+    ): OverlayItem? {
+        if (!canAddLayer(_layerItems, LayerType.STICKER)) return null
+        val endUs = startUs + durationUs
+        val item = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.STICKER,
+            laneIndex = -1,
+            zIndex = 0,
+            startUs = startUs,
+            endUs = endUs,
+            mediaPath = mediaPath
+        )
+        return if (addLayerItem(item)) _layerItems.lastOrNull() else null
+    }
+
     fun addImageOverlay(
         mediaPath: String,
         startUs: Long,
@@ -486,6 +586,28 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     ): OverlayItem? {
         if (!canAddLayer(_layerItems, LayerType.IMAGE)) return null
         val endUs = startUs + durationUs
+        var intrinsicWidth = 0
+        var intrinsicHeight = 0
+        try {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(mediaPath, boundsOpts)
+            var w = boundsOpts.outWidth
+            var h = boundsOpts.outHeight
+            if (w > 0 && h > 0) {
+                val exif = ExifInterface(mediaPath)
+                val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                if (orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+                    orientation == ExifInterface.ORIENTATION_ROTATE_270
+                ) {
+                    val tmp = w
+                    w = h
+                    h = tmp
+                }
+                intrinsicWidth = w
+                intrinsicHeight = h
+            }
+        } catch (_: Throwable) {}
+
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
             type = LayerType.IMAGE,
@@ -493,7 +615,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             zIndex = 0,
             startUs = startUs,
             endUs = endUs,
-            mediaPath = mediaPath
+            mediaPath = mediaPath,
+            intrinsicWidth = intrinsicWidth,
+            intrinsicHeight = intrinsicHeight
         )
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
@@ -505,6 +629,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     ): OverlayItem? {
         if (!canAddLayer(_layerItems, LayerType.VIDEO)) return null
         val endUs = startUs + durationUs
+        var intrinsicWidth = 0
+        var intrinsicHeight = 0
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(mediaPath)
+            val widthStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+            val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+            val rotationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+            var w = widthStr?.toIntOrNull() ?: 0
+            var h = heightStr?.toIntOrNull() ?: 0
+            val rotation = rotationStr?.toIntOrNull() ?: 0
+            if (rotation == 90 || rotation == 270) {
+                val tmp = w
+                w = h
+                h = tmp
+            }
+            intrinsicWidth = w
+            intrinsicHeight = h
+        } catch (_: Throwable) {
+        } finally {
+            try { retriever.release() } catch (_: Throwable) {}
+        }
+
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
             type = LayerType.VIDEO,
@@ -512,7 +659,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             zIndex = 0,
             startUs = startUs,
             endUs = endUs,
-            mediaPath = mediaPath
+            mediaPath = mediaPath,
+            intrinsicWidth = intrinsicWidth,
+            intrinsicHeight = intrinsicHeight
         )
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
@@ -795,32 +944,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun copyLayerItem(itemId: String): OverlayItem? {
         val existing = _layerItems.firstOrNull { it.id == itemId } ?: return null
         if (!canAddLayer(_layerItems, existing.type)) return null
-        pushUndoState()
 
         val durUs = existing.durationUs
         val newStartUs = existing.endUs
         val newEndUs = newStartUs + durUs
-        val maxZ = getTopZIndex()
-        val newLane = findNextAvailableLane(newStartUs, newEndUs)
-
         val copy = existing.copy(
             id = UUID.randomUUID().toString(),
-            laneIndex = newLane,
+            laneIndex = -1,
             startUs = newStartUs,
             endUs = newEndUs,
-            zIndex = maxZ
+            zIndex = 0
         )
-        _layerItems.add(copy)
-        syncLayerPlan()
-        _uiState.update {
-            it.copy(
-                selectedOverlayId = copy.id,
-                selectedClipIndex = null,
-                selectedJunctionIndex = null
-            )
-        }
-        updateProject(_uiState.value.project, recordUndo = false)
-        return copy
+        return if (addLayerItem(copy)) _layerItems.lastOrNull() else null
     }
 
     private fun pushUndoState() {
@@ -855,6 +990,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(itemId)
             LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(itemId)
             LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(itemId)
+            LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(itemId)
             else -> TimelineFocusState.S0_NONE
         }
         _uiState.update {
@@ -913,11 +1049,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _layerItems.add(rightItem)
         syncLayerPlan()
 
+        val newFocus = when (item.type) {
+            LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(rightId)
+            LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(rightId)
+            LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(rightId)
+            LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(rightId)
+            else -> _uiState.value.focusMode
+        }
+
         _uiState.update {
             it.copy(
                 selectedOverlayId = rightId,
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                focusMode = newFocus
             )
         }
         updateProject(_uiState.value.project, recordUndo = false)
@@ -926,37 +1071,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun copySelectedOverlay(): OverlayItem? {
         val selectedId = _uiState.value.selectedOverlayId ?: return null
-        val item = _layerItems.firstOrNull { it.id == selectedId } ?: return null
-        if (!canAddLayer(_layerItems, item.type)) return null
-
-        pushUndoState()
-
-        val durUs = item.durationUs
-        val newStartUs = item.endUs
-        val newEndUs = newStartUs + durUs
-        val maxZ = getTopZIndex()
-        val newLane = findNextAvailableLane(newStartUs, newEndUs)
-
-        val newId = UUID.randomUUID().toString()
-        val copy = item.copy(
-            id = newId,
-            laneIndex = newLane,
-            startUs = newStartUs,
-            endUs = newEndUs,
-            zIndex = maxZ
-        )
-        _layerItems.add(copy)
-        syncLayerPlan()
-
-        _uiState.update {
-            it.copy(
-                selectedOverlayId = newId,
-                selectedClipIndex = null,
-                selectedJunctionIndex = null
-            )
-        }
-        updateProject(_uiState.value.project, recordUndo = false)
-        return copy
+        return copyLayerItem(selectedId)
     }
 
     fun deleteSelectedOverlay(): Boolean {
@@ -1033,8 +1148,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val item = _layerItems[idx]
-        if (newEndUs - newStartUs < OverlayItem.MIN_DURATION_US) return
-        _layerItems[idx] = item.copy(startUs = newStartUs, endUs = newEndUs)
+        val totalDurationUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs })
+        val (clampedStartUs, clampedEndUs) = clampItemTrimBoundsOnRow(
+            items = _layerItems,
+            itemId = itemId,
+            candidateStartUs = newStartUs,
+            candidateEndUs = newEndUs,
+            totalProjectDurationUs = totalDurationUs
+        )
+        if (clampedEndUs - clampedStartUs < OverlayItem.MIN_DURATION_US) return
+        _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs)
         syncLayerPlan()
     }
 
@@ -1042,12 +1165,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val item = _layerItems[idx]
-        if (newEndUs - newStartUs < OverlayItem.MIN_DURATION_US) return
+        val totalDurationUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs })
+        val (clampedStartUs, clampedEndUs) = clampItemTrimBoundsOnRow(
+            items = _layerItems,
+            itemId = itemId,
+            candidateStartUs = newStartUs,
+            candidateEndUs = newEndUs,
+            totalProjectDurationUs = totalDurationUs
+        )
+        if (clampedEndUs - clampedStartUs < OverlayItem.MIN_DURATION_US) return
 
         pushUndoState()
         val topZ = getTopZIndex()
-        val newLane = findNextAvailableLane(newStartUs, newEndUs, excludeItemId = itemId)
-        _layerItems[idx] = item.copy(startUs = newStartUs, endUs = newEndUs, laneIndex = newLane, zIndex = topZ)
+        _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs, zIndex = topZ)
         syncLayerPlan()
         _uiState.update {
             it.copy(

@@ -6,9 +6,11 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -17,10 +19,14 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -33,6 +39,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.flowcut.app.core.edit.SetTimeMapCommand
@@ -50,10 +59,12 @@ import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
@@ -195,7 +206,67 @@ private fun buildPinPath(
 }
 
 /**
- * Safely renders text on Canvas while guaranteeing constraints maxWidth >= minWidth >= 0.
+ * In-memory CPU thumbnail cache for 64x64 PIP overlays (zero allocations in onDraw, Rule R10).
+ */
+private object PipThumbnailCache {
+    private val cache = object : android.util.LruCache<String, ImageBitmap>(32) {}
+
+    fun get(path: String): ImageBitmap? {
+        if (path.isEmpty()) return null
+        val cached = cache.get(path)
+        if (cached != null) return cached
+        try {
+            val file = java.io.File(path)
+            if (!file.exists()) return null
+            val isVideo = path.endsWith(".mp4", ignoreCase = true) ||
+                    path.endsWith(".mkv", ignoreCase = true) ||
+                    path.endsWith(".mov", ignoreCase = true) ||
+                    path.contains("overlay_vid_")
+            val bmp: android.graphics.Bitmap? = if (isVideo) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    try {
+                        android.media.ThumbnailUtils.createVideoThumbnail(
+                            file,
+                            android.util.Size(64, 64),
+                            null
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.media.ThumbnailUtils.createVideoThumbnail(
+                        path,
+                        android.provider.MediaStore.Video.Thumbnails.MICRO_KIND
+                    )
+                }
+            } else {
+                val opts = android.graphics.BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                android.graphics.BitmapFactory.decodeFile(path, opts)
+                var sample = 1
+                while (opts.outWidth / (sample * 2) >= 64 && opts.outHeight / (sample * 2) >= 64) {
+                    sample *= 2
+                }
+                opts.inJustDecodeBounds = false
+                opts.inSampleSize = sample
+                android.graphics.BitmapFactory.decodeFile(path, opts)
+            }
+            if (bmp != null) {
+                val imageBmp = bmp.asImageBitmap()
+                cache.put(path, imageBmp)
+                return imageBmp
+            }
+        } catch (_: Exception) {
+            // Ignore decoding failure
+        }
+        return null
+    }
+}
+
+/**
+ * Safely renders text on Canvas with softWrap = false and maxLines = 1 to prevent right-edge wrapping (Bug 5).
  */
 private fun DrawScope.drawTextSafe(
     textMeasurer: TextMeasurer,
@@ -208,6 +279,13 @@ private fun DrawScope.drawTextSafe(
     if (x >= size.width - 4f || y >= size.height - 4f) return
     if (x < -200f || y < -50f) return
 
+    val textLayoutResult = textMeasurer.measure(
+        text = text,
+        style = style,
+        constraints = Constraints(maxWidth = 1000),
+        softWrap = false,
+        maxLines = 1
+    )
     if (x < 0f || y < 0f) {
         val shiftX = if (x < 0f) x else 0f
         val shiftY = if (y < 0f) y else 0f
@@ -216,18 +294,14 @@ private fun DrawScope.drawTextSafe(
         if (posX >= size.width - 4f || posY >= size.height - 4f) return
         translate(left = shiftX, top = shiftY) {
             drawText(
-                textMeasurer = textMeasurer,
-                text = text,
-                topLeft = Offset(posX, posY),
-                style = style
+                textLayoutResult = textLayoutResult,
+                topLeft = Offset(posX, posY)
             )
         }
     } else {
         drawText(
-            textMeasurer = textMeasurer,
-            text = text,
-            topLeft = Offset(x, y),
-            style = style
+            textLayoutResult = textLayoutResult,
+            topLeft = Offset(x, y)
         )
     }
 }
@@ -295,7 +369,7 @@ fun TimelineCanvas(
     val rowAPinsHeightPx = remember(density) { TimelineHitTester.ROW_A_PINS_HEIGHT_DP * density }
     val rowBBarHeightPx = remember(density) { TimelineHitTester.ROW_B_BAR_HEIGHT_DP * density }
     val mainTrackHeightPx = remember(density) { TimelineHitTester.MAIN_TRACK_HEIGHT_DP * density }
-    val pipCollapsedHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_COLLAPSED_HEIGHT_DP * density }
+    val pipCollapsedLineHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_COLLAPSED_LINE_HEIGHT_DP * density }
     val pipExpandedLaneHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_EXPANDED_LANE_HEIGHT_DP * density }
     val pipExpandedLaneStepPx = remember(density) { TimelineHitTester.ROW_D_PIP_EXPANDED_LANE_STEP_DP * density }
     val pipExpandedTotalHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_EXPANDED_TOTAL_HEIGHT_DP * density }
@@ -351,9 +425,15 @@ fun TimelineCanvas(
     val colorTextWarmOrange = remember { Color(0xFFF59E0B) }
     val colorStickerTeal = remember { Color(0xFF2DD4BF) }
     val colorStickerGreen = remember { Color(0xFF4ADE80) }
-    val colorPipAmberGold = remember { Color(0xFFD4AF37) }
+    val colorPipAmberGold = remember { Color(0xFFC8B84A) }
     val colorPipExpandedBg = remember { Color(0xFF1E232A) }
     val colorYellowHandle = remember { Color(0xFFEAB308) }
+    val pipSelectionStroke = remember(density) { Stroke(width = 1.5f * density) }
+    val pipHandleWidthPx = remember(density) { 10f * density }
+    val pipTileWidthPx = pipExpandedLaneHeightPx
+    val pipTileDstSize = remember(pipExpandedLaneHeightPx) { IntSize(pipExpandedLaneHeightPx.toInt(), pipExpandedLaneHeightPx.toInt()) }
+    val pipGripStroke = remember(density) { Stroke(width = 1.5f * density, cap = StrokeCap.Round) }
+    val pipGripColor = remember { Color(0xFF141414) }
     val colorPinkAddBtn = remember { Color(0xFFFF2D55) }
     val colorCoverCardBg = remember { Color(0xFF1E1E24) }
     val colorSoundBarBg = remember { Color(0xFF1F1F24) }
@@ -393,6 +473,8 @@ fun TimelineCanvas(
 
     val pinPath = remember { Path() }
     val pinOutlinePath = remember { Path() }
+    val stackedPinPath = remember { Path() }
+    val stackedPinStroke = remember(density) { Stroke(width = 1.2f * density) }
     val connectorTickPath = remember { Path() }
     val pinSmilePath = remember { Path() }
     val pinTPath = remember { Path() }
@@ -415,9 +497,80 @@ fun TimelineCanvas(
     val pipRightHandlePath = remember { Path() }
     val pipBadgePath = remember { Path() }
 
+    // Audio Row Resources
+    val colorAudioCardBg = remember { Color(0xFF2563EB) }
+    val colorAudioCardSelectedBg = remember { Color(0xFF1D4ED8) }
+    val colorAudioHandle = remember { Color(0xFF93C5FD) }
+    val colorAudioTrackBg = remember { Color(0x14FFFFFF) }
+    val audioLabelStyle = remember { TextStyle(fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.SemiBold) }
+    val audioCardPath = remember { Path() }
+    val audioLeftHandlePath = remember { Path() }
+    val audioRightHandlePath = remember { Path() }
+
     val soundBarPath = remember { Path() }
 
     val activeTrimPlayheadUs = remember { mutableLongStateOf(Long.MIN_VALUE) }
+
+    // Asynchronous Filmstrip Thumbnail Cache for PIP Rows (Requirement 1 & Rule R10)
+    val pipMediaPaths = remember(overlayItems) {
+        overlayItems.filter { it.type == LayerType.IMAGE || it.type == LayerType.VIDEO }
+            .map { it.mediaPath }
+            .filter { it.isNotEmpty() }
+            .distinct()
+    }
+    val pipThumbnails = remember { mutableStateMapOf<String, ImageBitmap>() }
+
+    LaunchedEffect(pipMediaPaths) {
+        withContext(Dispatchers.IO) {
+            for (path in pipMediaPaths) {
+                if (!pipThumbnails.containsKey(path)) {
+                    try {
+                        val file = java.io.File(path)
+                        if (file.exists()) {
+                            val isVideo = path.endsWith(".mp4", ignoreCase = true) ||
+                                    path.endsWith(".mkv", ignoreCase = true) ||
+                                    path.endsWith(".mov", ignoreCase = true) ||
+                                    path.contains("overlay_vid_")
+                            val bmp: android.graphics.Bitmap? = if (isVideo) {
+                                val retriever = android.media.MediaMetadataRetriever()
+                                try {
+                                    retriever.setDataSource(path)
+                                    val raw = retriever.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                    if (raw != null) {
+                                        val scaled = android.graphics.Bitmap.createScaledBitmap(raw, 56, 56, true)
+                                        if (scaled != raw) raw.recycle()
+                                        scaled
+                                    } else null
+                                } catch (_: Exception) {
+                                    null
+                                } finally {
+                                    try { retriever.release() } catch (_: Exception) {}
+                                }
+                            } else {
+                                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                android.graphics.BitmapFactory.decodeFile(path, opts)
+                                var sample = 1
+                                while (opts.outWidth / (sample * 2) >= 56 && opts.outHeight / (sample * 2) >= 56) {
+                                    sample *= 2
+                                }
+                                opts.inJustDecodeBounds = false
+                                opts.inSampleSize = sample
+                                val raw = android.graphics.BitmapFactory.decodeFile(path, opts)
+                                if (raw != null) {
+                                    val scaled = android.graphics.Bitmap.createScaledBitmap(raw, 56, 56, true)
+                                    if (scaled != raw) raw.recycle()
+                                    scaled
+                                } else null
+                            }
+                            if (bmp != null) {
+                                pipThumbnails[path] = bmp.asImageBitmap()
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
 
     Canvas(
         modifier = modifier
@@ -440,7 +593,9 @@ fun TimelineCanvas(
 
                     val isRowBOpenOnDown = focus is TimelineFocusState.S3_STICKER_ITEM || focus is TimelineFocusState.S4_TEXT_ITEM
                     val rowBHeightDpOnDown = if (isRowBOpenOnDown) TimelineHitTester.ROW_B_BAR_HEIGHT_DP else 0f
-                    val rowCTopDpOnDown = TimelineHitTester.RULER_HEIGHT_DP + TimelineHitTester.ROW_A_PINS_HEIGHT_DP + rowBHeightDpOnDown
+                    val rowBTopDpOnDown = TimelineHitTester.RULER_HEIGHT_DP + TimelineHitTester.ROW_A_PINS_HEIGHT_DP + TimelineHitTester.ROW_GAP_DP
+                    val rowBBottomDpOnDown = rowBTopDpOnDown + rowBHeightDpOnDown
+                    val rowCTopDpOnDown = if (isRowBOpenOnDown) rowBBottomDpOnDown + TimelineHitTester.ROW_GAP_DP else rowBTopDpOnDown
 
                     val trimHandleHit = if (selectedClipIndex in 0 until snapshotOnDown.main.n) {
                         TimelineHitTester.hitTestTrimHandle(
@@ -600,23 +755,27 @@ fun TimelineCanvas(
                         val effectiveDeltaUs = dragDeltaUs + accumulatedAutoScrollUs
                         val totalTimelineUs = msToUs(holder.current.totalMs)
 
-                        val newStartUs: Long
-                        val newEndUs: Long
+                        val rawStartUs: Long
+                        val rawEndUs: Long
                         if (isOverlayLeftHandle) {
-                            newStartUs = (initialOverlayStartUs + effectiveDeltaUs).coerceIn(0L, initialOverlayEndUs - OverlayItem.MIN_DURATION_US)
-                            newEndUs = initialOverlayEndUs
+                            rawStartUs = initialOverlayStartUs + effectiveDeltaUs
+                            rawEndUs = initialOverlayEndUs
                         } else {
-                            val candidateEndUs = initialOverlayEndUs + effectiveDeltaUs
-                            if (candidateEndUs > totalTimelineUs) {
-                                if (!hasShownDurationToast) {
-                                    hasShownDurationToast = true
-                                    currentOnToast("Cannot exceed video duration")
-                                }
+                            rawStartUs = initialOverlayStartUs
+                            rawEndUs = initialOverlayEndUs + effectiveDeltaUs
+                            if (rawEndUs > totalTimelineUs && !hasShownDurationToast) {
+                                hasShownDurationToast = true
+                                currentOnToast("Cannot exceed video duration")
                             }
-                            val maxAllowedEndUs = totalTimelineUs.coerceAtLeast(initialOverlayStartUs + OverlayItem.MIN_DURATION_US)
-                            newStartUs = initialOverlayStartUs
-                            newEndUs = candidateEndUs.coerceIn(initialOverlayStartUs + OverlayItem.MIN_DURATION_US, maxAllowedEndUs)
                         }
+
+                        val (newStartUs, newEndUs) = com.flowcut.app.engine.clampItemTrimBoundsOnRow(
+                            items = currentOverlayItems,
+                            itemId = curOverlayItem.id,
+                            candidateStartUs = rawStartUs,
+                            candidateEndUs = rawEndUs,
+                            totalProjectDurationUs = totalTimelineUs
+                        )
 
                         if (newStartUs != currentOverlayStartUs || newEndUs != currentOverlayEndUs) {
                             currentOverlayStartUs = newStartUs
@@ -917,24 +1076,40 @@ fun TimelineCanvas(
         val focus = currentFocusMode
         val isRowBOpen = focus is TimelineFocusState.S3_STICKER_ITEM || focus is TimelineFocusState.S4_TEXT_ITEM
         val isPipExpanded = focus is TimelineFocusState.S1_PIP_GROUP || focus is TimelineFocusState.S2_PIP_ITEM
+        val isAudioExpanded = focus is TimelineFocusState.S5_AUDIO_GROUP || focus is TimelineFocusState.S6_AUDIO_ITEM
 
-        // Dynamic vertical layout coordinates
+        val pipItems = overlayItems.filter { it.type == LayerType.VIDEO || it.type == LayerType.IMAGE }
+        val audioItems = overlayItems.filter { it.type == LayerType.AUDIO }
+        val occupiedPipLanes = pipItems.map { it.laneIndex.coerceIn(0, 3) }.toSet()
+        val activePipLaneCount = if (occupiedPipLanes.isEmpty()) 0 else (occupiedPipLanes.max() + 1).coerceIn(1, 4)
+
+        // Constant vertical layout coordinates
         val rowATop = rulerHeightPx
         val rowABottom = rowATop + rowAPinsHeightPx
 
-        val rowBTop = rowABottom
+        val rowBTop = rowABottom + (TimelineHitTester.ROW_GAP_DP * density)
         val rowBHeight = if (isRowBOpen) rowBBarHeightPx else 0f
         val rowBBottom = rowBTop + rowBHeight
 
-        val rowCTop = rowBBottom + (2f * density)
+        val rowCTop = if (isRowBOpen) rowBBottom + (TimelineHitTester.ROW_GAP_DP * density) else rowBTop
         val rowCBottom = rowCTop + mainTrackHeightPx
 
-        val rowDTop = rowCBottom + (4f * density)
-        val rowDHeight = if (isPipExpanded) pipExpandedTotalHeightPx else pipCollapsedHeightPx
-        val rowDBottom = rowDTop + rowDHeight
+        val rowDTop = rowCBottom + (TimelineHitTester.ROW_D_TOP_MARGIN_DP * density)
+        val lowerRowHeightPx = TimelineHitTester.LOWER_ROW_HEIGHT_DP * density
+        val lowerRowStepPx = TimelineHitTester.LOWER_ROW_STEP_DP * density
 
-        val rowETop = rowDBottom + (4f * density)
-        val rowEBottom = rowETop + soundBarHeightPx
+        val thinLinesBottomPx = if (activePipLaneCount > 0) {
+            rowDTop + (((activePipLaneCount - 1) * 7f + 3.5f) * density)
+        } else {
+            rowDTop
+        }
+
+        val soundBarTop = if (activePipLaneCount > 0) {
+            thinLinesBottomPx + (8f * density)
+        } else {
+            rowDTop + (4f * density)
+        }
+        val soundBarBottom = soundBarTop + soundBarHeightPx
 
         val selectedOverlayId = (currentSelection as? TimelineSelection.OverlaySelected)?.itemId ?: focus.currentSelectedItemId
 
@@ -1015,6 +1190,8 @@ fun TimelineCanvas(
         // =========================================================================================
         // ROW A: Top Pins Row for Text & Stickers
         // =========================================================================================
+        val conflictDistPx = 0.30f * pinWidthPx
+
         for (idx in overlayItems.indices) {
             val item = overlayItems[idx]
             if (item.type != LayerType.TEXT && item.type != LayerType.STICKER) continue
@@ -1044,6 +1221,33 @@ fun TimelineCanvas(
             if (startX in -50f..size.width + 50f) {
                 val elevationY = if (isSelectedPin) -4f * density else 0f
                 val pinTopY = rowATop + (2f * density) + elevationY
+
+                // Check if this pin is in a >= 70% overlap conflict with any other pin
+                var hasOverlapConflict = false
+                for (otherIdx in overlayItems.indices) {
+                    val other = overlayItems[otherIdx]
+                    if (other.id != item.id && (other.type == LayerType.TEXT || other.type == LayerType.STICKER)) {
+                        val otherStartX = zoomState.timeUsToX(other.startUs, offsetPx, halfWidthInt, pxPerUs)
+                        if (abs(startX - otherStartX) <= conflictDistPx) {
+                            hasOverlapConflict = true
+                            break
+                        }
+                    }
+                }
+
+                // If overlapping >= 70%, draw subtle multi-layer stacked outline behind the pin
+                if (hasOverlapConflict) {
+                    buildPinPath(
+                        path = stackedPinPath,
+                        anchorX = startX + (3.5f * density),
+                        top = pinTopY - (2.5f * density),
+                        width = pinWidthPx,
+                        height = pinHeightPx,
+                        cornerRadius = pinCornerRadiusPx
+                    )
+                    drawPath(path = stackedPinPath, color = Color(0x991E1E24))
+                    drawPath(path = stackedPinPath, color = Color(0xCCFFFFFF), style = stackedPinStroke)
+                }
 
                 buildPinPath(
                     path = pinPath,
@@ -1129,7 +1333,13 @@ fun TimelineCanvas(
                     val barH = barBottom - barTop
                     val barR = 5f * density
 
-                    val fillColor = if (focus is TimelineFocusState.S4_TEXT_ITEM) colorTextWarmOrange else colorStickerTeal
+                    val fillColor = if (focus is TimelineFocusState.S4_TEXT_ITEM) {
+                        colorTextWarmOrange
+                    } else if (selItem.mediaPath.isNotEmpty()) {
+                        colorStickerGreen
+                    } else {
+                        colorStickerTeal
+                    }
 
                     buildClipCornerPath(
                         path = rowBBarPath,
@@ -1604,38 +1814,13 @@ fun TimelineCanvas(
         }
 
         // =========================================================================================
-        // ROW D: 4-Lane PIP Area (Thin Lines vs Expanded Thumbnail Lanes)
+        // ROW D: Fixed 4-Row Area Below Main Track (PIP / Audio / Collapsed)
         // =========================================================================================
-        val pipItems = overlayItems.filter { it.type == LayerType.VIDEO || it.type == LayerType.IMAGE }
-
-        if (!isPipExpanded) {
-            // Collapsed 4-lane thin lines in amber/gold (3.5.dp thick, 8.dp apart)
+        if (isPipExpanded) {
+            // Expanded 4 PIP Rows (28.dp tall each, 4.dp gap, row step = 32.dp)
             for (lane in 0..3) {
-                val lineY = rowDTop + (3f * density) + (lane * 8f * density)
-                val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
-                for (item in lanePipItems) {
-                    val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
-                    val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
-                    if (eX > sX && eX >= -50f && sX <= size.width + 50f) {
-                        buildClipCornerPath(
-                            path = pipThinLinePath,
-                            left = sX,
-                            top = lineY,
-                            right = eX,
-                            bottom = lineY + (3.5f * density),
-                            roundLeft = true,
-                            roundRight = true,
-                            radius = 1.75f * density
-                        )
-                        drawPath(path = pipThinLinePath, color = colorPipAmberGold)
-                    }
-                }
-            }
-        } else {
-            // Expanded 4 thumbnail lanes (36.dp tall each, 42.dp row step)
-            for (lane in 0..3) {
-                val laneTop = rowDTop + (3f * density) + (lane * pipExpandedLaneStepPx)
-                val laneBottom = laneTop + pipExpandedLaneHeightPx
+                val laneTop = rowDTop + (lane * lowerRowStepPx)
+                val laneBottom = laneTop + lowerRowHeightPx
                 val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
 
                 for (item in lanePipItems) {
@@ -1656,69 +1841,102 @@ fun TimelineCanvas(
                         roundRight = true,
                         radius = 4f * density
                     )
-                    drawPath(path = pipLaneCardPath, color = colorPipExpandedBg)
 
-                    // Repeating filmstrip frame divisions
-                    val pipCellStepUs = 1_000_000L
-                    var cellUs = item.startUs + pipCellStepUs
-                    while (cellUs < item.endUs) {
-                        val cx = zoomState.timeUsToX(cellUs, offsetPx, halfWidthInt, pxPerUs)
-                        if (cx in sX + 2f..eX - 2f) {
-                            drawLine(
-                                color = clipCellDividerColor,
-                                start = Offset(cx, laneTop),
-                                end = Offset(cx, laneBottom),
-                                strokeWidth = 1f * density
+                    clipPath(path = pipLaneCardPath) {
+                        drawPath(path = pipLaneCardPath, color = colorPipExpandedBg)
+
+                        val thumb = pipThumbnails[item.mediaPath] ?: if (item.mediaPath.isNotEmpty()) PipThumbnailCache.get(item.mediaPath) else null
+                        val cellWidthPx = pipTileWidthPx
+                        if (thumb != null) {
+                            var tileX = sX
+                            while (tileX < eX) {
+                                drawImage(
+                                    image = thumb,
+                                    dstOffset = IntOffset(tileX.toInt(), laneTop.toInt()),
+                                    dstSize = pipTileDstSize
+                                )
+                                drawLine(
+                                    color = Color(0x44000000),
+                                    start = Offset(tileX + cellWidthPx, laneTop),
+                                    end = Offset(tileX + cellWidthPx, laneBottom),
+                                    strokeWidth = 1f * density
+                                )
+                                tileX += cellWidthPx
+                            }
+                        } else {
+                            var tileX = sX
+                            var alt = false
+                            while (tileX < eX) {
+                                if (alt) {
+                                    drawRect(
+                                        color = Color(0x22FFFFFF),
+                                        topLeft = Offset(tileX, laneTop),
+                                        size = Size(minOf(cellWidthPx, eX - tileX), lowerRowHeightPx)
+                                    )
+                                }
+                                drawLine(
+                                    color = clipCellDividerColor,
+                                    start = Offset(tileX + cellWidthPx, laneTop),
+                                    end = Offset(tileX + cellWidthPx, laneBottom),
+                                    strokeWidth = 1f * density
+                                )
+                                tileX += cellWidthPx
+                                alt = !alt
+                            }
+                        }
+
+                        // On S2_PIP_ITEM: volume badge "🔊 100%"
+                        if (isSelectedPip && eX - sX > 56f * density) {
+                            val volW = 54f * density
+                            val volH = 15f * density
+                            val volLeft = sX + (6f * density)
+                            val volTop = laneTop + (lowerRowHeightPx - volH) / 2f
+                            drawRoundRect(
+                                color = Color(0x99000000),
+                                topLeft = Offset(volLeft, volTop),
+                                size = Size(volW, volH),
+                                cornerRadius = CornerRadius(3f * density, 3f * density)
+                            )
+                            drawTextSafe(
+                                textMeasurer = textMeasurer,
+                                text = "🔊 100%",
+                                x = volLeft + (3f * density),
+                                y = volTop + (1.5f * density),
+                                style = pipVolStyle
                             )
                         }
-                        cellUs += pipCellStepUs
-                    }
 
-                    // PIP Type Label & volume on left
-                    val pipLabel = if (isSelectedPip) "🔊 100%" else if (item.type == LayerType.VIDEO) "PIP Video" else "PIP Image"
-                    drawTextSafe(
-                        textMeasurer = textMeasurer,
-                        text = pipLabel,
-                        x = sX + (6f * density),
-                        y = laneTop + (11f * density),
-                        style = pipVolStyle
-                    )
-
-                    // Duration badge on right
-                    val durBadgeStr = durationBadgeCache.get(item.durationUs)
-                    val badgeW = 42f * density
-                    val badgeH = 15f * density
-                    val badgeLeft = eX - badgeW - (6f * density)
-                    val badgeTop = laneTop + (pipExpandedLaneHeightPx - badgeH) / 2f
-                    if (badgeLeft > sX + (45f * density)) {
-                        buildClipCornerPath(
-                            path = pipBadgePath,
-                            left = badgeLeft,
-                            top = badgeTop,
-                            right = badgeLeft + badgeW,
-                            bottom = badgeTop + badgeH,
-                            roundLeft = true,
-                            roundRight = true,
-                            radius = 3f * density
-                        )
-                        drawPath(path = pipBadgePath, color = Color(0x99000000))
-                        drawTextSafe(
-                            textMeasurer = textMeasurer,
-                            text = durBadgeStr,
-                            x = badgeLeft + (4f * density),
-                            y = badgeTop + (1f * density),
-                            style = durationBadgeStyle
-                        )
+                        // On S2_PIP_ITEM: duration badge on right
+                        if (isSelectedPip) {
+                            val durBadgeStr = durationBadgeCache.get(item.durationUs)
+                            val badgeW = 42f * density
+                            val badgeH = 15f * density
+                            val badgeLeft = eX - badgeW - (6f * density)
+                            val badgeTop = laneTop + (lowerRowHeightPx - badgeH) / 2f
+                            if (badgeLeft > sX + (66f * density)) {
+                                drawRoundRect(
+                                    color = Color(0x99000000),
+                                    topLeft = Offset(badgeLeft, badgeTop),
+                                    size = Size(badgeW, badgeH),
+                                    cornerRadius = CornerRadius(3f * density, 3f * density)
+                                )
+                                drawTextSafe(
+                                    textMeasurer = textMeasurer,
+                                    text = durBadgeStr,
+                                    x = badgeLeft + (4f * density),
+                                    y = badgeTop + (1.5f * density),
+                                    style = durationBadgeStyle
+                                )
+                            }
+                        }
                     }
 
                     // In S2_PIP_ITEM: Yellow Left Handle, selection border, and trim handles
                     if (isSelectedPip) {
-                        // Crisp Yellow selection border
-                        drawPath(path = pipLaneCardPath, color = colorYellowHandle, style = whiteSelectionStroke)
+                        drawPath(path = pipLaneCardPath, color = colorYellowHandle, style = pipSelectionStroke)
 
-                        // Yellow Left Handle (<)
-                        val r = minOf(handleCornerRadiusPx, handleWidthPx / 2f, pipExpandedLaneHeightPx / 2f)
-                        val leftHandleLeft = sX - handleWidthPx
+                        val r = minOf(4f * density, pipHandleWidthPx / 2f, lowerRowHeightPx / 2f)
+                        val leftHandleLeft = sX - pipHandleWidthPx
                         val leftHandleRight = sX
                         pipLeftHandlePath.reset()
                         pipLeftHandlePath.moveTo(leftHandleRight, laneTop)
@@ -1730,9 +1948,18 @@ fun TimelineCanvas(
                         pipLeftHandlePath.close()
                         drawPath(path = pipLeftHandlePath, color = colorYellowHandle)
 
-                        // Right Handle (>)
+                        // Vertical dark grip line inside left handle
+                        val leftGripX = sX - (pipHandleWidthPx / 2f)
+                        drawLine(
+                            color = pipGripColor,
+                            start = Offset(leftGripX, laneTop + 5f * density),
+                            end = Offset(leftGripX, laneBottom - 5f * density),
+                            strokeWidth = 1.5f * density,
+                            cap = StrokeCap.Round
+                        )
+
                         val rightHandleLeft = eX
-                        val rightHandleRight = eX + handleWidthPx
+                        val rightHandleRight = eX + pipHandleWidthPx
                         pipRightHandlePath.reset()
                         pipRightHandlePath.moveTo(rightHandleLeft, laneTop)
                         pipRightHandlePath.lineTo(rightHandleRight - r, laneTop)
@@ -1742,6 +1969,111 @@ fun TimelineCanvas(
                         pipRightHandlePath.lineTo(rightHandleLeft, laneBottom)
                         pipRightHandlePath.close()
                         drawPath(path = pipRightHandlePath, color = colorYellowHandle)
+
+                        // Vertical dark grip line inside right handle
+                        val rightGripX = eX + (pipHandleWidthPx / 2f)
+                        drawLine(
+                            color = pipGripColor,
+                            start = Offset(rightGripX, laneTop + 5f * density),
+                            end = Offset(rightGripX, laneBottom - 5f * density),
+                            strokeWidth = 1.5f * density,
+                            cap = StrokeCap.Round
+                        )
+                    } else {
+                        drawPath(path = pipLaneCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
+                    }
+                }
+            }
+        } else if (isAudioExpanded) {
+            // 1. Keep the 4 PIP thin indicator lines visible above the expanded audio row(s)
+            for (lane in 0 until activePipLaneCount) {
+                val lineY = rowDTop + (lane * 7f * density)
+                val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
+                for (item in lanePipItems) {
+                    val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
+                    val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
+                    if (eX > sX && eX >= -50f && sX <= size.width + 50f) {
+                        buildClipCornerPath(
+                            path = pipThinLinePath,
+                            left = sX,
+                            top = lineY,
+                            right = eX,
+                            bottom = lineY + (3.5f * density),
+                            roundLeft = true,
+                            roundRight = true,
+                            radius = 1.75f * density
+                        )
+                        drawPath(path = pipThinLinePath, color = colorPipAmberGold)
+                    }
+                }
+            }
+
+            // 2. Expanded 4 Audio Rows (placed right below the thin PIP lines)
+            val audioRowsTop = if (activePipLaneCount > 0) thinLinesBottomPx + (4f * density) else rowDTop
+            for (lane in 0..3) {
+                val laneTop = audioRowsTop + (lane * lowerRowStepPx)
+                val laneBottom = laneTop + lowerRowHeightPx
+                val laneAudioItems = audioItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
+
+                for (item in laneAudioItems) {
+                    val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
+                    val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
+                    val itemW = eX - sX
+                    if (itemW <= 0f || eX < -handleWidthPx || sX > size.width + handleWidthPx) continue
+
+                    val isSelectedAudio = (focus is TimelineFocusState.S6_AUDIO_ITEM && focus.itemId == item.id)
+
+                    buildClipCornerPath(
+                        path = audioCardPath,
+                        left = sX,
+                        top = laneTop,
+                        right = eX,
+                        bottom = laneBottom,
+                        roundLeft = true,
+                        roundRight = true,
+                        radius = 4f * density
+                    )
+
+                    val bgColor = if (isSelectedAudio) colorAudioCardSelectedBg else colorAudioCardBg
+                    drawPath(path = audioCardPath, color = bgColor)
+
+                    // Sound title label
+                    val title = if (item.text.isNotEmpty()) item.text else "Sound"
+                    drawTextSafe(
+                        textMeasurer = textMeasurer,
+                        text = "♪ $title",
+                        x = sX + (8f * density),
+                        y = laneTop + (6f * density),
+                        style = audioLabelStyle
+                    )
+
+                    if (isSelectedAudio) {
+                        drawPath(path = audioCardPath, color = colorAudioHandle, style = whiteSelectionStroke)
+
+                        val r = minOf(handleCornerRadiusPx, handleWidthPx / 2f, lowerRowHeightPx / 2f)
+                        val leftHandleLeft = sX - handleWidthPx
+                        val leftHandleRight = sX
+                        audioLeftHandlePath.reset()
+                        audioLeftHandlePath.moveTo(leftHandleRight, laneTop)
+                        audioLeftHandlePath.lineTo(leftHandleLeft + r, laneTop)
+                        audioLeftHandlePath.quadraticTo(leftHandleLeft, laneTop, leftHandleLeft, laneTop + r)
+                        audioLeftHandlePath.lineTo(leftHandleLeft, laneBottom - r)
+                        audioLeftHandlePath.quadraticTo(leftHandleLeft, laneBottom, leftHandleLeft + r, laneBottom)
+                        audioLeftHandlePath.lineTo(leftHandleRight, laneBottom)
+                        audioLeftHandlePath.close()
+                        drawPath(path = audioLeftHandlePath, color = colorAudioHandle)
+
+                        val rightHandleLeft = eX
+                        val rightHandleRight = eX + handleWidthPx
+                        audioRightHandlePath.reset()
+                        audioRightHandlePath.moveTo(rightHandleLeft, laneTop)
+                        audioRightHandlePath.lineTo(rightHandleRight - r, laneTop)
+                        audioRightHandlePath.quadraticTo(rightHandleRight, laneTop, rightHandleRight, laneTop + r)
+                        audioRightHandlePath.lineTo(rightHandleRight, laneBottom - r)
+                        audioRightHandlePath.quadraticTo(rightHandleRight, laneBottom, rightHandleRight - r, laneBottom)
+                        audioRightHandlePath.lineTo(rightHandleLeft, laneBottom)
+                        audioRightHandlePath.close()
+                        drawPath(path = audioRightHandlePath, color = colorAudioHandle)
 
                         val centerY = (laneTop + laneBottom) / 2f
                         val leftCenterX = sX - (handleWidthPx / 2f)
@@ -1758,45 +2090,77 @@ fun TimelineCanvas(
                         rightChevronPath.lineTo(rightCenterX - chevronHalfWPx, centerY + chevronHalfHPx)
                         drawPath(path = rightChevronPath, color = chevronColor, style = chevronStroke)
                     } else {
-                        drawPath(path = pipLaneCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
+                        drawPath(path = audioCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
+                    }
+                }
+            }
+        } else {
+            // Collapsed states (S0, S3, S4):
+            // 1. Thin yellow/gold PIP indicator lines (3.5.dp thick, 7.dp step)
+            for (lane in 0 until activePipLaneCount) {
+                val lineY = rowDTop + (lane * 7f * density)
+                val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
+                for (item in lanePipItems) {
+                    val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
+                    val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
+                    if (eX > sX && eX >= -50f && sX <= size.width + 50f) {
+                        buildClipCornerPath(
+                            path = pipThinLinePath,
+                            left = sX,
+                            top = lineY,
+                            right = eX,
+                            bottom = lineY + (3.5f * density),
+                            roundLeft = true,
+                            roundRight = true,
+                            radius = 1.75f * density
+                        )
+                        drawPath(path = pipThinLinePath, color = colorPipAmberGold)
+                    }
+                }
+            }
+
+            // 2. "♪ Sound collection" Bar anchored strictly to [0L..totalUsForSound]
+            val totalUsForSound = msToUs(snapshot.totalMs)
+            val soundBarLeft = zoomState.timeUsToX(0L, offsetPx, halfWidthInt, pxPerUs)
+            val soundBarRight = if (totalUsForSound > 0L) {
+                zoomState.timeUsToX(totalUsForSound, offsetPx, halfWidthInt, pxPerUs)
+            } else {
+                soundBarLeft + (120f * density)
+            }
+            val soundBarW = soundBarRight - soundBarLeft
+
+            if (soundBarW > 0f && soundBarRight >= -50f && soundBarLeft <= size.width + 50f) {
+                buildClipCornerPath(
+                    path = soundBarPath,
+                    left = soundBarLeft,
+                    top = soundBarTop,
+                    right = soundBarRight,
+                    bottom = soundBarBottom,
+                    roundLeft = true,
+                    roundRight = true,
+                    radius = 5f * density
+                )
+                clipPath(path = soundBarPath) {
+                    drawPath(path = soundBarPath, color = colorSoundBarBg)
+                    drawPath(path = soundBarPath, color = Color(0x26FFFFFF), style = unselectedStroke)
+
+                    // Keep "♪ Sound collection" label pinned inside visible portion of [soundBarLeft, soundBarRight]
+                    val visibleTextX = maxOf(soundBarLeft + (10f * density), 16f * density)
+                    if (visibleTextX < soundBarRight - (40f * density)) {
+                        drawTextSafe(
+                            textMeasurer = textMeasurer,
+                            text = "♪ Sound collection",
+                            x = visibleTextX,
+                            y = soundBarTop + (4.5f * density),
+                            style = soundLabelStyle
+                        )
                     }
                 }
             }
         }
 
-        // =========================================================================================
-        // ROW E: "♪ Sound collection" Bar Below PIP
-        // =========================================================================================
-        val soundBarLeft = clip0LeftX - (30f * density)
-        val totalUsForSound = msToUs(snapshot.totalMs)
-        val soundBarRight = maxOf(zoomState.timeUsToX(totalUsForSound, offsetPx, halfWidthInt, pxPerUs) + (40f * density), size.width + (50f * density))
-
-        if (soundBarRight >= -50f && soundBarLeft <= size.width + 50f) {
-            buildClipCornerPath(
-                path = soundBarPath,
-                left = soundBarLeft,
-                top = rowETop,
-                right = soundBarRight,
-                bottom = rowEBottom,
-                roundLeft = true,
-                roundRight = true,
-                radius = 5f * density
-            )
-            drawPath(path = soundBarPath, color = colorSoundBarBg)
-            drawPath(path = soundBarPath, color = Color(0x26FFFFFF), style = unselectedStroke)
-
-            val textX = maxOf(16f * density, soundBarLeft + (12f * density))
-            drawTextSafe(
-                textMeasurer = textMeasurer,
-                text = "♪ Sound collection",
-                x = textX,
-                y = rowETop + (5f * density),
-                style = soundLabelStyle
-            )
-        }
-
         // Feature Lanes (shifted below Row E)
-        val lanesTop = rowEBottom + (8f * density)
+        val lanesTop = soundBarBottom + (8f * density)
         if (snapshot.lanes.isNotEmpty()) {
             for (laneIdx in snapshot.lanes.indices) {
                 val lane = snapshot.lanes[laneIdx]

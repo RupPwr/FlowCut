@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallSplit
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.ui.draw.alpha
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -50,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -57,8 +61,13 @@ import androidx.compose.ui.unit.sp
 fun BottomToolbar(
     isClipSelected: Boolean = false,
     isOverlaySelected: Boolean = false,
+    isPipOverlaySelected: Boolean = false,
+    isPipActive: Boolean = false,
+    isPipItemSelected: Boolean = false,
+    canSplitPip: Boolean = true,
     isTextOverlaySelected: Boolean = false,
     isTextToolbarActive: Boolean = false,
+    onAddOverlayClick: () -> Unit = {},
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
     onVolumeClick: () -> Unit = {},
@@ -136,16 +145,17 @@ fun BottomToolbar(
                         .weight(1f)
                         .fillMaxHeight()
                         .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Split Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onSplitClick() },
+                            .clickable { onSplitClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -159,17 +169,21 @@ fun BottomToolbar(
                         Text(
                             text = "SPLIT",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Trim Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onTrimClick() },
+                            .clickable { onTrimClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -183,17 +197,21 @@ fun BottomToolbar(
                         Text(
                             text = "TRIM",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Volume Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onVolumeClick() },
+                            .clickable { onVolumeClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -207,17 +225,21 @@ fun BottomToolbar(
                         Text(
                             text = "VOLUME",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Speed Action (0.2x to 10.0x)
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onSpeedClick() },
+                            .clickable { onSpeedClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -231,17 +253,21 @@ fun BottomToolbar(
                         Text(
                             text = "SPEED",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Adjust Action (Color Adjust: Brightness, Contrast, Saturation, etc.)
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onAdjustClick() },
+                            .clickable { onAdjustClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -255,17 +281,21 @@ fun BottomToolbar(
                         Text(
                             text = "ADJUST",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Background Action (Blur / Solid Color Canvas Background)
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onBackgroundClick() },
+                            .clickable { onBackgroundClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -279,17 +309,21 @@ fun BottomToolbar(
                         Text(
                             text = "BG",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Rotate Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onRotateClick() },
+                            .clickable { onRotateClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -303,17 +337,21 @@ fun BottomToolbar(
                         Text(
                             text = "ROTATE",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Flip Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onFlipClick() },
+                            .clickable { onFlipClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -327,17 +365,21 @@ fun BottomToolbar(
                         Text(
                             text = "FLIP",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Opacity Action (0% to 100%)
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onOpacityClick() },
+                            .clickable { onOpacityClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -351,17 +393,21 @@ fun BottomToolbar(
                         Text(
                             text = "OPACITY",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Copy (Duplicate) Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onCopyClick() },
+                            .clickable { onCopyClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -375,17 +421,21 @@ fun BottomToolbar(
                         Text(
                             text = "COPY",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Replace Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onReplaceClick() },
+                            .clickable { onReplaceClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -399,17 +449,21 @@ fun BottomToolbar(
                         Text(
                             text = "REPLACE",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Freeze Action (3.0s Still Frame)
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onFreezeClick() },
+                            .clickable { onFreezeClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -423,17 +477,21 @@ fun BottomToolbar(
                         Text(
                             text = "FREEZE",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Delete Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onDeleteClipClick?.invoke() },
+                            .clickable { onDeleteClipClick?.invoke() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -447,8 +505,11 @@ fun BottomToolbar(
                         Text(
                             text = "DELETE",
                             color = colors.danger,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -498,9 +559,10 @@ fun BottomToolbar(
                     // 1. Add text
                     Column(
                         modifier = Modifier
-                            .width(52.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onAddTextClick() },
+                            .clickable { onAddTextClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -515,16 +577,20 @@ fun BottomToolbar(
                             text = "Add text",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 2. Edit
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onEditTextOverlayClick() },
+                            .clickable { onEditTextOverlayClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -539,16 +605,20 @@ fun BottomToolbar(
                             text = "Edit",
                             color = colors.accent,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 3. Font
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onFontClick() },
+                            .clickable { onFontClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -563,16 +633,20 @@ fun BottomToolbar(
                             text = "Font",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 4. Color
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onColorClick() },
+                            .clickable { onColorClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -587,16 +661,20 @@ fun BottomToolbar(
                             text = "Color",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 5. Animation
                     Column(
                         modifier = Modifier
-                            .width(56.dp)
+                            .widthIn(min = 56.dp)
                             .fillMaxHeight()
-                            .clickable { onAnimationClick() },
+                            .clickable { onAnimationClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -611,16 +689,20 @@ fun BottomToolbar(
                             text = "Animation",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 6. Split
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onSplitClick() },
+                            .clickable { onSplitClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -635,16 +717,20 @@ fun BottomToolbar(
                             text = "Split",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 7. Delete
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onDeleteClipClick?.invoke() },
+                            .clickable { onDeleteClipClick?.invoke() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -659,16 +745,20 @@ fun BottomToolbar(
                             text = "Delete",
                             color = colors.danger,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 8. Adjust
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onOpacityClick() },
+                            .clickable { onOpacityClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -683,16 +773,20 @@ fun BottomToolbar(
                             text = "Adjust",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // 9. Copy
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onCopyClick() },
+                            .clickable { onCopyClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -707,7 +801,287 @@ fun BottomToolbar(
                             text = "Copy",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        } else if (isPipActive) {
+            // Dedicated PIP Toolbar matching image_21c07a.jpg
+            val itemToolsEnabled = isPipItemSelected
+            val splitEnabled = isPipItemSelected && canSplitPip
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(64.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 1. Left ⌄ collapse chevron (returns to S0_NONE)
+                Box(
+                    modifier = Modifier
+                        .width(48.dp)
+                        .fillMaxHeight()
+                        .clickable { onClearSelection() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Collapse PIP",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // Vertical separator
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(24.dp)
+                        .background(colors.border)
+                )
+
+                // Actions: ADD, ANIMATION, OPACITY, SPLIT, DELETE, COPY, ROTATE, FLIP
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 1. ADD (ALWAYS enabled in both S1 and S2)
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .clickable { onAddOverlayClick() }
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AddPhotoAlternate,
+                            contentDescription = "ADD",
+                            tint = colors.accent,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ADD",
+                            color = colors.accent,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 2. ANIMATION
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onAnimationClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Animation,
+                            contentDescription = "ANIMATION",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ANIMATION",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 3. OPACITY
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onOpacityClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Opacity,
+                            contentDescription = "OPACITY",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "OPACITY",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 4. SPLIT
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (splitEnabled) 1.0f else 0.35f)
+                            .then(if (splitEnabled) Modifier.clickable { onSplitClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                            contentDescription = "SPLIT",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "SPLIT",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 5. DELETE
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onDeleteClipClick?.invoke() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "DELETE",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "DELETE",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 6. COPY
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onCopyClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "COPY",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "COPY",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 7. ROTATE
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onRotateClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.RotateRight,
+                            contentDescription = "ROTATE",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ROTATE",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 8. FLIP
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onFlipClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Flip,
+                            contentDescription = "FLIP",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "FLIP",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -744,23 +1118,54 @@ fun BottomToolbar(
                         .background(colors.border)
                 )
 
-                // Actions: EDIT (for text), SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE
+                // Actions: ADD (for PIP), EDIT (for text), SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE
                 Row(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
                         .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Add Action (for PIP overlays)
+                    if (isPipOverlaySelected || !isTextOverlaySelected) {
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAddOverlayClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = "ADD",
+                                tint = colors.accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "ADD",
+                                color = colors.accent,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
                     // Edit Action (when Text overlay is selected)
                     if (isTextOverlaySelected) {
                         Column(
                             modifier = Modifier
-                                .width(48.dp)
+                                .widthIn(min = 52.dp)
                                 .fillMaxHeight()
-                                .clickable { onEditTextOverlayClick() },
+                                .clickable { onEditTextOverlayClick() }
+                                .padding(horizontal = 2.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
@@ -774,8 +1179,11 @@ fun BottomToolbar(
                             Text(
                                 text = "EDIT",
                                 color = colors.accent,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -783,9 +1191,10 @@ fun BottomToolbar(
                     // Split Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onSplitClick() },
+                            .clickable { onSplitClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -799,17 +1208,21 @@ fun BottomToolbar(
                         Text(
                             text = "SPLIT",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Copy Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onCopyClick() },
+                            .clickable { onCopyClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -823,17 +1236,21 @@ fun BottomToolbar(
                         Text(
                             text = "COPY",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Opacity Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onOpacityClick() },
+                            .clickable { onOpacityClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -847,17 +1264,21 @@ fun BottomToolbar(
                         Text(
                             text = "OPACITY",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Rotate Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onRotateClick() },
+                            .clickable { onRotateClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -871,17 +1292,21 @@ fun BottomToolbar(
                         Text(
                             text = "ROTATE",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Flip Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onFlipClick() },
+                            .clickable { onFlipClick() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -895,17 +1320,21 @@ fun BottomToolbar(
                         Text(
                             text = "FLIP",
                             color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
                     // Delete Action
                     Column(
                         modifier = Modifier
-                            .width(48.dp)
+                            .widthIn(min = 52.dp)
                             .fillMaxHeight()
-                            .clickable { onDeleteClipClick?.invoke() },
+                            .clickable { onDeleteClipClick?.invoke() }
+                            .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -919,8 +1348,11 @@ fun BottomToolbar(
                         Text(
                             text = "DELETE",
                             color = colors.danger,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -932,15 +1364,16 @@ fun BottomToolbar(
                     .fillMaxWidth()
                     .height(64.dp)
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 1. Trim (Active: selects clip under playhead and opens TrimSheet)
                 Column(
                     modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onTrimClick() },
+                        .widthIn(min = 52.dp)
+                        .clickable { onTrimClick() }
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -950,18 +1383,24 @@ fun BottomToolbar(
                         tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Trim",
                         color = colors.textPrimary,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 // 2. Text (Active: opens TextEditorSheet)
                 Column(
                     modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onTextClick() },
+                        .widthIn(min = 52.dp)
+                        .clickable { onTextClick() }
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -971,18 +1410,24 @@ fun BottomToolbar(
                         tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Text",
                         color = colors.textPrimary,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 // 3. Sticker (Active: opens StickerPickerSheet)
                 Column(
                     modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onStickerClick() },
+                        .widthIn(min = 52.dp)
+                        .clickable { onStickerClick() }
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -992,18 +1437,24 @@ fun BottomToolbar(
                         tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Sticker",
                         color = colors.textPrimary,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 // 4. Overlay (Active: launches multi-select media picker up to 6 items)
                 Column(
                     modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onOverlayClick() },
+                        .widthIn(min = 52.dp)
+                        .clickable { onOverlayClick() }
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -1013,16 +1464,23 @@ fun BottomToolbar(
                         tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Overlay",
                         color = colors.textPrimary,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 // 5. Transit. (Active)
                 Column(
-                    modifier = Modifier.width(48.dp),
+                    modifier = Modifier
+                        .widthIn(min = 52.dp)
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -1032,18 +1490,24 @@ fun BottomToolbar(
                         tint = colors.accent,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Transit.",
                         color = colors.accent,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 // 6. Audio (Locked)
                 Column(
                     modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onLockedItemClick() },
+                        .widthIn(min = 52.dp)
+                        .clickable { onLockedItemClick() }
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -1053,18 +1517,24 @@ fun BottomToolbar(
                         tint = colors.textSecondary,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Audio",
                         color = colors.textSecondary,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 // 7. AI (Locked)
                 Column(
                     modifier = Modifier
-                        .width(48.dp)
-                        .clickable { onLockedItemClick() },
+                        .widthIn(min = 52.dp)
+                        .clickable { onLockedItemClick() }
+                        .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -1074,10 +1544,15 @@ fun BottomToolbar(
                         tint = colors.textSecondary,
                         modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "AI",
                         color = colors.textSecondary,
-                        fontSize = 11.sp
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }

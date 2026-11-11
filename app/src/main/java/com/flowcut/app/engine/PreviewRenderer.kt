@@ -370,6 +370,12 @@ class PreviewRenderer(
         // Disabled: Standby slot in onDrawFrame handles pre-warming safely without extra decoders.
     }
 
+    /**
+     * Currently selected overlay item ID drawn last (topmost) on preview without mutating project z-index.
+     */
+    @Volatile
+    var selectedOverlayIdForPreview: String? = null
+
     fun stopPrefetch() {
         // Disabled
     }
@@ -1049,9 +1055,17 @@ class PreviewRenderer(
         val found = plan.resolveAt(tUs, activeLayerSet)
         if (!found || activeLayerSet.visualCount == 0) return
 
+        val selId = selectedOverlayIdForPreview
+        var selectedItemIndex = -1
+
+        // Pass 1: Render unselected items in normal z-order
         for (i in 0 until activeLayerSet.visualCount) {
             val itemIndex = activeLayerSet.activeVisualIndices[i]
             val item = plan.items.getOrNull(itemIndex) ?: continue
+            if (selId != null && item.id == selId) {
+                selectedItemIndex = itemIndex
+                continue
+            }
             val effTransform = animEvaluator.evaluate(item, tUs)
             if (effTransform.opacity <= 0.001f) continue
             val cached = overlayTextureCache.getOrBakeTexture(item) ?: continue
@@ -1065,6 +1079,28 @@ class PreviewRenderer(
                     displayWidth = viewportWidth,
                     displayHeight = viewportHeight
                 )
+            }
+        }
+
+        // Pass 2: Render selected visual overlay item last (topmost) without mutating stored zIndex (Rule R10)
+        if (selectedItemIndex >= 0) {
+            val item = plan.items.getOrNull(selectedItemIndex)
+            if (item != null) {
+                val effTransform = animEvaluator.evaluate(item, tUs)
+                if (effTransform.opacity > 0.001f) {
+                    val cached = overlayTextureCache.getOrBakeTexture(item)
+                    if (cached != null && cached.texId > 0) {
+                        renderer.drawOverlayQuad(
+                            texId = cached.texId,
+                            texWidth = cached.width,
+                            texHeight = cached.height,
+                            transform = effTransform,
+                            opacity = effTransform.opacity,
+                            displayWidth = viewportWidth,
+                            displayHeight = viewportHeight
+                        )
+                    }
+                }
             }
         }
     }

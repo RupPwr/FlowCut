@@ -9,8 +9,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.Path
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -104,6 +109,79 @@ import com.flowcut.app.ui.timeline.TimelineCanvas
 import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.ui.timeline.TimelineSelection
 import com.flowcut.app.ui.timeline.TimelineZoomState
+
+private fun hitTestPreviewOverlays(
+    tapPos: Offset,
+    outerW: Float,
+    outerH: Float,
+    overlayItems: List<com.flowcut.app.engine.OverlayItem>,
+    playheadUs: Long,
+    preferredTopOverlayId: String? = null
+): com.flowcut.app.engine.OverlayItem? {
+    val previewH = outerH
+    val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+    val previewLeft = (outerW - previewW) / 2f
+
+    // Active visual overlays at current playhead sorted front-to-back
+    val activeItems = overlayItems.filter {
+        (it.type == com.flowcut.app.engine.LayerType.IMAGE ||
+         it.type == com.flowcut.app.engine.LayerType.VIDEO ||
+         it.type == com.flowcut.app.engine.LayerType.TEXT ||
+         it.type == com.flowcut.app.engine.LayerType.STICKER) &&
+        playheadUs in it.startUs..it.endUs
+    }.sortedWith(
+        compareBy<com.flowcut.app.engine.OverlayItem> { if (it.id == preferredTopOverlayId) 1 else 0 }
+            .thenBy { it.zIndex }
+            .thenBy { it.laneIndex }
+    ).reversed()
+
+    for (item in activeItems) {
+        val displayText = if (item.text.isBlank()) "Your Text" else item.text
+        val aTex: Float = when (item.type) {
+            com.flowcut.app.engine.LayerType.STICKER -> 1.0f
+            com.flowcut.app.engine.LayerType.TEXT -> {
+                val lines = displayText.split("\n")
+                val maxLen = lines.maxOfOrNull { it.length } ?: 6
+                val lineCount = lines.size.coerceAtLeast(1)
+                (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
+            }
+            com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
+                val tw = if (item.intrinsicWidth > 0) item.intrinsicWidth.toFloat() else 1f
+                val th = if (item.intrinsicHeight > 0) item.intrinsicHeight.toFloat() else 1f
+                (tw / th).coerceIn(0.01f, 100f)
+            }
+            else -> 1.0f
+        }
+        val aScreen = 9.0f / 16.0f
+        var hwInit = 0.6f
+        var hhInit = hwInit / aTex
+        if (hhInit * aScreen > 0.6f) {
+            val factor = 0.6f / (hhInit * aScreen)
+            hwInit *= factor
+            hhInit *= factor
+        }
+        val rawQuadW = hwInit * item.transform.scale.coerceIn(0.01f, 10.0f) * previewW
+        val rawQuadH = hhInit * item.transform.scale.coerceIn(0.01f, 10.0f) * previewW
+        val isMedia = item.type == com.flowcut.app.engine.LayerType.IMAGE || item.type == com.flowcut.app.engine.LayerType.VIDEO
+        val padPx = if (isMedia) 0f else 24f
+        val boxW = if (isMedia) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(120f)
+        val boxH = if (isMedia) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(80f)
+
+        val cx_outer = previewLeft + previewW / 2f + item.transform.panX * previewW
+        val cy_outer = previewH / 2f - item.transform.panY * previewH
+
+        val dx = tapPos.x - cx_outer
+        val dy = tapPos.y - cy_outer
+        val rad = Math.toRadians(-item.transform.rotationDeg.toDouble())
+        val localX = dx * kotlin.math.cos(rad) - dy * kotlin.math.sin(rad)
+        val localY = dx * kotlin.math.sin(rad) + dy * kotlin.math.cos(rad)
+
+        if (kotlin.math.abs(localX) <= boxW / 2f && kotlin.math.abs(localY) <= boxH / 2f) {
+            return item
+        }
+    }
+    return null
+}
 
 @Composable
 fun EditorScreen(
@@ -368,35 +446,28 @@ fun EditorScreen(
     }
 
     val overlayPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 6)
-    ) { uris ->
-        if (uris.isNotEmpty()) {
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            var addedCount = 0
-            val playheadUs = playbackController.playhead.timeUs
-            for (uri in uris) {
-                val currentOverlayCount = vm.layerItems.count {
-                    it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
-                }
-                if (currentOverlayCount >= 6) {
-                    Toast.makeText(context, "Maximum 6 photo/video overlays reached", Toast.LENGTH_SHORT).show()
-                    break
-                }
-                val mimeType = context.contentResolver.getType(uri) ?: ""
-                val isVideo = mimeType.startsWith("video/")
-                val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
-                val cachePath = copyUriToCacheFile(context, uri, prefix)
-                if (cachePath != null) {
-                    val offsetUs = playheadUs + (addedCount * 500_000L)
-                    if (isVideo) {
-                        vm.addVideoOverlay(cachePath, offsetUs, 3_000_000L)
-                    } else {
-                        vm.addImageOverlay(cachePath, offsetUs, 3_000_000L)
-                    }
-                    addedCount++
-                }
+            val currentOverlayCount = vm.layerItems.count {
+                it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
             }
-            if (addedCount > 0) {
+            if (currentOverlayCount >= 30) {
+                Toast.makeText(context, "Maximum 30 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
+            val mimeType = context.contentResolver.getType(uri) ?: ""
+            val isVideo = mimeType.startsWith("video/")
+            val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
+            val cachePath = copyUriToCacheFile(context, uri, prefix)
+            if (cachePath != null) {
+                val playheadUs = playbackController.playhead.timeUs
+                if (isVideo) {
+                    vm.addVideoOverlay(cachePath, playheadUs, 3_000_000L)
+                } else {
+                    vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
+                }
                 previewRenderer.requestRender()
                 frameDriver.wake()
             }
@@ -404,35 +475,28 @@ fun EditorScreen(
     }
 
     val overlayFallbackLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            var addedCount = 0
-            val playheadUs = playbackController.playhead.timeUs
-            for (uri in uris) {
-                val currentOverlayCount = vm.layerItems.count {
-                    it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
-                }
-                if (currentOverlayCount >= 6) {
-                    Toast.makeText(context, "Maximum 6 photo/video overlays reached", Toast.LENGTH_SHORT).show()
-                    break
-                }
-                val mimeType = context.contentResolver.getType(uri) ?: ""
-                val isVideo = mimeType.startsWith("video/")
-                val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
-                val cachePath = copyUriToCacheFile(context, uri, prefix)
-                if (cachePath != null) {
-                    val offsetUs = playheadUs + (addedCount * 500_000L)
-                    if (isVideo) {
-                        vm.addVideoOverlay(cachePath, offsetUs, 3_000_000L)
-                    } else {
-                        vm.addImageOverlay(cachePath, offsetUs, 3_000_000L)
-                    }
-                    addedCount++
-                }
+            val currentOverlayCount = vm.layerItems.count {
+                it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
             }
-            if (addedCount > 0) {
+            if (currentOverlayCount >= 30) {
+                Toast.makeText(context, "Maximum 30 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
+            val mimeType = context.contentResolver.getType(uri) ?: ""
+            val isVideo = mimeType.startsWith("video/")
+            val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
+            val cachePath = copyUriToCacheFile(context, uri, prefix)
+            if (cachePath != null) {
+                val playheadUs = playbackController.playhead.timeUs
+                if (isVideo) {
+                    vm.addVideoOverlay(cachePath, playheadUs, 3_000_000L)
+                } else {
+                    vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
+                }
                 previewRenderer.requestRender()
                 frameDriver.wake()
             }
@@ -444,8 +508,8 @@ fun EditorScreen(
         val currentOverlayCount = vm?.layerItems?.count {
             it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
         } ?: 0
-        if (currentOverlayCount >= 6) {
-            Toast.makeText(context, "Maximum 6 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+        if (currentOverlayCount >= 30) {
+            Toast.makeText(context, "Maximum 30 photo/video overlays reached", Toast.LENGTH_SHORT).show()
         } else {
             try {
                 overlayPickerLauncher.launch(
@@ -457,6 +521,25 @@ fun EditorScreen(
                 } catch (_: Exception) {
                     Toast.makeText(context, "Cannot open media picker", Toast.LENGTH_SHORT).show()
                 }
+            }
+        }
+    }
+
+    val stickerImagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
+            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.STICKER)) {
+                Toast.makeText(context, "Maximum 20 sticker overlays reached", Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
+            val cachePath = copyUriToCacheFile(context, uri, "sticker_img_")
+            if (cachePath != null) {
+                val playheadUs = playbackController.playhead.timeUs
+                vm.addImageStickerOverlay(cachePath, playheadUs, 3_000_000L)
+                previewRenderer.requestRender()
+                frameDriver.wake()
             }
         }
     }
@@ -512,6 +595,7 @@ fun EditorScreen(
     var isTextAnimationSheetVisible by remember { mutableStateOf(false) }
     var isTextAdjustSheetVisible by remember { mutableStateOf(false) }
     var activeTextOverlayId by remember { mutableStateOf<String?>(null) }
+    var overlappingConflictItemIds by remember { mutableStateOf<List<String>?>(null) }
     var customFontPaths by remember { mutableStateOf<List<String>>(emptyList()) }
 
     LaunchedEffect(Unit) {
@@ -674,6 +758,20 @@ fun EditorScreen(
 
     val vmUiState = resolvedViewModel?.uiState?.collectAsState()?.value
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
+    val currentFocus = vmUiState?.focusMode ?: com.flowcut.app.ui.timeline.TimelineFocusState.S0_NONE
+
+    LaunchedEffect(currentFocus) {
+        val selId = when (currentFocus) {
+            is com.flowcut.app.ui.timeline.TimelineFocusState.S2_PIP_ITEM -> currentFocus.itemId
+            is com.flowcut.app.ui.timeline.TimelineFocusState.S3_STICKER_ITEM -> currentFocus.itemId
+            is com.flowcut.app.ui.timeline.TimelineFocusState.S4_TEXT_ITEM -> currentFocus.itemId
+            else -> null
+        }
+        if (previewRenderer.selectedOverlayIdForPreview != selId) {
+            previewRenderer.selectedOverlayIdForPreview = selId
+            previewRenderer.requestRender()
+        }
+    }
     var showApplyToAll by remember { mutableStateOf(false) }
     var applyToAllJob by remember { mutableStateOf<Job?>(null) }
 
@@ -740,6 +838,42 @@ fun EditorScreen(
                         glSurfaceView = if (USE_NEW_CORE && previewRenderer.glSurfaceView != null) previewRenderer.glSurfaceView else glSurfaceView,
                         modifier = Modifier.fillMaxSize()
                     )
+
+                    // On-Preview Tap Detector to select any PIP/Text/Sticker quad when nothing selected
+                    if (hasClips && selectedClipIndex == null && vmUiState?.selectedOverlayId == null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(resolvedViewModel?.layerItems) {
+                                    detectTapGestures { tapOffset ->
+                                        val playheadUs = playbackController.playhead.timeUs
+                                        val hit = hitTestPreviewOverlays(
+                                            tapPos = tapOffset,
+                                            outerW = size.width.toFloat(),
+                                            outerH = size.height.toFloat(),
+                                            overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
+                                            playheadUs = playheadUs
+                                        )
+                                        if (hit != null) {
+                                            val newFocus = when (hit.type) {
+                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO ->
+                                                    TimelineFocusState.S2_PIP_ITEM(hit.id)
+                                                com.flowcut.app.engine.LayerType.STICKER ->
+                                                    TimelineFocusState.S3_STICKER_ITEM(hit.id)
+                                                com.flowcut.app.engine.LayerType.TEXT ->
+                                                    TimelineFocusState.S4_TEXT_ITEM(hit.id)
+                                                else -> TimelineFocusState.S0_NONE
+                                            }
+                                            resolvedViewModel?.selectOverlay(hit.id)
+                                            resolvedViewModel?.setFocusMode(newFocus)
+                                            previewRenderer.selectedOverlayIdForPreview = hit.id
+                                            previewRenderer.requestRender()
+                                            frameDriver.wake()
+                                        }
+                                    }
+                                }
+                        )
+                    }
 
                     // On-Preview Free Transform Gestures overlay when a clip is selected
                     if (hasClips && selectedClipIndex != null) {
@@ -1158,7 +1292,11 @@ fun EditorScreen(
                                                     val lineCount = lines.size.coerceAtLeast(1)
                                                     (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
                                                 }
-                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> 1.0f
+                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
+                                                    val tw = if (activeOverlay.intrinsicWidth > 0) activeOverlay.intrinsicWidth.toFloat() else 1f
+                                                    val th = if (activeOverlay.intrinsicHeight > 0) activeOverlay.intrinsicHeight.toFloat() else 1f
+                                                    (tw / th).coerceIn(0.01f, 100f)
+                                                }
                                                 else -> 1.0f
                                             }
                                             val aScreen = 9.0f / 16.0f
@@ -1171,11 +1309,14 @@ fun EditorScreen(
                                             }
                                             val rawQuadW = hwInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
                                             val rawQuadH = hhInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
-                                            val padPx = 12.dp.toPx()
+                                            val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
+                                            val padPx = if (isMedia) 0f else 12.dp.toPx()
                                             val minWPx = 96.dp.toPx()
                                             val minHPx = 64.dp.toPx()
-                                            val initBoxW = (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
-                                            val initBoxH = (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val initBoxW = if (isMedia) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
+                                            val initBoxH = if (isMedia) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val handleBoxW = initBoxW.coerceAtLeast(48.dp.toPx())
+                                            val handleBoxH = initBoxH.coerceAtLeast(48.dp.toPx())
                                             val cx_outer = previewLeft + previewW / 2f + initialTransform.panX * previewW
                                             val cy_outer = previewH / 2f - initialTransform.panY * previewH
 
@@ -1190,28 +1331,34 @@ fun EditorScreen(
                                                 return Offset(cx_outer + rotX, cy_outer + rotY)
                                             }
 
-                                            val tlPos = toOuterPos(-initBoxW / 2f, -initBoxH / 2f)
-                                            val trPos = toOuterPos(initBoxW / 2f, -initBoxH / 2f)
-                                            val blPos = toOuterPos(-initBoxW / 2f, initBoxH / 2f)
-                                            val brPos = toOuterPos(initBoxW / 2f, initBoxH / 2f)
-                                            val rmPos = toOuterPos(initBoxW / 2f, 0f)
+                                            val tlPos = toOuterPos(-handleBoxW / 2f, -handleBoxH / 2f)
+                                            val trPos = toOuterPos(handleBoxW / 2f, -handleBoxH / 2f)
+                                            val blPos = toOuterPos(-handleBoxW / 2f, handleBoxH / 2f)
+                                            val brPos = toOuterPos(handleBoxW / 2f, handleBoxH / 2f)
+                                            val tmPos = toOuterPos(0f, -handleBoxH / 2f)
+                                            val bmPos = toOuterPos(0f, handleBoxH / 2f)
+                                            val lmPos = toOuterPos(-handleBoxW / 2f, 0f)
+                                            val rmPos = toOuterPos(handleBoxW / 2f, 0f)
 
                                             val hitRadius = 28.dp.toPx()
                                             val distTL = (downPos - tlPos).getDistance()
                                             val distTR = (downPos - trPos).getDistance()
                                             val distBL = (downPos - blPos).getDistance()
                                             val distBR = (downPos - brPos).getDistance()
+                                            val distTM = (downPos - tmPos).getDistance()
+                                            val distBM = (downPos - bmPos).getDistance()
+                                            val distLM = (downPos - lmPos).getDistance()
                                             val distRM = (downPos - rmPos).getDistance()
 
                                             // Determine active handle mode:
                                             // 1: Top-Left Delete, 2: Top-Right Edit (Text only), 3: Bottom-Left Copy,
-                                            // 4: Bottom-Right Scale/Rotate, 5: Right Midpoint Scale, 0: Normal Body
+                                            // 4: Bottom-Right Scale/Rotate, 5: Edge Midpoint Scale (Top, Bottom, Left, Right), 0: Normal Body
                                             val activeHandle = when {
                                                 distTL <= hitRadius -> 1
                                                 activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT && distTR <= hitRadius -> 2
                                                 distBL <= hitRadius -> 3
                                                 distBR <= hitRadius -> 4
-                                                distRM <= hitRadius -> 5
+                                                distTM <= hitRadius || distBM <= hitRadius || distLM <= hitRadius || distRM <= hitRadius -> 5
                                                 else -> 0
                                             }
 
@@ -1510,6 +1657,33 @@ fun EditorScreen(
                                                             } else {
                                                                 lastTapTimeMs = upTime
                                                                 lastTapPosition = downPos
+
+                                                                // Allow tapping directly on another PIP/Text/Sticker quad on Preview screen
+                                                                val playheadUs = playbackController.playhead.timeUs
+                                                                val hit = hitTestPreviewOverlays(
+                                                                    tapPos = downPos,
+                                                                    outerW = outerW,
+                                                                    outerH = outerH,
+                                                                    overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
+                                                                    playheadUs = playheadUs,
+                                                                    preferredTopOverlayId = activeOverlayId
+                                                                )
+                                                                if (hit != null && hit.id != activeOverlayId) {
+                                                                    val newFocus = when (hit.type) {
+                                                                        com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO ->
+                                                                            TimelineFocusState.S2_PIP_ITEM(hit.id)
+                                                                        com.flowcut.app.engine.LayerType.STICKER ->
+                                                                            TimelineFocusState.S3_STICKER_ITEM(hit.id)
+                                                                        com.flowcut.app.engine.LayerType.TEXT ->
+                                                                            TimelineFocusState.S4_TEXT_ITEM(hit.id)
+                                                                        else -> TimelineFocusState.S0_NONE
+                                                                    }
+                                                                    resolvedViewModel?.selectOverlay(hit.id)
+                                                                    resolvedViewModel?.setFocusMode(newFocus)
+                                                                    previewRenderer.selectedOverlayIdForPreview = hit.id
+                                                                    previewRenderer.requestRender()
+                                                                    frameDriver.wake()
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1537,7 +1711,11 @@ fun EditorScreen(
                                                     val lineCount = lines.size.coerceAtLeast(1)
                                                     (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
                                                 }
-                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> 1.0f
+                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
+                                                    val tw = if (activeOverlay.intrinsicWidth > 0) activeOverlay.intrinsicWidth.toFloat() else 1f
+                                                    val th = if (activeOverlay.intrinsicHeight > 0) activeOverlay.intrinsicHeight.toFloat() else 1f
+                                                    (tw / th).coerceIn(0.01f, 100f)
+                                                }
                                                 else -> 1.0f
                                             }
 
@@ -1553,11 +1731,15 @@ fun EditorScreen(
                                             val scale = selOverlay.transform.scale.coerceIn(0.01f, 10.0f)
                                             val rawQuadW = hw * scale * size.width
                                             val rawQuadH = hh * scale * size.width
-                                            val padPx = 12.dp.toPx()
+                                            val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
+                                            val padPx = if (isMedia) 0f else 12.dp.toPx()
                                             val minWPx = 96.dp.toPx()
                                             val minHPx = 64.dp.toPx()
-                                            val boxW = (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
-                                            val boxH = (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val boxW = if (isMedia) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
+                                            val boxH = if (isMedia) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val handleSeparationMin = 48.dp.toPx()
+                                            val handleBoxW = boxW.coerceAtLeast(handleSeparationMin)
+                                            val handleBoxH = boxH.coerceAtLeast(handleSeparationMin)
 
                                             val cx = size.width / 2f + selOverlay.transform.panX * size.width
                                             val cy = size.height / 2f - selOverlay.transform.panY * size.height
@@ -1567,11 +1749,13 @@ fun EditorScreen(
                                             }) {
                                                 val left = cx - boxW / 2f
                                                 val top = cy - boxH / 2f
+                                                val hLeft = cx - handleBoxW / 2f
+                                                val hTop = cy - handleBoxH / 2f
                                                 val strokeWidth = 1.5.dp.toPx()
                                                 val cornerBadgeRadius = 12.dp.toPx()
                                                 val midDotRadius = 7.dp.toPx()
 
-                                                // 1.5.dp White stroke bounding frame (guaranteed >= 96.dp x 64.dp)
+                                                // 1.5.dp White stroke bounding frame - hugs borders 100% flush
                                                 drawRect(
                                                     color = Color.White,
                                                     topLeft = Offset(left, top),
@@ -1580,7 +1764,7 @@ fun EditorScreen(
                                                 )
 
                                                 // 1. Top-Left: Delete Button (✕) - Dark circle + white outline + white ✕
-                                                val topLeftCenter = Offset(left, top)
+                                                val topLeftCenter = Offset(hLeft, hTop)
                                                 drawCircle(
                                                     color = Color(0xFF1E1E24),
                                                     radius = cornerBadgeRadius,
@@ -1609,7 +1793,7 @@ fun EditorScreen(
                                                 )
 
                                                 // 2. Top-Right: Edit Button (✎ Pencil) - Pink circle + white pencil (Text overlays only)
-                                                val topRightCenter = Offset(left + boxW, top)
+                                                val topRightCenter = Offset(hLeft + handleBoxW, hTop)
                                                 if (selOverlay.type == com.flowcut.app.engine.LayerType.TEXT) {
                                                     drawCircle(
                                                         color = Color(0xFFFF2D55),
@@ -1634,7 +1818,7 @@ fun EditorScreen(
                                                 }
 
                                                 // 3. Bottom-Left: Duplicate / Copy Button (❐) - Pink circle + overlapping squares
-                                                val bottomLeftCenter = Offset(left, top + boxH)
+                                                val bottomLeftCenter = Offset(hLeft, hTop + handleBoxH)
                                                 drawCircle(
                                                     color = Color(0xFFFF2D55),
                                                     radius = cornerBadgeRadius,
@@ -1660,7 +1844,7 @@ fun EditorScreen(
                                                 )
 
                                                 // 4. Bottom-Right: 1-Finger Scale & Rotate Handle (⤡) - Pink circle + diagonal double arrow
-                                                val bottomRightCenter = Offset(left + boxW, top + boxH)
+                                                val bottomRightCenter = Offset(hLeft + handleBoxW, hTop + handleBoxH)
                                                 drawCircle(
                                                     color = Color(0xFFFF2D55),
                                                     radius = cornerBadgeRadius,
@@ -1707,19 +1891,35 @@ fun EditorScreen(
                                                     cap = StrokeCap.Round
                                                 )
 
-                                                // 5. Right Edge Midpoint: Pink Handle Dot - Solid pink circle
-                                                val rightMidCenter = Offset(left + boxW, top + boxH / 2f)
-                                                drawCircle(
-                                                    color = Color(0xFFFF2D55),
-                                                    radius = midDotRadius,
-                                                    center = rightMidCenter
-                                                )
-                                                drawCircle(
-                                                    color = Color.White.copy(alpha = 0.5f),
-                                                    radius = midDotRadius,
-                                                    center = rightMidCenter,
-                                                    style = Stroke(width = 1.dp.toPx())
-                                                )
+                                                // 5. All 4 Edge Midpoints: Solid Red/Pink Handle Dots (●) with 6.dp radius
+                                                val edgeDotRadius = 6.dp.toPx()
+                                                val edgeDotStroke = 1.dp.toPx()
+                                                val pinkDotColor = Color(0xFFFF2D55)
+                                                val dotBorderColor = Color.White.copy(alpha = 0.5f)
+
+                                                // Top-Mid
+                                                val tmx = hLeft + handleBoxW / 2f
+                                                val tmy = hTop
+                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(tmx, tmy))
+                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(tmx, tmy), style = Stroke(width = edgeDotStroke))
+
+                                                // Bottom-Mid
+                                                val bmx = hLeft + handleBoxW / 2f
+                                                val bmy = hTop + handleBoxH
+                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(bmx, bmy))
+                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(bmx, bmy), style = Stroke(width = edgeDotStroke))
+
+                                                // Left-Mid
+                                                val lmx = hLeft
+                                                val lmy = hTop + handleBoxH / 2f
+                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(lmx, lmy))
+                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(lmx, lmy), style = Stroke(width = edgeDotStroke))
+
+                                                // Right-Mid
+                                                val rmx = hLeft + handleBoxW
+                                                val rmy = hTop + handleBoxH / 2f
+                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(rmx, rmy))
+                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(rmx, rmy), style = Stroke(width = edgeDotStroke))
                                             }
                                         }
                                     if (isTransforming) {
@@ -1922,11 +2122,10 @@ fun EditorScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // 4. Timeline block: dynamic height (New Core TimelineCanvas or legacy TimelineBlock)
+                // 4. Timeline block: constant fixed height (New Core TimelineCanvas or legacy TimelineBlock)
                 if (USE_NEW_CORE) {
                     val currentFocus = vmUiState?.focusMode ?: TimelineFocusState.S0_NONE
-                    val isPipExpanded = currentFocus is TimelineFocusState.S1_PIP_GROUP || currentFocus is TimelineFocusState.S2_PIP_ITEM
-                    val timelineHeight = if (isPipExpanded) 280.dp else 240.dp
+                    val timelineHeight = 224.dp
 
                     val selection = remember(selectedClipIndex, selectedJunctionIndex, vmUiState?.selectedOverlayId) {
                         selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
@@ -1954,7 +2153,11 @@ fun EditorScreen(
                                     is TimelineSelection.ClipSelected -> onSelectClip(sel.index)
                                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
                                     is TimelineSelection.OverlaySelected -> {
+                                        overlappingConflictItemIds = null
                                         resolvedViewModel?.selectOverlay(sel.itemId)
+                                    }
+                                    is TimelineSelection.OverlappingPinsClicked -> {
+                                        overlappingConflictItemIds = sel.itemIds
                                     }
                                     TimelineSelection.PipGroupClicked -> {
                                         resolvedViewModel?.setFocusMode(TimelineFocusState.S1_PIP_GROUP)
@@ -1968,7 +2171,10 @@ fun EditorScreen(
                                     TimelineSelection.AudioGroupClicked -> {
                                         resolvedViewModel?.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
                                     }
-                                    TimelineSelection.None -> onDeselectAll()
+                                    TimelineSelection.None -> {
+                                        overlappingConflictItemIds = null
+                                        onDeselectAll()
+                                    }
                                     is TimelineSelection.LaneItemSelected -> {}
                                     is TimelineSelection.TrimHandleLeft -> {}
                                     is TimelineSelection.TrimHandleRight -> {}
@@ -2069,12 +2275,30 @@ fun EditorScreen(
             // 7. Bottom toolbar: 64 dp + navigation bar inset (Contextual Main vs Clip vs Overlay toolbar)
             val activeOverlayForToolbar = vmUiState?.selectedOverlayId?.let { resolvedViewModel?.getOverlayItem(it) }
             val isTextOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.TEXT
+            val isPipActive = vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S1_PIP_GROUP ||
+                vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S2_PIP_ITEM
+            val isPipItemSelected = vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S2_PIP_ITEM
+            val selectedPipItem = if (isPipItemSelected) activeOverlayForToolbar else null
+            val currentPlayheadUs = playbackController.playhead.timeUs
+            val canSplitPip = selectedPipItem != null &&
+                currentPlayheadUs >= (selectedPipItem.startUs + 200_000L) &&
+                currentPlayheadUs <= (selectedPipItem.endUs - 200_000L)
+
+            val isPipOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.IMAGE ||
+                activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.VIDEO ||
+                isPipActive
+            val isOverlaySelectedForToolbar = vmUiState?.selectedOverlayId != null || isPipActive
 
             BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
-                isOverlaySelected = vmUiState?.selectedOverlayId != null,
+                isOverlaySelected = isOverlaySelectedForToolbar,
+                isPipOverlaySelected = isPipOverlay,
+                isPipActive = isPipActive,
+                isPipItemSelected = isPipItemSelected,
+                canSplitPip = canSplitPip,
                 isTextOverlaySelected = isTextOverlay,
                 isTextToolbarActive = isTextToolbarActive,
+                onAddOverlayClick = openOverlayPicker,
                 onSplitClick = onSplitClick ?: {
                     if (isTextToolbarActive) {
                         val textItem = resolveTextOverlayOrToast()
@@ -2359,14 +2583,14 @@ fun EditorScreen(
                     }
                 },
                 onAnimationClick = {
-                    val textItem = resolveTextOverlayOrToast()
-                    if (textItem != null) {
+                    val overlayId = if (isPipItemSelected) selectedPipItem?.id else resolveTextOverlayOrToast()?.id
+                    if (overlayId != null) {
                         if (playbackController.playhead.mode == PlayMode.PLAYING) {
                             playbackController.pause()
                             frameDriver.wake()
                             onPlaybackStateChange(false)
                         }
-                        activeTextOverlayId = textItem.id
+                        activeTextOverlayId = overlayId
                         isVolumeSheetVisible = false
                         isSpeedSheetVisible = false
                         isAdjustSheetVisible = false
@@ -2815,7 +3039,17 @@ fun EditorScreen(
                 },
                 onAddImageClick = {
                     isStickerSheetVisible = false
-                    openImagePicker()
+                    try {
+                        stickerImagePickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    } catch (_: Exception) {
+                        try {
+                            overlayFallbackLauncher.launch("image/*")
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 },
                 onDismiss = { isStickerSheetVisible = false }
             )
@@ -3010,6 +3244,121 @@ fun EditorScreen(
             } else {
                 isTextAdjustSheetVisible = false
                 activeTextOverlayId = null
+            }
+        }
+
+        // Overlapping Layer Conflict Picker Dialog (Matching reference image_2d9184.png)
+        if (overlappingConflictItemIds != null) {
+            val conflictIds = overlappingConflictItemIds!!
+            val allLayers = resolvedViewModel?.layerItems ?: emptyList()
+            val conflictItems = remember(conflictIds, allLayers) {
+                conflictIds.mapNotNull { id -> allLayers.firstOrNull { it.id == id } }
+            }
+
+            if (conflictItems.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { overlappingConflictItemIds = null },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFF353538),
+                        border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier
+                            .padding(horizontal = 24.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { /* Prevent dismissing when clicking the card itself */ }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            val rows = conflictItems.chunked(5)
+                            rows.forEach { rowItems ->
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    rowItems.forEach { item ->
+                                        val isSelected = item.id == vmUiState?.selectedOverlayId
+                                        val isText = item.type == com.flowcut.app.engine.LayerType.TEXT
+                                        val badgeBg = if (isText) Color(0xFFF59E0B) else Color(0xFF68C95B)
+
+                                        Surface(
+                                            modifier = Modifier
+                                                .size(width = 48.dp, height = 34.dp)
+                                                .clickable {
+                                                    resolvedViewModel?.selectOverlay(item.id)
+                                                    overlappingConflictItemIds = null
+                                                },
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = badgeBg,
+                                            border = if (isSelected) BorderStroke(2.dp, Color.White) else null
+                                        ) {
+                                            Box(
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (isText) {
+                                                    val textSnippet = if (item.text.isNotBlank()) {
+                                                        item.text.take(5)
+                                                    } else "Text"
+                                                    Text(
+                                                        text = textSnippet,
+                                                        color = Color.White,
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1
+                                                    )
+                                                } else {
+                                                    if (item.type == com.flowcut.app.engine.LayerType.STICKER && item.text.isNotBlank() && item.text.length <= 4) {
+                                                        Text(
+                                                            text = item.text,
+                                                            fontSize = 14.sp
+                                                        )
+                                                    } else {
+                                                        Canvas(modifier = Modifier.size(20.dp, 16.dp)) {
+                                                            val strokeW = 1.4.dp.toPx()
+                                                            drawRoundRect(
+                                                                color = Color.White,
+                                                                topLeft = Offset.Zero,
+                                                                size = size,
+                                                                cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                                                                style = Stroke(width = strokeW)
+                                                            )
+                                                            drawCircle(
+                                                                color = Color.White,
+                                                                radius = 2.dp.toPx(),
+                                                                center = Offset(5.5.dp.toPx(), 5.dp.toPx())
+                                                            )
+                                                            val mountainPath = Path().apply {
+                                                                moveTo(3.dp.toPx(), size.height - 3.dp.toPx())
+                                                                lineTo(9.dp.toPx(), 8.dp.toPx())
+                                                                lineTo(13.dp.toPx(), 11.dp.toPx())
+                                                                lineTo(17.dp.toPx(), size.height - 3.dp.toPx())
+                                                            }
+                                                            drawPath(mountainPath, color = Color.White, style = Stroke(width = strokeW))
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -6,11 +6,12 @@ import java.util.TreeSet
  * Supported timeline layer types with enforced maximum item caps.
  */
 enum class LayerType(val maxCap: Int) {
-    VIDEO(maxCap = 4),
+    VIDEO(maxCap = 1000),
     TEXT(maxCap = 20),
-    IMAGE(maxCap = 6),
+    IMAGE(maxCap = 1000),
     STICKER(maxCap = 20),
-    FILTER(maxCap = 3)
+    FILTER(maxCap = 3),
+    AUDIO(maxCap = 1000)
 }
 
 /**
@@ -52,6 +53,8 @@ data class OverlayItem(
     val animOutDurationUs: Long = 500_000L,
     val animLoopType: Int = 0,
     val mediaPath: String = "",
+    val intrinsicWidth: Int = 0,
+    val intrinsicHeight: Int = 0,
     val filterPresetId: Int = 0,
     val filterIntensity: Float = 1.0f
 ) {
@@ -227,16 +230,151 @@ class AnimatedTransformEvaluator {
 }
 
 /**
- * Validates whether another layer item of the specified type can be added
- * without exceeding the architectural hard caps.
+ * Track group classification for the 4-row lower timeline engine.
+ * Above Main Track: TEXT, STICKER.
+ * Below Main Track: PIP (VIDEO/IMAGE) and AUDIO.
+ */
+enum class LayerTrackGroup {
+    PIP,
+    AUDIO
+}
+
+fun OverlayItem.trackGroup(): LayerTrackGroup? = when (type) {
+    LayerType.VIDEO, LayerType.IMAGE -> LayerTrackGroup.PIP
+    LayerType.AUDIO -> LayerTrackGroup.AUDIO
+    else -> null
+}
+
+data class RowAllocationResult(
+    val laneIndex: Int,
+    val startUs: Long,
+    val endUs: Long
+)
+
+/**
+ * Validates whether another layer item of the specified type can be added.
+ * For PIP (VIDEO/IMAGE) and AUDIO, capacity is governed by the 4-track non-overlapping row engine.
  */
 fun canAddLayer(items: List<OverlayItem>, type: LayerType): Boolean {
-    if (type == LayerType.IMAGE || type == LayerType.VIDEO) {
-        val totalOverlays = items.count { it.type == LayerType.IMAGE || it.type == LayerType.VIDEO }
-        return totalOverlays < 6
+    if (type == LayerType.IMAGE || type == LayerType.VIDEO || type == LayerType.AUDIO) {
+        return true
     }
     val currentCount = items.count { it.type == type }
     return currentCount < type.maxCap
+}
+
+/**
+ * Deterministic 4-row non-overlapping track allocator for PIP and Audio groups.
+ * Checks rows 0, 1, 2, 3 in order.
+ * - Finds a row where the full duration fits without any collision.
+ * - If no row fits fully, finds the first row in 0..3 that is free at desiredStartUs and has
+ *   at least MIN_DURATION_US (200ms) before the next item, clamping endUs.
+ * - If all 4 rows are occupied at desiredStartUs (or have < 200ms space), returns null.
+ */
+fun findAvailableRowOrClamp(
+    items: List<OverlayItem>,
+    group: LayerTrackGroup,
+    desiredStartUs: Long,
+    desiredDurationUs: Long,
+    totalProjectDurationUs: Long,
+    excludeItemId: String? = null
+): RowAllocationResult? {
+    val clampedStartUs = desiredStartUs.coerceAtLeast(0L)
+    val maxProjectEndUs = totalProjectDurationUs.coerceAtLeast(clampedStartUs + OverlayItem.MIN_DURATION_US)
+    val candidateEndUs = minOf(clampedStartUs + desiredDurationUs, maxProjectEndUs)
+    if (candidateEndUs - clampedStartUs < OverlayItem.MIN_DURATION_US) return null
+
+    val groupItems = items.filter { it.id != excludeItemId && it.trackGroup() == group }
+
+    // Pass 1: Look for a row in 0..3 where the full duration fits without any collision
+    for (row in 0..3) {
+        val rowItems = groupItems.filter { it.laneIndex.coerceIn(0, 3) == row }
+        val hasOverlap = rowItems.any { it.startUs < candidateEndUs && it.endUs > clampedStartUs }
+        if (!hasOverlap) {
+            return RowAllocationResult(
+                laneIndex = row,
+                startUs = clampedStartUs,
+                endUs = candidateEndUs
+            )
+        }
+    }
+
+    // Pass 2: Look for a row in 0..3 that is free at clampedStartUs and has at least MIN_DURATION_US before the next item
+    for (row in 0..3) {
+        val rowItems = groupItems.filter { it.laneIndex.coerceIn(0, 3) == row }
+        val occupiesStart = rowItems.any { it.startUs <= clampedStartUs && clampedStartUs < it.endUs }
+        if (!occupiesStart) {
+            val nextItemStartUs = rowItems
+                .filter { it.startUs > clampedStartUs }
+                .minOfOrNull { it.startUs }
+            val availableEndUs = if (nextItemStartUs != null) {
+                minOf(candidateEndUs, nextItemStartUs)
+            } else {
+                candidateEndUs
+            }
+            if (availableEndUs - clampedStartUs >= OverlayItem.MIN_DURATION_US) {
+                return RowAllocationResult(
+                    laneIndex = row,
+                    startUs = clampedStartUs,
+                    endUs = availableEndUs
+                )
+            }
+        }
+    }
+
+    return null
+}
+
+/**
+ * Clamps candidate trim timestamps (startUs and endUs) against neighboring items on the same row,
+ * preventing any two items on the same row from overlapping in time.
+ */
+fun clampItemTrimBoundsOnRow(
+    items: List<OverlayItem>,
+    itemId: String,
+    candidateStartUs: Long,
+    candidateEndUs: Long,
+    totalProjectDurationUs: Long
+): Pair<Long, Long> {
+    val target = items.firstOrNull { it.id == itemId } ?: return Pair(
+        candidateStartUs.coerceAtLeast(0L),
+        candidateEndUs.coerceAtLeast(candidateStartUs + OverlayItem.MIN_DURATION_US)
+    )
+    val group = target.trackGroup()
+    val maxProjectTimeUs = totalProjectDurationUs.coerceAtLeast(OverlayItem.MIN_DURATION_US)
+
+    if (group == null) {
+        val clampedStart = candidateStartUs.coerceIn(0L, (candidateEndUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(0L))
+        val clampedEnd = candidateEndUs.coerceIn(clampedStart + OverlayItem.MIN_DURATION_US, maxProjectTimeUs.coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US))
+        return Pair(clampedStart, clampedEnd)
+    }
+
+    val sameRowNeighbors = items.filter {
+        it.id != itemId && it.trackGroup() == group && it.laneIndex.coerceIn(0, 3) == target.laneIndex.coerceIn(0, 3)
+    }
+
+    val prevNeighborEndUs = sameRowNeighbors
+        .filter { it.endUs <= target.startUs }
+        .maxOfOrNull { it.endUs } ?: 0L
+
+    val nextNeighborStartUs = sameRowNeighbors
+        .filter { it.startUs >= target.endUs }
+        .minOfOrNull { it.startUs } ?: maxProjectTimeUs
+
+    val minAllowedStartUs = prevNeighborEndUs
+    val maxAllowedEndUs = minOf(nextNeighborStartUs, maxProjectTimeUs)
+
+    val safeCandidateEndUs = candidateEndUs.coerceAtMost(maxAllowedEndUs)
+    val clampedStartUs = candidateStartUs.coerceIn(
+        minAllowedStartUs,
+        (safeCandidateEndUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(minAllowedStartUs)
+    )
+    val clampedEndUs = safeCandidateEndUs.coerceIn(
+        clampedStartUs + OverlayItem.MIN_DURATION_US,
+        maxAllowedEndUs.coerceAtLeast(clampedStartUs + OverlayItem.MIN_DURATION_US)
+    )
+
+    return Pair(clampedStartUs, clampedEndUs)
 }
 
 /**
@@ -386,7 +524,7 @@ class CompiledLayerPlan(
                     if (itm.startUs <= tStart && itm.endUs >= tEnd) {
                         if (itm.type == LayerType.FILTER) {
                             filterIndices.add(idx)
-                        } else {
+                        } else if (itm.type != LayerType.AUDIO) {
                             visualIndices.add(idx)
                         }
                     }
