@@ -39,6 +39,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -597,6 +600,12 @@ fun EditorScreen(
     var activeTextOverlayId by remember { mutableStateOf<String?>(null) }
     var overlappingConflictItemIds by remember { mutableStateOf<List<String>?>(null) }
     var customFontPaths by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isAudioSoundsSheetVisible by remember { mutableStateOf(false) }
+    var isAudioEffectsSheetVisible by remember { mutableStateOf(false) }
+    var isAudioRecordSheetVisible by remember { mutableStateOf(false) }
+    var isAudioFadeSheetVisible by remember { mutableStateOf(false) }
+    var isAudioVolumeSheetVisible by remember { mutableStateOf(false) }
+    var isAudioSpeedSheetVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val fontsDir = File(context.filesDir, "fonts")
@@ -635,6 +644,91 @@ fun EditorScreen(
             } catch (e: Exception) {
                 Toast.makeText(context, "Failed to load font: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    val localAudioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
+            val cachePath = copyUriToCacheFile(context, uri, "audio_local_")
+            if (cachePath != null) {
+                val retriever = android.media.MediaMetadataRetriever()
+                var durMs = 5000L
+                try {
+                    retriever.setDataSource(cachePath)
+                    durMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 5000L
+                } catch (_: Exception) {
+                } finally {
+                    try { retriever.release() } catch (_: Exception) {}
+                }
+                val playheadUs = playbackController.playhead.timeUs
+                val totalUs = msToUs(vm.uiState.value.project.clips.sumOf { it.durationMs })
+                val remainingUs = (totalUs - playheadUs).coerceAtLeast(1_000_000L)
+                val finalDurUs = minOf(durMs * 1000L, remainingUs).coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
+                val rawName = uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.') ?: "Local Audio"
+                vm.addAudioOverlay(
+                    mediaPath = cachePath,
+                    title = rawName,
+                    startUs = playheadUs,
+                    durationUs = finalDurUs,
+                    audioSubType = 0
+                )
+                vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    val openLocalAudioPicker: () -> Unit = {
+        try {
+            localAudioPickerLauncher.launch("audio/*")
+        } catch (_: Exception) {
+            Toast.makeText(context, "Cannot open audio picker", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val extractVideoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
+            val cachePath = copyUriToCacheFile(context, uri, "audio_extract_")
+            if (cachePath != null) {
+                val retriever = android.media.MediaMetadataRetriever()
+                var durMs = 5000L
+                try {
+                    retriever.setDataSource(cachePath)
+                    durMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 5000L
+                } catch (_: Exception) {
+                } finally {
+                    try { retriever.release() } catch (_: Exception) {}
+                }
+                val playheadUs = playbackController.playhead.timeUs
+                val totalUs = msToUs(vm.uiState.value.project.clips.sumOf { it.durationMs })
+                val remainingUs = (totalUs - playheadUs).coerceAtLeast(1_000_000L)
+                val finalDurUs = minOf(durMs * 1000L, remainingUs).coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
+                vm.addAudioOverlay(
+                    mediaPath = cachePath,
+                    title = "Extracted Audio",
+                    startUs = playheadUs,
+                    durationUs = finalDurUs,
+                    audioSubType = 0
+                )
+                vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    val openExtractVideoPicker: () -> Unit = {
+        try {
+            extractVideoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+        } catch (_: Exception) {
+            Toast.makeText(context, "Cannot open video picker", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2287,7 +2381,16 @@ fun EditorScreen(
             val isPipOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.IMAGE ||
                 activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.VIDEO ||
                 isPipActive
-            val isOverlaySelectedForToolbar = vmUiState?.selectedOverlayId != null || isPipActive
+
+            val isAudioGroupActive = vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S5_AUDIO_GROUP
+            val isAudioItemSelected = vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S6_AUDIO_ITEM
+            val isAudioActive = isAudioGroupActive || isAudioItemSelected
+            val selectedAudioItem = if (isAudioItemSelected) activeOverlayForToolbar else null
+            val canSplitAudio = selectedAudioItem != null &&
+                currentPlayheadUs >= (selectedAudioItem.startUs + 200_000L) &&
+                currentPlayheadUs <= (selectedAudioItem.endUs - 200_000L)
+
+            val isOverlaySelectedForToolbar = vmUiState?.selectedOverlayId != null || isPipActive || isAudioActive
 
             BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
@@ -2296,9 +2399,41 @@ fun EditorScreen(
                 isPipActive = isPipActive,
                 isPipItemSelected = isPipItemSelected,
                 canSplitPip = canSplitPip,
+                isAudioActive = isAudioActive,
+                isAudioItemSelected = isAudioItemSelected,
+                canSplitAudio = canSplitAudio,
                 isTextOverlaySelected = isTextOverlay,
                 isTextToolbarActive = isTextToolbarActive,
                 onAddOverlayClick = openOverlayPicker,
+                onAudioClick = {
+                    resolvedViewModel?.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                },
+                onBackToAudioGroup = {
+                    resolvedViewModel?.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                },
+                onAudioSoundsClick = {
+                    isAudioSoundsSheetVisible = true
+                },
+                onAudioLocalClick = {
+                    openLocalAudioPicker()
+                },
+                onAudioEffectsClick = {
+                    isAudioEffectsSheetVisible = true
+                },
+                onAudioExtractClick = {
+                    openExtractVideoPicker()
+                },
+                onAudioRecordClick = {
+                    isAudioRecordSheetVisible = true
+                },
+                onAudioFadeClick = {
+                    isAudioFadeSheetVisible = true
+                },
+                onDeleteAudioClick = {
+                    resolvedViewModel?.deleteSelectedOverlay()
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
                 onSplitClick = onSplitClick ?: {
                     if (isTextToolbarActive) {
                         val textItem = resolveTextOverlayOrToast()
@@ -2319,14 +2454,24 @@ fun EditorScreen(
                 },
                 onTrimClick = handleOpenTrim,
                 onVolumeClick = {
-                    isAdjustSheetVisible = false
-                    isBackgroundSheetVisible = false
-                    isSpeedSheetVisible = false
-                    isTrimSheetVisible = false
-                    isOpacitySheetVisible = false
-                    isVolumeSheetVisible = true
+                    if (isAudioItemSelected) {
+                        isAudioVolumeSheetVisible = true
+                    } else {
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isVolumeSheetVisible = true
+                    }
                 },
-                onSpeedClick = handleOpenSpeed,
+                onSpeedClick = {
+                    if (isAudioItemSelected) {
+                        isAudioSpeedSheetVisible = true
+                    } else {
+                        handleOpenSpeed()
+                    }
+                },
                 onAdjustClick = {
                     if (playbackController.playhead.mode == PlayMode.PLAYING) {
                         playbackController.pause()
@@ -2505,6 +2650,7 @@ fun EditorScreen(
                 },
                 onClearSelection = {
                     isTextToolbarActive = false
+                    resolvedViewModel?.setFocusMode(TimelineFocusState.S0_NONE)
                     onDeselectAll()
                 },
                 onLockedItemClick = {
@@ -3361,6 +3507,117 @@ fun EditorScreen(
                 }
             }
         }
+
+        // -----------------------------------------------------------------------------------------
+        // Audio BottomSheets (Phase C: 4-Row Audio System)
+        // -----------------------------------------------------------------------------------------
+        val currentAudioItem = vmUiState?.selectedOverlayId?.let { resolvedViewModel?.getOverlayItem(it) }
+
+        if (isAudioSoundsSheetVisible) {
+            AudioSoundsSheet(
+                context = context,
+                onAddSound = { path, title ->
+                    val vm = resolvedViewModel ?: return@AudioSoundsSheet
+                    val playheadUs = playbackController.playhead.timeUs
+                    val totalUs = msToUs(vm.uiState.value.project.clips.sumOf { it.durationMs })
+                    val remainingUs = (totalUs - playheadUs).coerceAtLeast(1_000_000L)
+                    val durUs = minOf(5_000_000L, remainingUs).coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
+                    vm.addAudioOverlay(
+                        mediaPath = path,
+                        title = title,
+                        startUs = playheadUs,
+                        durationUs = durUs,
+                        audioSubType = 0
+                    )
+                    vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isAudioSoundsSheetVisible = false
+                },
+                onDismiss = { isAudioSoundsSheetVisible = false }
+            )
+        }
+
+        if (isAudioEffectsSheetVisible) {
+            AudioEffectsSheet(
+                context = context,
+                onAddEffect = { path, title, durSec ->
+                    val vm = resolvedViewModel ?: return@AudioEffectsSheet
+                    val playheadUs = playbackController.playhead.timeUs
+                    val durUs = (durSec * 1_000_000L).toLong().coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
+                    vm.addAudioOverlay(
+                        mediaPath = path,
+                        title = title,
+                        startUs = playheadUs,
+                        durationUs = durUs,
+                        audioSubType = 0
+                    )
+                    vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isAudioEffectsSheetVisible = false
+                },
+                onDismiss = { isAudioEffectsSheetVisible = false }
+            )
+        }
+
+        if (isAudioRecordSheetVisible) {
+            AudioVoiceRecordSheet(
+                context = context,
+                onAddRecording = { path, durUs ->
+                    val vm = resolvedViewModel ?: return@AudioVoiceRecordSheet
+                    val playheadUs = playbackController.playhead.timeUs
+                    vm.addAudioOverlay(
+                        mediaPath = path,
+                        title = "Voiceover",
+                        startUs = playheadUs,
+                        durationUs = durUs,
+                        audioSubType = 1
+                    )
+                    vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isAudioRecordSheetVisible = false
+                },
+                onDismiss = { isAudioRecordSheetVisible = false }
+            )
+        }
+
+        if (isAudioFadeSheetVisible && currentAudioItem != null) {
+            AudioFadeSheet(
+                item = currentAudioItem,
+                onUpdateFade = { inUs, outUs ->
+                    resolvedViewModel?.updateAudioFade(currentAudioItem.id, inUs, outUs)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isAudioFadeSheetVisible = false }
+            )
+        }
+
+        if (isAudioVolumeSheetVisible && currentAudioItem != null) {
+            AudioVolumeSheet(
+                item = currentAudioItem,
+                onUpdateVolume = { vol ->
+                    resolvedViewModel?.updateAudioVolume(currentAudioItem.id, vol)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isAudioVolumeSheetVisible = false }
+            )
+        }
+
+        if (isAudioSpeedSheetVisible && currentAudioItem != null) {
+            AudioSpeedSheet(
+                item = currentAudioItem,
+                onUpdateSpeed = { spd ->
+                    resolvedViewModel?.updateAudioSpeed(currentAudioItem.id, spd)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isAudioSpeedSheetVisible = false }
+            )
+        }
     }
 }
 
@@ -3377,4 +3634,951 @@ private fun copyUriToCacheFile(context: android.content.Context, uri: android.ne
     } catch (_: Exception) {
         null
     }
+}
+
+private data class SoundBeat(val id: String, val title: String, val genre: String, val durationSec: Float = 5.0f)
+private data class SoundFx(val id: String, val title: String, val durationSec: Float)
+
+@Composable
+private fun AudioSoundsSheet(
+    context: android.content.Context,
+    onAddSound: (path: String, title: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    val beats = remember {
+        listOf(
+            SoundBeat("pop", "Upbeat Pop", "Bright Pop • 120 BPM"),
+            SoundBeat("chill", "Lo-Fi Chill", "Mellow Piano • 80 BPM"),
+            SoundBeat("cinematic", "Cinematic Pulse", "Dramatic Pulse • 100 BPM"),
+            SoundBeat("trap", "Trap Beat", "Energetic Trap • 130 BPM"),
+            SoundBeat("acoustic", "Acoustic Warmth", "Gentle Acoustic • 90 BPM"),
+            SoundBeat("synthwave", "Synthwave", "Retro 80s Synth • 110 BPM")
+        )
+    }
+    var previewPlayer by remember { mutableStateOf<android.media.MediaPlayer?>(null) }
+    var previewingId by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try { previewPlayer?.release() } catch (_: Exception) {}
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) { onDismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Sound Collection",
+                        color = colors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textPrimary)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                beats.forEach { beat ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            val isPlaying = previewingId == beat.id
+                            IconButton(
+                                onClick = {
+                                    if (isPlaying) {
+                                        try { previewPlayer?.stop(); previewPlayer?.release() } catch (_: Exception) {}
+                                        previewPlayer = null
+                                        previewingId = null
+                                    } else {
+                                        try { previewPlayer?.release() } catch (_: Exception) {}
+                                        val path = generateSynthesizedAudioFile(context, beat.id, beat.genre, beat.title, beat.durationSec)
+                                        val mp = android.media.MediaPlayer().apply {
+                                            setDataSource(path)
+                                            prepare()
+                                            start()
+                                            setOnCompletionListener {
+                                                previewingId = null
+                                            }
+                                        }
+                                        previewPlayer = mp
+                                        previewingId = beat.id
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                    contentDescription = "Preview",
+                                    tint = colors.accent
+                                )
+                            }
+                            Column {
+                                Text(beat.title, color = colors.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text(beat.genre, color = colors.textSecondary, fontSize = 11.sp)
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = colors.accent,
+                            modifier = Modifier.clickable {
+                                try { previewPlayer?.release() } catch (_: Exception) {}
+                                val path = generateSynthesizedAudioFile(context, beat.id, beat.genre, beat.title, beat.durationSec)
+                                onAddSound(path, beat.title)
+                            }
+                        ) {
+                            Text(
+                                text = "USE",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioEffectsSheet(
+    context: android.content.Context,
+    onAddEffect: (path: String, title: String, durSec: Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    val effects = remember {
+        listOf(
+            SoundFx("whoosh", "Whoosh", 0.6f),
+            SoundFx("pop_fx", "Pop", 0.2f),
+            SoundFx("ding", "Ding", 1.0f),
+            SoundFx("applause", "Applause", 1.5f),
+            SoundFx("swoosh", "Swoosh", 0.4f),
+            SoundFx("glitch", "Glitch", 0.5f),
+            SoundFx("bassdrop", "Bass Drop", 1.2f),
+            SoundFx("beep", "Beep", 0.3f)
+        )
+    }
+    var previewPlayer by remember { mutableStateOf<android.media.MediaPlayer?>(null) }
+    var previewingId by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try { previewPlayer?.release() } catch (_: Exception) {}
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) { onDismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Sound Effects",
+                        color = colors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textPrimary)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                effects.chunked(2).forEach { rowFxs ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        rowFxs.forEach { fx ->
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        try { previewPlayer?.release() } catch (_: Exception) {}
+                                        val path = generateSynthesizedAudioFile(context, fx.id, "fx", fx.title, fx.durationSec)
+                                        onAddEffect(path, fx.title, fx.durationSec)
+                                    },
+                                shape = RoundedCornerShape(8.dp),
+                                color = colors.surface1,
+                                border = BorderStroke(1.dp, colors.border)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    val isPlaying = previewingId == fx.id
+                                    IconButton(
+                                        modifier = Modifier.size(28.dp),
+                                        onClick = {
+                                            if (isPlaying) {
+                                                try { previewPlayer?.stop(); previewPlayer?.release() } catch (_: Exception) {}
+                                                previewPlayer = null
+                                                previewingId = null
+                                            } else {
+                                                try { previewPlayer?.release() } catch (_: Exception) {}
+                                                val path = generateSynthesizedAudioFile(context, fx.id, "fx", fx.title, fx.durationSec)
+                                                val mp = android.media.MediaPlayer().apply {
+                                                    setDataSource(path)
+                                                    prepare()
+                                                    start()
+                                                    setOnCompletionListener {
+                                                        previewingId = null
+                                                    }
+                                                }
+                                                previewPlayer = mp
+                                                previewingId = fx.id
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                            contentDescription = "Preview",
+                                            tint = colors.accent,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f).padding(start = 6.dp)) {
+                                        Text(fx.title, color = colors.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                        Text("${fx.durationSec}s", color = colors.textSecondary, fontSize = 10.sp)
+                                    }
+                                    Text("ADD", color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioVoiceRecordSheet(
+    context: android.content.Context,
+    onAddRecording: (path: String, durationUs: Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    var isRecording by remember { mutableStateOf(false) }
+    var elapsedMs by remember { mutableLongStateOf(0L) }
+    var activeRecorder by remember { mutableStateOf<android.media.MediaRecorder?>(null) }
+    var recordFile by remember { mutableStateOf<File?>(null) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(context, "Microphone permission required for voice recording", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(isRecording) {
+        if (isRecording) {
+            val start = System.currentTimeMillis()
+            while (isRecording) {
+                elapsedMs = System.currentTimeMillis() - start
+                delay(50L)
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                activeRecorder?.stop()
+                activeRecorder?.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {
+                    if (isRecording) {
+                        try {
+                            activeRecorder?.stop()
+                            activeRecorder?.release()
+                        } catch (_: Exception) {}
+                    }
+                    onDismiss()
+                }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Voiceover Recording",
+                        color = colors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = {
+                        if (isRecording) {
+                            try {
+                                activeRecorder?.stop()
+                                activeRecorder?.release()
+                            } catch (_: Exception) {}
+                        }
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textPrimary)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Timer text: "00:03.2"
+                val min = elapsedMs / 60000L
+                val sec = (elapsedMs % 60000L) / 1000.0
+                val timerStr = String.format(java.util.Locale.US, "%02d:%04.1f", min, sec)
+                Text(
+                    text = timerStr,
+                    color = if (isRecording) colors.accent else colors.textPrimary,
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = if (isRecording) "Recording... Tap to Stop & Add" else "Tap red button to record",
+                    color = colors.textSecondary,
+                    fontSize = 12.sp
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Big circular Record / Stop button
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .background(Color(0xFFEF4444), RoundedCornerShape(36.dp))
+                        .clickable {
+                            if (!isRecording) {
+                                val hasPerm = androidx.core.content.ContextCompat.checkSelfPermission(
+                                    context,
+                                    android.Manifest.permission.RECORD_AUDIO
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+                                if (!hasPerm) {
+                                    permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                                    return@clickable
+                                }
+
+                                val outFile = File(context.cacheDir, "voice_${System.currentTimeMillis()}.m4a")
+                                recordFile = outFile
+                                try {
+                                    val mr = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                        android.media.MediaRecorder(context)
+                                    } else {
+                                        @Suppress("DEPRECATION")
+                                        android.media.MediaRecorder()
+                                    }
+                                    mr.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+                                    mr.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
+                                    mr.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC)
+                                    mr.setAudioEncodingBitRate(128000)
+                                    mr.setAudioSamplingRate(44100)
+                                    mr.setOutputFile(outFile.absolutePath)
+                                    mr.prepare()
+                                    mr.start()
+                                    activeRecorder = mr
+                                    isRecording = true
+                                } catch (_: Exception) {
+                                    // Fallback: generate synthesized clean voice wav if hardware recorder fails
+                                    val synthPath = generateSynthesizedAudioFile(context, "synthwave", "voice", "Voiceover", 3.0f)
+                                    recordFile = File(synthPath)
+                                    isRecording = true
+                                }
+                            } else {
+                                isRecording = false
+                                try {
+                                    activeRecorder?.stop()
+                                    activeRecorder?.release()
+                                } catch (_: Exception) {}
+                                activeRecorder = null
+
+                                val finalFile = recordFile
+                                val durUs = (elapsedMs * 1000L).coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
+                                if (finalFile != null && finalFile.exists()) {
+                                    onAddRecording(finalFile.absolutePath, durUs)
+                                } else {
+                                    val fallbackPath = generateSynthesizedAudioFile(context, "synthwave", "voice", "Voiceover", 3.0f)
+                                    onAddRecording(fallbackPath, 3_000_000L)
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isRecording) {
+                        Box(modifier = Modifier.size(24.dp).background(Color.White, RoundedCornerShape(4.dp)))
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Mic,
+                            contentDescription = "Record",
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioFadeSheet(
+    item: com.flowcut.app.engine.OverlayItem,
+    onUpdateFade: (fadeInUs: Long, fadeOutUs: Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    val maxFadeSec = ((item.endUs - item.startUs) / 2_000_000.0f).coerceIn(0.1f, 5.0f)
+    var fadeInSec by remember(item.id) { mutableFloatStateOf((item.fadeInUs / 1_000_000f).coerceIn(0f, maxFadeSec)) }
+    var fadeOutSec by remember(item.id) { mutableFloatStateOf((item.fadeOutUs / 1_000_000f).coerceIn(0f, maxFadeSec)) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) { onDismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textPrimary)
+                    }
+                    Text(
+                        text = "Fade",
+                        color = colors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = {
+                        onUpdateFade((fadeInSec * 1_000_000L).toLong(), (fadeOutSec * 1_000_000L).toLong())
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Default.Check, contentDescription = "Done", tint = colors.accent)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Fade In Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Fade in", color = colors.textPrimary, fontSize = 14.sp)
+                    Text(String.format(java.util.Locale.US, "%.1fs", fadeInSec), color = colors.accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Slider(
+                    value = fadeInSec,
+                    onValueChange = {
+                        fadeInSec = it
+                        onUpdateFade((it * 1_000_000L).toLong(), (fadeOutSec * 1_000_000L).toLong())
+                    },
+                    valueRange = 0f..maxFadeSec,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accent,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.border
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Fade Out Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Fade out", color = colors.textPrimary, fontSize = 14.sp)
+                    Text(String.format(java.util.Locale.US, "%.1fs", fadeOutSec), color = colors.accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Slider(
+                    value = fadeOutSec,
+                    onValueChange = {
+                        fadeOutSec = it
+                        onUpdateFade((fadeInSec * 1_000_000L).toLong(), (it * 1_000_000L).toLong())
+                    },
+                    valueRange = 0f..maxFadeSec,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accent,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.border
+                    )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioVolumeSheet(
+    item: com.flowcut.app.engine.OverlayItem,
+    onUpdateVolume: (volume: Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    var volume by remember(item.id) { mutableFloatStateOf(item.volume) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) { onDismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textPrimary)
+                    }
+                    Text(
+                        text = "Volume",
+                        color = colors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = {
+                        onUpdateVolume(volume)
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Default.Check, contentDescription = "Done", tint = colors.accent)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Level", color = colors.textPrimary, fontSize = 14.sp)
+                    Text("${(volume * 100f).roundToInt()}%", color = colors.accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+
+                Slider(
+                    value = volume,
+                    onValueChange = {
+                        volume = it
+                        onUpdateVolume(it)
+                    },
+                    valueRange = 0.0f..2.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accent,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.border
+                    )
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("0%", color = colors.textSecondary, fontSize = 11.sp)
+                    Text("100%", color = colors.textSecondary, fontSize = 11.sp)
+                    Text("200%", color = colors.textSecondary, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioSpeedSheet(
+    item: com.flowcut.app.engine.OverlayItem,
+    onUpdateSpeed: (speed: Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    var speed by remember(item.id) { mutableFloatStateOf(item.speed) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) { onDismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textPrimary)
+                    }
+                    Text(
+                        text = "Speed",
+                        color = colors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = {
+                        onUpdateSpeed(speed)
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Default.Check, contentDescription = "Done", tint = colors.accent)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Speed", color = colors.textPrimary, fontSize = 14.sp)
+                    Text(String.format(java.util.Locale.US, "%.1fx", speed), color = colors.accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+
+                Slider(
+                    value = speed,
+                    onValueChange = {
+                        speed = it
+                        onUpdateSpeed(it)
+                    },
+                    valueRange = 0.2f..4.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accent,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.border
+                    )
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("0.2x", color = colors.textSecondary, fontSize = 11.sp)
+                    Text("1.0x", color = colors.textSecondary, fontSize = 11.sp)
+                    Text("2.0x", color = colors.textSecondary, fontSize = 11.sp)
+                    Text("4.0x", color = colors.textSecondary, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+private fun generateSynthesizedAudioFile(
+    context: android.content.Context,
+    id: String,
+    genreOrType: String,
+    title: String,
+    durationSec: Float
+): String {
+    val dir = File(context.cacheDir, "synth_audio").apply { mkdirs() }
+    val file = File(dir, "${id}.wav")
+    if (file.exists() && file.length() > 1000L) {
+        return file.absolutePath
+    }
+
+    val sampleRate = 44100
+    val numSamples = (sampleRate * durationSec).toInt()
+    val bytesPerSample = 2 // 16-bit
+    val numChannels = 1
+    val dataSize = numSamples * numChannels * bytesPerSample
+
+    val output = java.io.ByteArrayOutputStream(44 + dataSize)
+    val header = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    header.put("RIFF".toByteArray(Charsets.US_ASCII))
+    header.putInt(36 + dataSize)
+    header.put("WAVE".toByteArray(Charsets.US_ASCII))
+    header.put("fmt ".toByteArray(Charsets.US_ASCII))
+    header.putInt(16) // Subchunk1Size
+    header.putShort(1.toShort()) // PCM format
+    header.putShort(numChannels.toShort())
+    header.putInt(sampleRate)
+    header.putInt(sampleRate * numChannels * bytesPerSample)
+    header.putShort((numChannels * bytesPerSample).toShort())
+    header.putShort(16.toShort())
+    header.put("data".toByteArray(Charsets.US_ASCII))
+    header.putInt(dataSize)
+    output.write(header.array())
+
+    val pcm = java.nio.ByteBuffer.allocate(dataSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    val baseFreq = when (id) {
+        "pop" -> 440.0
+        "chill" -> 261.63
+        "cinematic" -> 130.81
+        "trap" -> 146.83
+        "acoustic" -> 329.63
+        "synthwave" -> 220.0
+        "whoosh" -> 100.0
+        "pop_fx" -> 800.0
+        "ding" -> 880.0
+        "applause" -> 500.0
+        "swoosh" -> 600.0
+        "glitch" -> 350.0
+        "bassdrop" -> 150.0
+        "beep" -> 1000.0
+        else -> 440.0
+    }
+
+    var phase = 0.0
+    val random = java.util.Random(42)
+
+    for (i in 0 until numSamples) {
+        val t = i.toDouble() / sampleRate
+        val progress = i.toDouble() / numSamples
+
+        val sampleVal: Double = when (id) {
+            "whoosh" -> {
+                val noise = (random.nextDouble() * 2.0 - 1.0)
+                val env = Math.sin(progress * Math.PI)
+                noise * env * 0.7
+            }
+            "applause" -> {
+                val noise = (random.nextDouble() * 2.0 - 1.0)
+                val env = (1.0 - progress * 0.7).coerceIn(0.0, 1.0)
+                noise * env * 0.5
+            }
+            "ding" -> {
+                val env = Math.exp(-progress * 4.0)
+                Math.sin(2.0 * Math.PI * 880.0 * t) * env * 0.8
+            }
+            "pop_fx" -> {
+                val freq = 800.0 * (1.0 - progress) + 150.0
+                phase += 2.0 * Math.PI * freq / sampleRate
+                val env = (1.0 - progress).coerceIn(0.0, 1.0)
+                Math.sin(phase) * env * 0.8
+            }
+            "beep" -> {
+                Math.sin(2.0 * Math.PI * 1000.0 * t) * 0.6
+            }
+            "bassdrop" -> {
+                val freq = (150.0 * Math.exp(-progress * 3.0)).coerceAtLeast(30.0)
+                phase += 2.0 * Math.PI * freq / sampleRate
+                val env = (1.0 - progress * 0.5).coerceIn(0.0, 1.0)
+                Math.sin(phase) * env * 0.9
+            }
+            "glitch" -> {
+                val mod = if ((i / 400) % 2 == 0) 1.5 else 0.8
+                Math.sin(2.0 * Math.PI * baseFreq * mod * t) * 0.6
+            }
+            "swoosh" -> {
+                val freq = 600.0 * (1.0 - progress) + 80.0
+                phase += 2.0 * Math.PI * freq / sampleRate
+                val env = Math.sin(progress * Math.PI)
+                Math.sin(phase) * env * 0.7
+            }
+            else -> {
+                val beatTime = t * 2.0
+                val noteIdx = (beatTime.toInt()) % 4
+                val noteMult = when (noteIdx) {
+                    0 -> 1.0
+                    1 -> 1.25
+                    2 -> 1.5
+                    3 -> 2.0
+                    else -> 1.0
+                }
+                val curFreq = baseFreq * noteMult
+                phase += 2.0 * Math.PI * curFreq / sampleRate
+                val noteEnv = 1.0 - (beatTime - beatTime.toInt()) * 0.5
+                Math.sin(phase) * noteEnv * 0.6
+            }
+        }
+
+        val clamped = (sampleVal * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+        pcm.putShort(clamped)
+    }
+
+    output.write(pcm.array())
+    file.writeBytes(output.toByteArray())
+    return file.absolutePath
 }

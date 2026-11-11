@@ -609,24 +609,7 @@ object TimelineHitTester {
                 return TimelineSelection.None
             }
         } else if (isAudioExpanded) {
-            val audioRowsTopPx = if (activePipLaneCount > 0) thinLinesBottomPx + (4f * density) else rowDTopPx
-            // Check thin PIP lines first if active
-            if (activePipLaneCount > 0 && tapY >= rowDTopPx - (4f * density) && tapY <= thinLinesBottomPx + (4f * density)) {
-                for (lane in 0 until activePipLaneCount) {
-                    val lineY = rowDTopPx + (lane * ROW_D_PIP_COLLAPSED_STEP_DP * density)
-                    if (abs(tapY - (lineY + (ROW_D_PIP_COLLAPSED_LINE_HEIGHT_DP * density / 2f))) <= 8f * density) {
-                        val hitItem = pipItems.firstOrNull {
-                            it.laneIndex.coerceIn(0, 3) == lane &&
-                                    tapTimeUs in it.startUs..it.endUs
-                        }
-                        if (hitItem != null) {
-                            return TimelineSelection.OverlaySelected(hitItem.id)
-                        }
-                    }
-                }
-                return TimelineSelection.PipGroupClicked
-            }
-
+            val audioRowsTopPx = rowDTopPx
             val audio4RowsBottomPx = audioRowsTopPx + (4 * lowerRowStepPx)
             if (tapY in audioRowsTopPx..audio4RowsBottomPx) {
                 val relativeY = tapY - audioRowsTopPx
@@ -638,7 +621,7 @@ object TimelineHitTester {
                 if (candidateItem != null) {
                     return TimelineSelection.OverlaySelected(candidateItem.id)
                 }
-                return TimelineSelection.AudioGroupClicked
+                return TimelineSelection.None
             }
         } else {
             // Collapsed states (S0, S3, S4):

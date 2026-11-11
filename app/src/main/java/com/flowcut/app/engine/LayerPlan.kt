@@ -56,7 +56,13 @@ data class OverlayItem(
     val intrinsicWidth: Int = 0,
     val intrinsicHeight: Int = 0,
     val filterPresetId: Int = 0,
-    val filterIntensity: Float = 1.0f
+    val filterIntensity: Float = 1.0f,
+    val audioSubType: Int = 0,
+    val volume: Float = 1.0f,
+    val fadeInUs: Long = 0L,
+    val fadeOutUs: Long = 0L,
+    val speed: Float = 1.0f,
+    val sourceInUs: Long = 0L
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L

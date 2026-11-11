@@ -499,7 +499,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         mediaPath: String,
         title: String = "Sound",
         startUs: Long,
-        durationUs: Long = 3_000_000L
+        durationUs: Long = 3_000_000L,
+        audioSubType: Int = 0,
+        sourceInUs: Long = 0L,
+        volume: Float = 1.0f
     ): OverlayItem? {
         val endUs = startUs + durationUs
         val item = OverlayItem(
@@ -510,7 +513,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             startUs = startUs,
             endUs = endUs,
             text = title,
-            mediaPath = mediaPath
+            mediaPath = mediaPath,
+            audioSubType = audioSubType,
+            volume = volume,
+            sourceInUs = sourceInUs
         )
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
@@ -1038,10 +1044,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val leftItem = item.copy(endUs = playheadUs)
         val rightId = UUID.randomUUID().toString()
         val topZ = getTopZIndex()
+        val splitOffsetUs = playheadUs - item.startUs
+        val rightSourceInUs = if (item.type == LayerType.AUDIO) item.sourceInUs + splitOffsetUs else item.sourceInUs
         val rightItem = item.copy(
             id = rightId,
             startUs = playheadUs,
             endUs = item.endUs,
+            sourceInUs = rightSourceInUs,
             zIndex = topZ
         )
 
@@ -1078,17 +1087,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val selectedId = _uiState.value.selectedOverlayId ?: return false
         val idx = _layerItems.indexOfFirst { it.id == selectedId }
         if (idx < 0) return false
+        val item = _layerItems[idx]
 
         pushUndoState()
         _layerItems.removeAt(idx)
         syncLayerPlan()
+
+        val nextFocus = when (item.type) {
+            LayerType.AUDIO -> TimelineFocusState.S5_AUDIO_GROUP
+            LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S1_PIP_GROUP
+            else -> TimelineFocusState.S0_NONE
+        }
 
         _uiState.update {
             it.copy(
                 selectedOverlayId = null,
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
-                focusMode = TimelineFocusState.S0_NONE
+                focusMode = nextFocus
             )
         }
         updateProject(_uiState.value.project, recordUndo = false)
@@ -1157,7 +1173,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             totalProjectDurationUs = totalDurationUs
         )
         if (clampedEndUs - clampedStartUs < OverlayItem.MIN_DURATION_US) return
-        _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs)
+        val deltaStartUs = clampedStartUs - item.startUs
+        val newSourceInUs = if (item.type == LayerType.AUDIO) (item.sourceInUs + deltaStartUs).coerceAtLeast(0L) else item.sourceInUs
+        _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs, sourceInUs = newSourceInUs)
         syncLayerPlan()
     }
 
@@ -1177,7 +1195,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         pushUndoState()
         val topZ = getTopZIndex()
-        _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs, zIndex = topZ)
+        val deltaStartUs = clampedStartUs - item.startUs
+        val newSourceInUs = if (item.type == LayerType.AUDIO) (item.sourceInUs + deltaStartUs).coerceAtLeast(0L) else item.sourceInUs
+        _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs, sourceInUs = newSourceInUs, zIndex = topZ)
         syncLayerPlan()
         _uiState.update {
             it.copy(
@@ -1187,6 +1207,45 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         updateProject(_uiState.value.project, recordUndo = false)
+    }
+
+    fun updateAudioVolume(itemId: String, volume: Float): Boolean {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return false
+        val item = _layerItems[idx]
+        val clamped = volume.coerceIn(0.0f, 2.0f)
+        pushUndoState()
+        _layerItems[idx] = item.copy(volume = clamped)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
+    }
+
+    fun updateAudioFade(itemId: String, fadeInUs: Long, fadeOutUs: Long): Boolean {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return false
+        val item = _layerItems[idx]
+        val duration = item.endUs - item.startUs
+        val maxFade = (duration / 2L).coerceAtLeast(0L)
+        val clampedIn = fadeInUs.coerceIn(0L, maxFade)
+        val clampedOut = fadeOutUs.coerceIn(0L, maxFade)
+        pushUndoState()
+        _layerItems[idx] = item.copy(fadeInUs = clampedIn, fadeOutUs = clampedOut)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
+    }
+
+    fun updateAudioSpeed(itemId: String, speed: Float): Boolean {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return false
+        val item = _layerItems[idx]
+        val clampedSpeed = speed.coerceIn(0.2f, 4.0f)
+        pushUndoState()
+        _layerItems[idx] = item.copy(speed = clampedSpeed)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
     }
 
     fun setOverlayOpacityLive(itemId: String, opacity: Float) {

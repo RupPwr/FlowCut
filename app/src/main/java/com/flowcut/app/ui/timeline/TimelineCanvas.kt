@@ -498,12 +498,15 @@ fun TimelineCanvas(
     val pipBadgePath = remember { Path() }
 
     // Audio Row Resources
-    val colorAudioCardBg = remember { Color(0xFF2563EB) }
-    val colorAudioCardSelectedBg = remember { Color(0xFF1D4ED8) }
-    val colorAudioHandle = remember { Color(0xFF93C5FD) }
+    val colorAudioCardBg = remember { Color(0xFF8AB4F8) }
+    val colorAudioCardSelectedBg = remember { Color(0xFF93C5FD) }
+    val colorAudioHandle = remember { Color.White }
     val colorAudioTrackBg = remember { Color(0x14FFFFFF) }
-    val audioLabelStyle = remember { TextStyle(fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.SemiBold) }
+    val colorSoundWaveformTick = remember { Color(0x66FFFFFF) }
+    val audioWhiteSelectionStroke = remember { Stroke(width = 2f * density) }
+    val audioLabelStyle = remember { TextStyle(fontSize = 10.sp, color = Color(0xFF0F172A), fontWeight = FontWeight.Bold) }
     val audioCardPath = remember { Path() }
+    val audioFadePath = remember { Path() }
     val audioLeftHandlePath = remember { Path() }
     val audioRightHandlePath = remember { Path() }
 
@@ -1078,10 +1081,20 @@ fun TimelineCanvas(
         val isPipExpanded = focus is TimelineFocusState.S1_PIP_GROUP || focus is TimelineFocusState.S2_PIP_ITEM
         val isAudioExpanded = focus is TimelineFocusState.S5_AUDIO_GROUP || focus is TimelineFocusState.S6_AUDIO_ITEM
 
-        val pipItems = overlayItems.filter { it.type == LayerType.VIDEO || it.type == LayerType.IMAGE }
-        val audioItems = overlayItems.filter { it.type == LayerType.AUDIO }
-        val occupiedPipLanes = pipItems.map { it.laneIndex.coerceIn(0, 3) }.toSet()
-        val activePipLaneCount = if (occupiedPipLanes.isEmpty()) 0 else (occupiedPipLanes.max() + 1).coerceIn(1, 4)
+        // Calculate activePipLaneCount & hasAudioItems without allocations (Rule R10)
+        var activePipLaneCount = 0
+        var hasAudioItems = false
+        for (i in overlayItems.indices) {
+            val item = overlayItems[i]
+            if (item.type == LayerType.VIDEO || item.type == LayerType.IMAGE) {
+                val lane = item.laneIndex.coerceIn(0, 3)
+                if (lane + 1 > activePipLaneCount) {
+                    activePipLaneCount = lane + 1
+                }
+            } else if (item.type == LayerType.AUDIO) {
+                hasAudioItems = true
+            }
+        }
 
         // Constant vertical layout coordinates
         val rowATop = rulerHeightPx
@@ -1821,9 +1834,10 @@ fun TimelineCanvas(
             for (lane in 0..3) {
                 val laneTop = rowDTop + (lane * lowerRowStepPx)
                 val laneBottom = laneTop + lowerRowHeightPx
-                val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
-
-                for (item in lanePipItems) {
+                for (itemIdx in overlayItems.indices) {
+                    val item = overlayItems[itemIdx]
+                    if (item.type != LayerType.VIDEO && item.type != LayerType.IMAGE) continue
+                    if (item.laneIndex.coerceIn(0, 3) != lane) continue
                     val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
                     val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
                     val itemW = eX - sX
@@ -1985,37 +1999,16 @@ fun TimelineCanvas(
                 }
             }
         } else if (isAudioExpanded) {
-            // 1. Keep the 4 PIP thin indicator lines visible above the expanded audio row(s)
-            for (lane in 0 until activePipLaneCount) {
-                val lineY = rowDTop + (lane * 7f * density)
-                val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
-                for (item in lanePipItems) {
-                    val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
-                    val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
-                    if (eX > sX && eX >= -50f && sX <= size.width + 50f) {
-                        buildClipCornerPath(
-                            path = pipThinLinePath,
-                            left = sX,
-                            top = lineY,
-                            right = eX,
-                            bottom = lineY + (3.5f * density),
-                            roundLeft = true,
-                            roundRight = true,
-                            radius = 1.75f * density
-                        )
-                        drawPath(path = pipThinLinePath, color = colorPipAmberGold)
-                    }
-                }
-            }
-
-            // 2. Expanded 4 Audio Rows (placed right below the thin PIP lines)
-            val audioRowsTop = if (activePipLaneCount > 0) thinLinesBottomPx + (4f * density) else rowDTop
+            // Expanded 4 Audio Rows (PIP rows & sound bar hidden, exact same 4-row lower zone starting at rowDTop)
+            val audioRowsTop = rowDTop
             for (lane in 0..3) {
                 val laneTop = audioRowsTop + (lane * lowerRowStepPx)
                 val laneBottom = laneTop + lowerRowHeightPx
-                val laneAudioItems = audioItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
 
-                for (item in laneAudioItems) {
+                for (itemIdx in overlayItems.indices) {
+                    val item = overlayItems[itemIdx]
+                    if (item.type != LayerType.AUDIO) continue
+                    if (item.laneIndex.coerceIn(0, 3) != lane) continue
                     val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
                     val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
                     val itemW = eX - sX
@@ -2037,19 +2030,54 @@ fun TimelineCanvas(
                     val bgColor = if (isSelectedAudio) colorAudioCardSelectedBg else colorAudioCardBg
                     drawPath(path = audioCardPath, color = bgColor)
 
-                    // Sound title label
-                    val title = if (item.text.isNotEmpty()) item.text else "Sound"
-                    drawTextSafe(
-                        textMeasurer = textMeasurer,
-                        text = "♪ $title",
-                        x = sX + (8f * density),
-                        y = laneTop + (6f * density),
-                        style = audioLabelStyle
-                    )
+                    // Diagonal fade curve / shading if fadeInUs > 0 or fadeOutUs > 0
+                    val durUs = (item.endUs - item.startUs).coerceAtLeast(1L)
+                    if (item.fadeInUs > 0L) {
+                        val fadeRatio = (item.fadeInUs.toFloat() / durUs).coerceIn(0f, 0.5f)
+                        val fadeWidthPx = itemW * fadeRatio
+                        if (fadeWidthPx > 2f) {
+                            audioFadePath.reset()
+                            audioFadePath.moveTo(sX, laneBottom)
+                            audioFadePath.lineTo(sX + fadeWidthPx, laneTop)
+                            audioFadePath.lineTo(sX, laneTop)
+                            audioFadePath.close()
+                            drawPath(path = audioFadePath, color = Color(0x33000000))
+                        }
+                    }
+                    if (item.fadeOutUs > 0L) {
+                        val fadeRatio = (item.fadeOutUs.toFloat() / durUs).coerceIn(0f, 0.5f)
+                        val fadeWidthPx = itemW * fadeRatio
+                        if (fadeWidthPx > 2f) {
+                            audioFadePath.reset()
+                            audioFadePath.moveTo(eX, laneBottom)
+                            audioFadePath.lineTo(eX - fadeWidthPx, laneTop)
+                            audioFadePath.lineTo(eX, laneTop)
+                            audioFadePath.close()
+                            drawPath(path = audioFadePath, color = Color(0x33000000))
+                        }
+                    }
+
+                    // Inside bar: clipped strictly to [sX, eX]
+                    clipRect(left = sX, top = laneTop, right = eX, bottom = laneBottom) {
+                        val label = if (item.audioSubType == 1) {
+                            "🎤 ${if (item.text.isNotEmpty()) item.text else "1"}"
+                        } else {
+                            "♪ ${if (item.text.isNotEmpty()) item.text else "Sound"}"
+                        }
+                        drawTextSafe(
+                            textMeasurer = textMeasurer,
+                            text = label,
+                            x = sX + (8f * density),
+                            y = laneTop + (5f * density),
+                            style = audioLabelStyle
+                        )
+                    }
 
                     if (isSelectedAudio) {
-                        drawPath(path = audioCardPath, color = colorAudioHandle, style = whiteSelectionStroke)
+                        // Crisp 2.dp White Selection Outline
+                        drawPath(path = audioCardPath, color = Color.White, style = audioWhiteSelectionStroke)
 
+                        // External < and > trim handles
                         val r = minOf(handleCornerRadiusPx, handleWidthPx / 2f, lowerRowHeightPx / 2f)
                         val leftHandleLeft = sX - handleWidthPx
                         val leftHandleRight = sX
@@ -2061,7 +2089,7 @@ fun TimelineCanvas(
                         audioLeftHandlePath.quadraticTo(leftHandleLeft, laneBottom, leftHandleLeft + r, laneBottom)
                         audioLeftHandlePath.lineTo(leftHandleRight, laneBottom)
                         audioLeftHandlePath.close()
-                        drawPath(path = audioLeftHandlePath, color = colorAudioHandle)
+                        drawPath(path = audioLeftHandlePath, color = Color.White)
 
                         val rightHandleLeft = eX
                         val rightHandleRight = eX + handleWidthPx
@@ -2073,7 +2101,7 @@ fun TimelineCanvas(
                         audioRightHandlePath.quadraticTo(rightHandleRight, laneBottom, rightHandleRight - r, laneBottom)
                         audioRightHandlePath.lineTo(rightHandleLeft, laneBottom)
                         audioRightHandlePath.close()
-                        drawPath(path = audioRightHandlePath, color = colorAudioHandle)
+                        drawPath(path = audioRightHandlePath, color = Color.White)
 
                         val centerY = (laneTop + laneBottom) / 2f
                         val leftCenterX = sX - (handleWidthPx / 2f)
@@ -2081,16 +2109,38 @@ fun TimelineCanvas(
                         leftChevronPath.moveTo(leftCenterX + chevronHalfWPx, centerY - chevronHalfHPx)
                         leftChevronPath.lineTo(leftCenterX - chevronHalfWPx, centerY)
                         leftChevronPath.lineTo(leftCenterX + chevronHalfWPx, centerY + chevronHalfHPx)
-                        drawPath(path = leftChevronPath, color = chevronColor, style = chevronStroke)
+                        drawPath(path = leftChevronPath, color = Color(0xFF0F172A), style = chevronStroke)
 
                         val rightCenterX = eX + (handleWidthPx / 2f)
                         rightChevronPath.reset()
                         rightChevronPath.moveTo(rightCenterX - chevronHalfWPx, centerY - chevronHalfHPx)
                         rightChevronPath.lineTo(rightCenterX + chevronHalfWPx, centerY)
                         rightChevronPath.lineTo(rightCenterX - chevronHalfWPx, centerY + chevronHalfHPx)
-                        drawPath(path = rightChevronPath, color = chevronColor, style = chevronStroke)
+                        drawPath(path = rightChevronPath, color = Color(0xFF0F172A), style = chevronStroke)
+
+                        // Duration badge ("0:04.0") on right side of selected audio bar
+                        val durBadgeStr = durationBadgeCache.get(item.durationUs)
+                        val badgeW = 42f * density
+                        val badgeH = 15f * density
+                        val badgeLeft = eX - badgeW - (6f * density)
+                        val badgeTop = laneTop + (lowerRowHeightPx - badgeH) / 2f
+                        if (badgeLeft > sX + (60f * density)) {
+                            drawRoundRect(
+                                color = Color(0xCC000000),
+                                topLeft = Offset(badgeLeft, badgeTop),
+                                size = Size(badgeW, badgeH),
+                                cornerRadius = CornerRadius(3f * density, 3f * density)
+                            )
+                            drawTextSafe(
+                                textMeasurer = textMeasurer,
+                                text = durBadgeStr,
+                                x = badgeLeft + (4f * density),
+                                y = badgeTop + (1.5f * density),
+                                style = durationBadgeStyle
+                            )
+                        }
                     } else {
-                        drawPath(path = audioCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
+                        drawPath(path = audioCardPath, color = Color(0x26000000), style = unselectedStroke)
                     }
                 }
             }
@@ -2099,8 +2149,10 @@ fun TimelineCanvas(
             // 1. Thin yellow/gold PIP indicator lines (3.5.dp thick, 7.dp step)
             for (lane in 0 until activePipLaneCount) {
                 val lineY = rowDTop + (lane * 7f * density)
-                val lanePipItems = pipItems.filter { it.laneIndex.coerceIn(0, 3) == lane }
-                for (item in lanePipItems) {
+                for (itemIdx in overlayItems.indices) {
+                    val item = overlayItems[itemIdx]
+                    if (item.type != LayerType.VIDEO && item.type != LayerType.IMAGE) continue
+                    if (item.laneIndex.coerceIn(0, 3) != lane) continue
                     val sX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
                     val eX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
                     if (eX > sX && eX >= -50f && sX <= size.width + 50f) {
@@ -2154,6 +2206,42 @@ fun TimelineCanvas(
                             y = soundBarTop + (4.5f * density),
                             style = soundLabelStyle
                         )
+                    }
+
+                    // Draw subtle vertical grey waveform ticks across audio item spans (Rule R10 compliant)
+                    if (hasAudioItems) {
+                        val soundCenterY = soundBarTop + (soundBarBottom - soundBarTop) / 2f
+                        val labelEndX = visibleTextX + (110f * density)
+                        for (itemIdx in overlayItems.indices) {
+                            val aItem = overlayItems[itemIdx]
+                            if (aItem.type != LayerType.AUDIO) continue
+                            val aSX = zoomState.timeUsToX(aItem.startUs, offsetPx, halfWidthInt, pxPerUs)
+                            val aEX = zoomState.timeUsToX(aItem.endUs, offsetPx, halfWidthInt, pxPerUs)
+                            val clampedSX = maxOf(aSX, maxOf(soundBarLeft, labelEndX))
+                            val clampedEX = minOf(aEX, soundBarRight)
+                            if (clampedEX > clampedSX + 4f * density) {
+                                var tickX = clampedSX + (2f * density)
+                                var tickIdx = 0
+                                while (tickX <= clampedEX - (2f * density)) {
+                                    val tickH = when (tickIdx % 5) {
+                                        0 -> 10f * density
+                                        1 -> 6f * density
+                                        2 -> 13f * density
+                                        3 -> 7f * density
+                                        else -> 11f * density
+                                    }
+                                    drawLine(
+                                        color = colorSoundWaveformTick,
+                                        start = Offset(tickX, soundCenterY - tickH / 2f),
+                                        end = Offset(tickX, soundCenterY + tickH / 2f),
+                                        strokeWidth = 1.5f * density,
+                                        cap = StrokeCap.Round
+                                    )
+                                    tickX += 3.5f * density
+                                    tickIdx++
+                                }
+                            }
+                        }
                     }
                 }
             }

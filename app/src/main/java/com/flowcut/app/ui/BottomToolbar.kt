@@ -34,9 +34,14 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Flip
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.LinearScale
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Opacity
 import androidx.compose.material.icons.filled.Palette
@@ -44,6 +49,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.ui.draw.alpha
 import androidx.compose.material3.HorizontalDivider
@@ -65,6 +71,9 @@ fun BottomToolbar(
     isPipActive: Boolean = false,
     isPipItemSelected: Boolean = false,
     canSplitPip: Boolean = true,
+    isAudioActive: Boolean = false,
+    isAudioItemSelected: Boolean = false,
+    canSplitAudio: Boolean = true,
     isTextOverlaySelected: Boolean = false,
     isTextToolbarActive: Boolean = false,
     onAddOverlayClick: () -> Unit = {},
@@ -83,6 +92,15 @@ fun BottomToolbar(
     onDeleteClipClick: (() -> Unit)? = null,
     onClearSelection: () -> Unit = {},
     onLockedItemClick: () -> Unit = {},
+    onAudioClick: () -> Unit = {},
+    onBackToAudioGroup: () -> Unit = {},
+    onAudioSoundsClick: () -> Unit = {},
+    onAudioLocalClick: () -> Unit = {},
+    onAudioEffectsClick: () -> Unit = {},
+    onAudioExtractClick: () -> Unit = {},
+    onAudioRecordClick: () -> Unit = {},
+    onAudioFadeClick: () -> Unit = {},
+    onDeleteAudioClick: () -> Unit = {},
     onTextClick: () -> Unit = {},
     onStickerClick: () -> Unit = {},
     onImageClick: () -> Unit = {},
@@ -1086,6 +1104,402 @@ fun BottomToolbar(
                     }
                 }
             }
+        } else if (isAudioActive) {
+            if (isAudioItemSelected) {
+                // S6 Selected Audio Item Toolbar: VOLUME, FADE, SPEED, SPLIT, COPY, DELETE
+                val splitEnabled = canSplitAudio
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left ⌄ chevron (steps back to S5_AUDIO_GROUP)
+                    Box(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onBackToAudioGroup() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Back to Audio",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    // Vertical separator
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(24.dp)
+                            .background(colors.border)
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. VOLUME
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onVolumeClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = "VOLUME",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "VOLUME",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 2. FADE
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAudioFadeClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LinearScale,
+                                contentDescription = "FADE",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "FADE",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 3. SPEED
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onSpeedClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Speed,
+                                contentDescription = "SPEED",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "SPEED",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 4. SPLIT
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .alpha(if (splitEnabled) 1.0f else 0.35f)
+                                .then(if (splitEnabled) Modifier.clickable { onSplitClick() } else Modifier)
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                                contentDescription = "SPLIT",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "SPLIT",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 5. COPY
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onCopyClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "COPY",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "COPY",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 6. DELETE
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onDeleteAudioClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "DELETE",
+                                tint = colors.danger,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "DELETE",
+                                color = colors.danger,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            } else {
+                // S5 Audio Group Toolbar: SOUNDS, LOCAL, EFFECTS, EXTRACT, RECORD
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left ⌄ dismiss chevron (returns to S0_NONE)
+                    Box(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onClearSelection() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Collapse Audio",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    // Vertical separator
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(24.dp)
+                            .background(colors.border)
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. SOUNDS
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAudioSoundsClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LibraryMusic,
+                                contentDescription = "SOUNDS",
+                                tint = colors.accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "SOUNDS",
+                                color = colors.accent,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 2. LOCAL
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAudioLocalClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = "LOCAL",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "LOCAL",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 3. EFFECTS
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAudioEffectsClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = "EFFECTS",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "EFFECTS",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 4. EXTRACT
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAudioExtractClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VideoFile,
+                                contentDescription = "EXTRACT",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "EXTRACT",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 5. RECORD
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onAudioRecordClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "RECORD",
+                                tint = colors.accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "RECORD",
+                                color = colors.accent,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
         } else if (isOverlaySelected) {
             // Contextual Selected Overlay Toolbar (SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE)
             Row(
@@ -1502,11 +1916,11 @@ fun BottomToolbar(
                     )
                 }
 
-                // 6. Audio (Locked)
+                // 6. Audio
                 Column(
                     modifier = Modifier
                         .widthIn(min = 52.dp)
-                        .clickable { onLockedItemClick() }
+                        .clickable { onAudioClick() }
                         .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
@@ -1514,13 +1928,13 @@ fun BottomToolbar(
                     Icon(
                         imageVector = Icons.Default.MusicNote,
                         contentDescription = "Audio",
-                        tint = colors.textSecondary,
+                        tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Audio",
-                        color = colors.textSecondary,
+                        color = colors.textPrimary,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
