@@ -763,10 +763,27 @@ fun TimelineCanvas(
                         if (isOverlayLeftHandle) {
                             rawStartUs = initialOverlayStartUs + effectiveDeltaUs
                             rawEndUs = initialOverlayEndUs
+                            if (curOverlayItem.naturalDurationUs > 0L) {
+                                val speedVal = if (curOverlayItem.speed > 0f) curOverlayItem.speed.toDouble() else 1.0
+                                val minAllowedStartUs = initialOverlayStartUs - (curOverlayItem.sourceInUs.toDouble() / speedVal).toLong()
+                                if (rawStartUs < minAllowedStartUs && !hasShownDurationToast) {
+                                    hasShownDurationToast = true
+                                    currentOnToast("Cannot exceed media start")
+                                }
+                            }
                         } else {
                             rawStartUs = initialOverlayStartUs
                             rawEndUs = initialOverlayEndUs + effectiveDeltaUs
-                            if (rawEndUs > totalTimelineUs && !hasShownDurationToast) {
+                            if (curOverlayItem.naturalDurationUs > 0L) {
+                                val speedVal = if (curOverlayItem.speed > 0f) curOverlayItem.speed.toDouble() else 1.0
+                                val remainingMediaUs = (curOverlayItem.naturalDurationUs - curOverlayItem.sourceInUs).coerceAtLeast(0L)
+                                val maxTimelineSpanUs = (remainingMediaUs.toDouble() / speedVal).toLong()
+                                val maxAllowedEndUs = initialOverlayStartUs + maxTimelineSpanUs
+                                if (rawEndUs > maxAllowedEndUs && !hasShownDurationToast) {
+                                    hasShownDurationToast = true
+                                    currentOnToast("Cannot exceed media duration")
+                                }
+                            } else if (rawEndUs > totalTimelineUs && !hasShownDurationToast) {
                                 hasShownDurationToast = true
                                 currentOnToast("Cannot exceed video duration")
                             }
@@ -1834,6 +1851,12 @@ fun TimelineCanvas(
             for (lane in 0..3) {
                 val laneTop = rowDTop + (lane * lowerRowStepPx)
                 val laneBottom = laneTop + lowerRowHeightPx
+
+                var selPipItem: OverlayItem? = null
+                var selPipSX = 0f
+                var selPipEX = 0f
+
+                // PASS 1: Draw all PIP bars on this lane (filmstrip thumbnails, backgrounds, unselected borders)
                 for (itemIdx in overlayItems.indices) {
                     val item = overlayItems[itemIdx]
                     if (item.type != LayerType.VIDEO && item.type != LayerType.IMAGE) continue
@@ -1844,6 +1867,11 @@ fun TimelineCanvas(
                     if (itemW <= 0f || eX < -handleWidthPx || sX > size.width + handleWidthPx) continue
 
                     val isSelectedPip = (focus is TimelineFocusState.S2_PIP_ITEM && focus.itemId == item.id)
+                    if (isSelectedPip) {
+                        selPipItem = item
+                        selPipSX = sX
+                        selPipEX = eX
+                    }
 
                     buildClipCornerPath(
                         path = pipLaneCardPath,
@@ -1898,104 +1926,116 @@ fun TimelineCanvas(
                                 alt = !alt
                             }
                         }
-
-                        // On S2_PIP_ITEM: volume badge "🔊 100%"
-                        if (isSelectedPip && eX - sX > 56f * density) {
-                            val volW = 54f * density
-                            val volH = 15f * density
-                            val volLeft = sX + (6f * density)
-                            val volTop = laneTop + (lowerRowHeightPx - volH) / 2f
-                            drawRoundRect(
-                                color = Color(0x99000000),
-                                topLeft = Offset(volLeft, volTop),
-                                size = Size(volW, volH),
-                                cornerRadius = CornerRadius(3f * density, 3f * density)
-                            )
-                            drawTextSafe(
-                                textMeasurer = textMeasurer,
-                                text = "🔊 100%",
-                                x = volLeft + (3f * density),
-                                y = volTop + (1.5f * density),
-                                style = pipVolStyle
-                            )
-                        }
-
-                        // On S2_PIP_ITEM: duration badge on right
-                        if (isSelectedPip) {
-                            val durBadgeStr = durationBadgeCache.get(item.durationUs)
-                            val badgeW = 42f * density
-                            val badgeH = 15f * density
-                            val badgeLeft = eX - badgeW - (6f * density)
-                            val badgeTop = laneTop + (lowerRowHeightPx - badgeH) / 2f
-                            if (badgeLeft > sX + (66f * density)) {
-                                drawRoundRect(
-                                    color = Color(0x99000000),
-                                    topLeft = Offset(badgeLeft, badgeTop),
-                                    size = Size(badgeW, badgeH),
-                                    cornerRadius = CornerRadius(3f * density, 3f * density)
-                                )
-                                drawTextSafe(
-                                    textMeasurer = textMeasurer,
-                                    text = durBadgeStr,
-                                    x = badgeLeft + (4f * density),
-                                    y = badgeTop + (1.5f * density),
-                                    style = durationBadgeStyle
-                                )
-                            }
-                        }
                     }
 
-                    // In S2_PIP_ITEM: Yellow Left Handle, selection border, and trim handles
-                    if (isSelectedPip) {
-                        drawPath(path = pipLaneCardPath, color = colorYellowHandle, style = pipSelectionStroke)
+                    // Draw dark split boundary line
+                    drawPath(path = pipLaneCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
+                }
 
-                        val r = minOf(4f * density, pipHandleWidthPx / 2f, lowerRowHeightPx / 2f)
-                        val leftHandleLeft = sX - pipHandleWidthPx
-                        val leftHandleRight = sX
-                        pipLeftHandlePath.reset()
-                        pipLeftHandlePath.moveTo(leftHandleRight, laneTop)
-                        pipLeftHandlePath.lineTo(leftHandleLeft + r, laneTop)
-                        pipLeftHandlePath.quadraticTo(leftHandleLeft, laneTop, leftHandleLeft, laneTop + r)
-                        pipLeftHandlePath.lineTo(leftHandleLeft, laneBottom - r)
-                        pipLeftHandlePath.quadraticTo(leftHandleLeft, laneBottom, leftHandleLeft + r, laneBottom)
-                        pipLeftHandlePath.lineTo(leftHandleRight, laneBottom)
-                        pipLeftHandlePath.close()
-                        drawPath(path = pipLeftHandlePath, color = colorYellowHandle)
+                // PASS 2: Draw the selected PIP item's Yellow Handle, selection border, and badges LAST on top of all bars
+                if (selPipItem != null) {
+                    val sX = selPipSX
+                    val eX = selPipEX
+                    buildClipCornerPath(
+                        path = pipLaneCardPath,
+                        left = sX,
+                        top = laneTop,
+                        right = eX,
+                        bottom = laneBottom,
+                        roundLeft = true,
+                        roundRight = true,
+                        radius = 4f * density
+                    )
 
-                        // Vertical dark grip line inside left handle
-                        val leftGripX = sX - (pipHandleWidthPx / 2f)
-                        drawLine(
-                            color = pipGripColor,
-                            start = Offset(leftGripX, laneTop + 5f * density),
-                            end = Offset(leftGripX, laneBottom - 5f * density),
-                            strokeWidth = 1.5f * density,
-                            cap = StrokeCap.Round
+                    drawPath(path = pipLaneCardPath, color = colorYellowHandle, style = pipSelectionStroke)
+
+                    // Volume badge "🔊 100%"
+                    if (eX - sX > 56f * density) {
+                        val volW = 54f * density
+                        val volH = 15f * density
+                        val volLeft = sX + (6f * density)
+                        val volTop = laneTop + (lowerRowHeightPx - volH) / 2f
+                        drawRoundRect(
+                            color = Color(0x99000000),
+                            topLeft = Offset(volLeft, volTop),
+                            size = Size(volW, volH),
+                            cornerRadius = CornerRadius(3f * density, 3f * density)
                         )
-
-                        val rightHandleLeft = eX
-                        val rightHandleRight = eX + pipHandleWidthPx
-                        pipRightHandlePath.reset()
-                        pipRightHandlePath.moveTo(rightHandleLeft, laneTop)
-                        pipRightHandlePath.lineTo(rightHandleRight - r, laneTop)
-                        pipRightHandlePath.quadraticTo(rightHandleRight, laneTop, rightHandleRight, laneTop + r)
-                        pipRightHandlePath.lineTo(rightHandleRight, laneBottom - r)
-                        pipRightHandlePath.quadraticTo(rightHandleRight, laneBottom, rightHandleRight - r, laneBottom)
-                        pipRightHandlePath.lineTo(rightHandleLeft, laneBottom)
-                        pipRightHandlePath.close()
-                        drawPath(path = pipRightHandlePath, color = colorYellowHandle)
-
-                        // Vertical dark grip line inside right handle
-                        val rightGripX = eX + (pipHandleWidthPx / 2f)
-                        drawLine(
-                            color = pipGripColor,
-                            start = Offset(rightGripX, laneTop + 5f * density),
-                            end = Offset(rightGripX, laneBottom - 5f * density),
-                            strokeWidth = 1.5f * density,
-                            cap = StrokeCap.Round
+                        drawTextSafe(
+                            textMeasurer = textMeasurer,
+                            text = "🔊 100%",
+                            x = volLeft + (3f * density),
+                            y = volTop + (1.5f * density),
+                            style = pipVolStyle
                         )
-                    } else {
-                        drawPath(path = pipLaneCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
                     }
+
+                    // Duration badge on right
+                    val durBadgeStr = durationBadgeCache.get(selPipItem.durationUs)
+                    val badgeW = 42f * density
+                    val badgeH = 15f * density
+                    val badgeLeft = eX - badgeW - (6f * density)
+                    val badgeTop = laneTop + (lowerRowHeightPx - badgeH) / 2f
+                    if (badgeLeft > sX + (66f * density)) {
+                        drawRoundRect(
+                            color = Color(0x99000000),
+                            topLeft = Offset(badgeLeft, badgeTop),
+                            size = Size(badgeW, badgeH),
+                            cornerRadius = CornerRadius(3f * density, 3f * density)
+                        )
+                        drawTextSafe(
+                            textMeasurer = textMeasurer,
+                            text = durBadgeStr,
+                            x = badgeLeft + (4f * density),
+                            y = badgeTop + (1.5f * density),
+                            style = durationBadgeStyle
+                        )
+                    }
+
+                    val r = minOf(4f * density, pipHandleWidthPx / 2f, lowerRowHeightPx / 2f)
+                    val leftHandleLeft = sX - pipHandleWidthPx
+                    val leftHandleRight = sX
+                    pipLeftHandlePath.reset()
+                    pipLeftHandlePath.moveTo(leftHandleRight, laneTop)
+                    pipLeftHandlePath.lineTo(leftHandleLeft + r, laneTop)
+                    pipLeftHandlePath.quadraticTo(leftHandleLeft, laneTop, leftHandleLeft, laneTop + r)
+                    pipLeftHandlePath.lineTo(leftHandleLeft, laneBottom - r)
+                    pipLeftHandlePath.quadraticTo(leftHandleLeft, laneBottom, leftHandleLeft + r, laneBottom)
+                    pipLeftHandlePath.lineTo(leftHandleRight, laneBottom)
+                    pipLeftHandlePath.close()
+                    drawPath(path = pipLeftHandlePath, color = colorYellowHandle)
+
+                    // Vertical dark grip line inside left handle
+                    val leftGripX = sX - (pipHandleWidthPx / 2f)
+                    drawLine(
+                        color = pipGripColor,
+                        start = Offset(leftGripX, laneTop + 5f * density),
+                        end = Offset(leftGripX, laneBottom - 5f * density),
+                        strokeWidth = 1.5f * density,
+                        cap = StrokeCap.Round
+                    )
+
+                    val rightHandleLeft = eX
+                    val rightHandleRight = eX + pipHandleWidthPx
+                    pipRightHandlePath.reset()
+                    pipRightHandlePath.moveTo(rightHandleLeft, laneTop)
+                    pipRightHandlePath.lineTo(rightHandleRight - r, laneTop)
+                    pipRightHandlePath.quadraticTo(rightHandleRight, laneTop, rightHandleRight, laneTop + r)
+                    pipRightHandlePath.lineTo(rightHandleRight, laneBottom - r)
+                    pipRightHandlePath.quadraticTo(rightHandleRight, laneBottom, rightHandleRight - r, laneBottom)
+                    pipRightHandlePath.lineTo(rightHandleLeft, laneBottom)
+                    pipRightHandlePath.close()
+                    drawPath(path = pipRightHandlePath, color = colorYellowHandle)
+
+                    // Vertical dark grip line inside right handle
+                    val rightGripX = eX + (pipHandleWidthPx / 2f)
+                    drawLine(
+                        color = pipGripColor,
+                        start = Offset(rightGripX, laneTop + 5f * density),
+                        end = Offset(rightGripX, laneBottom - 5f * density),
+                        strokeWidth = 1.5f * density,
+                        cap = StrokeCap.Round
+                    )
                 }
             }
         } else if (isAudioExpanded) {
@@ -2005,6 +2045,11 @@ fun TimelineCanvas(
                 val laneTop = audioRowsTop + (lane * lowerRowStepPx)
                 val laneBottom = laneTop + lowerRowHeightPx
 
+                var selAudioItem: OverlayItem? = null
+                var selAudioSX = 0f
+                var selAudioEX = 0f
+
+                // PASS 1: Draw all item bars on this lane (backgrounds, fades, labels, split dividers)
                 for (itemIdx in overlayItems.indices) {
                     val item = overlayItems[itemIdx]
                     if (item.type != LayerType.AUDIO) continue
@@ -2015,6 +2060,11 @@ fun TimelineCanvas(
                     if (itemW <= 0f || eX < -handleWidthPx || sX > size.width + handleWidthPx) continue
 
                     val isSelectedAudio = (focus is TimelineFocusState.S6_AUDIO_ITEM && focus.itemId == item.id)
+                    if (isSelectedAudio) {
+                        selAudioItem = item
+                        selAudioSX = sX
+                        selAudioEX = eX
+                    }
 
                     buildClipCornerPath(
                         path = audioCardPath,
@@ -2073,74 +2123,89 @@ fun TimelineCanvas(
                         )
                     }
 
-                    if (isSelectedAudio) {
-                        // Crisp 2.dp White Selection Outline
-                        drawPath(path = audioCardPath, color = Color.White, style = audioWhiteSelectionStroke)
+                    // Crisp dark divider stroke at clip boundaries
+                    drawPath(path = audioCardPath, color = Color(0x26000000), style = unselectedStroke)
+                }
 
-                        // External < and > trim handles
-                        val r = minOf(handleCornerRadiusPx, handleWidthPx / 2f, lowerRowHeightPx / 2f)
-                        val leftHandleLeft = sX - handleWidthPx
-                        val leftHandleRight = sX
-                        audioLeftHandlePath.reset()
-                        audioLeftHandlePath.moveTo(leftHandleRight, laneTop)
-                        audioLeftHandlePath.lineTo(leftHandleLeft + r, laneTop)
-                        audioLeftHandlePath.quadraticTo(leftHandleLeft, laneTop, leftHandleLeft, laneTop + r)
-                        audioLeftHandlePath.lineTo(leftHandleLeft, laneBottom - r)
-                        audioLeftHandlePath.quadraticTo(leftHandleLeft, laneBottom, leftHandleLeft + r, laneBottom)
-                        audioLeftHandlePath.lineTo(leftHandleRight, laneBottom)
-                        audioLeftHandlePath.close()
-                        drawPath(path = audioLeftHandlePath, color = Color.White)
+                // PASS 2: Draw the selected audio item's border, duration badge, and trim handles LAST on top of all bars
+                if (selAudioItem != null) {
+                    val sX = selAudioSX
+                    val eX = selAudioEX
+                    buildClipCornerPath(
+                        path = audioCardPath,
+                        left = sX,
+                        top = laneTop,
+                        right = eX,
+                        bottom = laneBottom,
+                        roundLeft = true,
+                        roundRight = true,
+                        radius = 4f * density
+                    )
 
-                        val rightHandleLeft = eX
-                        val rightHandleRight = eX + handleWidthPx
-                        audioRightHandlePath.reset()
-                        audioRightHandlePath.moveTo(rightHandleLeft, laneTop)
-                        audioRightHandlePath.lineTo(rightHandleRight - r, laneTop)
-                        audioRightHandlePath.quadraticTo(rightHandleRight, laneTop, rightHandleRight, laneTop + r)
-                        audioRightHandlePath.lineTo(rightHandleRight, laneBottom - r)
-                        audioRightHandlePath.quadraticTo(rightHandleRight, laneBottom, rightHandleRight - r, laneBottom)
-                        audioRightHandlePath.lineTo(rightHandleLeft, laneBottom)
-                        audioRightHandlePath.close()
-                        drawPath(path = audioRightHandlePath, color = Color.White)
+                    // Crisp 2.dp White Selection Outline
+                    drawPath(path = audioCardPath, color = Color.White, style = audioWhiteSelectionStroke)
 
-                        val centerY = (laneTop + laneBottom) / 2f
-                        val leftCenterX = sX - (handleWidthPx / 2f)
-                        leftChevronPath.reset()
-                        leftChevronPath.moveTo(leftCenterX + chevronHalfWPx, centerY - chevronHalfHPx)
-                        leftChevronPath.lineTo(leftCenterX - chevronHalfWPx, centerY)
-                        leftChevronPath.lineTo(leftCenterX + chevronHalfWPx, centerY + chevronHalfHPx)
-                        drawPath(path = leftChevronPath, color = Color(0xFF0F172A), style = chevronStroke)
+                    // External < and > trim handles
+                    val r = minOf(handleCornerRadiusPx, handleWidthPx / 2f, lowerRowHeightPx / 2f)
+                    val leftHandleLeft = sX - handleWidthPx
+                    val leftHandleRight = sX
+                    audioLeftHandlePath.reset()
+                    audioLeftHandlePath.moveTo(leftHandleRight, laneTop)
+                    audioLeftHandlePath.lineTo(leftHandleLeft + r, laneTop)
+                    audioLeftHandlePath.quadraticTo(leftHandleLeft, laneTop, leftHandleLeft, laneTop + r)
+                    audioLeftHandlePath.lineTo(leftHandleLeft, laneBottom - r)
+                    audioLeftHandlePath.quadraticTo(leftHandleLeft, laneBottom, leftHandleLeft + r, laneBottom)
+                    audioLeftHandlePath.lineTo(leftHandleRight, laneBottom)
+                    audioLeftHandlePath.close()
+                    drawPath(path = audioLeftHandlePath, color = Color.White)
 
-                        val rightCenterX = eX + (handleWidthPx / 2f)
-                        rightChevronPath.reset()
-                        rightChevronPath.moveTo(rightCenterX - chevronHalfWPx, centerY - chevronHalfHPx)
-                        rightChevronPath.lineTo(rightCenterX + chevronHalfWPx, centerY)
-                        rightChevronPath.lineTo(rightCenterX - chevronHalfWPx, centerY + chevronHalfHPx)
-                        drawPath(path = rightChevronPath, color = Color(0xFF0F172A), style = chevronStroke)
+                    val rightHandleLeft = eX
+                    val rightHandleRight = eX + handleWidthPx
+                    audioRightHandlePath.reset()
+                    audioRightHandlePath.moveTo(rightHandleLeft, laneTop)
+                    audioRightHandlePath.lineTo(rightHandleRight - r, laneTop)
+                    audioRightHandlePath.quadraticTo(rightHandleRight, laneTop, rightHandleRight, laneTop + r)
+                    audioRightHandlePath.lineTo(rightHandleRight, laneBottom - r)
+                    audioRightHandlePath.quadraticTo(rightHandleRight, laneBottom, rightHandleRight - r, laneBottom)
+                    audioRightHandlePath.lineTo(rightHandleLeft, laneBottom)
+                    audioRightHandlePath.close()
+                    drawPath(path = audioRightHandlePath, color = Color.White)
 
-                        // Duration badge ("0:04.0") on right side of selected audio bar
-                        val durBadgeStr = durationBadgeCache.get(item.durationUs)
-                        val badgeW = 42f * density
-                        val badgeH = 15f * density
-                        val badgeLeft = eX - badgeW - (6f * density)
-                        val badgeTop = laneTop + (lowerRowHeightPx - badgeH) / 2f
-                        if (badgeLeft > sX + (60f * density)) {
-                            drawRoundRect(
-                                color = Color(0xCC000000),
-                                topLeft = Offset(badgeLeft, badgeTop),
-                                size = Size(badgeW, badgeH),
-                                cornerRadius = CornerRadius(3f * density, 3f * density)
-                            )
-                            drawTextSafe(
-                                textMeasurer = textMeasurer,
-                                text = durBadgeStr,
-                                x = badgeLeft + (4f * density),
-                                y = badgeTop + (1.5f * density),
-                                style = durationBadgeStyle
-                            )
-                        }
-                    } else {
-                        drawPath(path = audioCardPath, color = Color(0x26000000), style = unselectedStroke)
+                    val centerY = (laneTop + laneBottom) / 2f
+                    val leftCenterX = sX - (handleWidthPx / 2f)
+                    leftChevronPath.reset()
+                    leftChevronPath.moveTo(leftCenterX + chevronHalfWPx, centerY - chevronHalfHPx)
+                    leftChevronPath.lineTo(leftCenterX - chevronHalfWPx, centerY)
+                    leftChevronPath.lineTo(leftCenterX + chevronHalfWPx, centerY + chevronHalfHPx)
+                    drawPath(path = leftChevronPath, color = Color(0xFF0F172A), style = chevronStroke)
+
+                    val rightCenterX = eX + (handleWidthPx / 2f)
+                    rightChevronPath.reset()
+                    rightChevronPath.moveTo(rightCenterX - chevronHalfWPx, centerY - chevronHalfHPx)
+                    rightChevronPath.lineTo(rightCenterX + chevronHalfWPx, centerY)
+                    rightChevronPath.lineTo(rightCenterX - chevronHalfWPx, centerY + chevronHalfHPx)
+                    drawPath(path = rightChevronPath, color = Color(0xFF0F172A), style = chevronStroke)
+
+                    // Duration badge ("0:04.0") on right side of selected audio bar
+                    val durBadgeStr = durationBadgeCache.get(selAudioItem.durationUs)
+                    val badgeW = 42f * density
+                    val badgeH = 15f * density
+                    val badgeLeft = eX - badgeW - (6f * density)
+                    val badgeTop = laneTop + (lowerRowHeightPx - badgeH) / 2f
+                    if (badgeLeft > sX + (60f * density)) {
+                        drawRoundRect(
+                            color = Color(0xCC000000),
+                            topLeft = Offset(badgeLeft, badgeTop),
+                            size = Size(badgeW, badgeH),
+                            cornerRadius = CornerRadius(3f * density, 3f * density)
+                        )
+                        drawTextSafe(
+                            textMeasurer = textMeasurer,
+                            text = durBadgeStr,
+                            x = badgeLeft + (4f * density),
+                            y = badgeTop + (1.5f * density),
+                            style = durationBadgeStyle
+                        )
                     }
                 }
             }
@@ -2196,28 +2261,27 @@ fun TimelineCanvas(
                     drawPath(path = soundBarPath, color = colorSoundBarBg)
                     drawPath(path = soundBarPath, color = Color(0x26FFFFFF), style = unselectedStroke)
 
-                    // Keep "♪ Sound collection" label pinned inside visible portion of [soundBarLeft, soundBarRight]
-                    val visibleTextX = maxOf(soundBarLeft + (10f * density), 16f * density)
-                    if (visibleTextX < soundBarRight - (40f * density)) {
-                        drawTextSafe(
-                            textMeasurer = textMeasurer,
-                            text = "♪ Sound collection",
-                            x = visibleTextX,
-                            y = soundBarTop + (4.5f * density),
-                            style = soundLabelStyle
-                        )
-                    }
-
-                    // Draw subtle vertical grey waveform ticks across audio item spans (Rule R10 compliant)
-                    if (hasAudioItems) {
+                    // When NO audio items exist: show "♪ Sound collection" placeholder label
+                    if (!hasAudioItems) {
+                        val visibleTextX = maxOf(soundBarLeft + (10f * density), 16f * density)
+                        if (visibleTextX < soundBarRight - (40f * density)) {
+                            drawTextSafe(
+                                textMeasurer = textMeasurer,
+                                text = "♪ Sound collection",
+                                x = visibleTextX,
+                                y = soundBarTop + (4.5f * density),
+                                style = soundLabelStyle
+                            )
+                        }
+                    } else {
+                        // When audio exists: HIDE the text label completely and show ONLY beat waveform bars
                         val soundCenterY = soundBarTop + (soundBarBottom - soundBarTop) / 2f
-                        val labelEndX = visibleTextX + (110f * density)
                         for (itemIdx in overlayItems.indices) {
                             val aItem = overlayItems[itemIdx]
                             if (aItem.type != LayerType.AUDIO) continue
                             val aSX = zoomState.timeUsToX(aItem.startUs, offsetPx, halfWidthInt, pxPerUs)
                             val aEX = zoomState.timeUsToX(aItem.endUs, offsetPx, halfWidthInt, pxPerUs)
-                            val clampedSX = maxOf(aSX, maxOf(soundBarLeft, labelEndX))
+                            val clampedSX = maxOf(aSX, soundBarLeft)
                             val clampedEX = minOf(aEX, soundBarRight)
                             if (clampedEX > clampedSX + 4f * density) {
                                 var tickX = clampedSX + (2f * density)

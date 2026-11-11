@@ -62,7 +62,8 @@ data class OverlayItem(
     val fadeInUs: Long = 0L,
     val fadeOutUs: Long = 0L,
     val speed: Float = 1.0f,
-    val sourceInUs: Long = 0L
+    val sourceInUs: Long = 0L,
+    val naturalDurationUs: Long = 0L
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L
@@ -349,9 +350,24 @@ fun clampItemTrimBoundsOnRow(
     val group = target.trackGroup()
     val maxProjectTimeUs = totalProjectDurationUs.coerceAtLeast(OverlayItem.MIN_DURATION_US)
 
+    // Calculate natural media limits if naturalDurationUs is populated
+    val minAllowedStartFromSource = if (target.naturalDurationUs > 0L) {
+        val speedVal = if (target.speed > 0f) target.speed.toDouble() else 1.0
+        target.startUs - (target.sourceInUs.toDouble() / speedVal).toLong()
+    } else 0L
+
+    val maxAllowedEndFromNatural = if (target.naturalDurationUs > 0L) {
+        val speedVal = if (target.speed > 0f) target.speed.toDouble() else 1.0
+        val remainingMediaUs = (target.naturalDurationUs - target.sourceInUs).coerceAtLeast(0L)
+        val maxTimelineSpanUs = (remainingMediaUs.toDouble() / speedVal).toLong()
+        target.startUs + maxTimelineSpanUs
+    } else Long.MAX_VALUE
+
     if (group == null) {
-        val clampedStart = candidateStartUs.coerceIn(0L, (candidateEndUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(0L))
-        val clampedEnd = candidateEndUs.coerceIn(clampedStart + OverlayItem.MIN_DURATION_US, maxProjectTimeUs.coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US))
+        val baseMinStart = maxOf(0L, minAllowedStartFromSource)
+        val baseMaxEnd = minOf(maxProjectTimeUs, maxAllowedEndFromNatural)
+        val clampedStart = candidateStartUs.coerceIn(baseMinStart, (candidateEndUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(baseMinStart))
+        val clampedEnd = candidateEndUs.coerceIn(clampedStart + OverlayItem.MIN_DURATION_US, baseMaxEnd.coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US))
         return Pair(clampedStart, clampedEnd)
     }
 
@@ -367,8 +383,8 @@ fun clampItemTrimBoundsOnRow(
         .filter { it.startUs >= target.endUs }
         .minOfOrNull { it.startUs } ?: maxProjectTimeUs
 
-    val minAllowedStartUs = prevNeighborEndUs
-    val maxAllowedEndUs = minOf(nextNeighborStartUs, maxProjectTimeUs)
+    val minAllowedStartUs = maxOf(prevNeighborEndUs, minAllowedStartFromSource)
+    val maxAllowedEndUs = minOf(nextNeighborStartUs, maxProjectTimeUs, maxAllowedEndFromNatural)
 
     val safeCandidateEndUs = candidateEndUs.coerceAtMost(maxAllowedEndUs)
     val clampedStartUs = candidateStartUs.coerceIn(

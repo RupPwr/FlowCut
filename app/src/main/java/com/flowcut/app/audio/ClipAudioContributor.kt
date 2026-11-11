@@ -546,6 +546,22 @@ class ClipAudioContributor(
                     decoder.readResampled(sourceStartFrame, framesToRender, item.speed, scratch, 0, 1.0f)
                 }
 
+                // Check touching adjacent split segments to prevent micro-ramping across continuous splits
+                var hasPrecedingTouching = false
+                var hasFollowingTouching = false
+                for (j in 0 until overlayCount) {
+                    if (j == k) continue
+                    val other = overlays[j]
+                    if (other.type == LayerType.AUDIO && other.laneIndex == item.laneIndex && other.mediaPath == path) {
+                        if (other.endUs == item.startUs) hasPrecedingTouching = true
+                        if (other.startUs == item.endUs) hasFollowingTouching = true
+                    }
+                }
+
+                val needsStartMicroRamp = (item.startUs >= startTimelineUs && !hasPrecedingTouching && item.fadeInUs == 0L)
+                val needsEndMicroRamp = (item.endUs <= endTimelineUs && !hasFollowingTouching && item.fadeOutUs == 0L)
+                val rampFrames = 32
+
                 val baseGain = computeEffectiveGain(item.volume)
 
                 for (f in 0 until framesToRender) {
@@ -565,7 +581,16 @@ class ClipAudioContributor(
                         1.0f
                     }
 
-                    val effectiveGain = baseGain * fadeInGain * fadeOutGain
+                    val microInGain = if (needsStartMicroRamp && f < rampFrames) {
+                        f.toFloat() / rampFrames.toFloat()
+                    } else 1.0f
+
+                    val remainingFrames = framesToRender - 1 - f
+                    val microOutGain = if (needsEndMicroRamp && remainingFrames < rampFrames) {
+                        remainingFrames.toFloat() / rampFrames.toFloat()
+                    } else 1.0f
+
+                    val effectiveGain = baseGain * fadeInGain * fadeOutGain * microInGain * microOutGain
                     val dstIdx = (frameOffset + f) shl 1
                     val srcIdx = f shl 1
                     out[dstIdx] += scratch[srcIdx] * effectiveGain
@@ -594,6 +619,9 @@ class ClipAudioContributor(
         lastAIndex = -1
         lastBIndex = -1
         lastPrewarmedKey = null
+        for (d in sharedOverlayDecoders.values) {
+            d.lastReadEndSourceFrame = -1L
+        }
     }
 
     private fun pruneDecoders(activePaths: Set<String>) {

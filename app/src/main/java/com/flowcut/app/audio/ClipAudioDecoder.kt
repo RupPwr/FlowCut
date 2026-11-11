@@ -57,6 +57,9 @@ class ClipAudioDecoder(val filePath: String) {
     private var wavPcmData: FloatArray? = null
     private var wavTotalFrames: Int = 0
 
+    // Sample-continuous tracking to eliminate click/pop artifacts across split audio segments
+    @Volatile var lastReadEndSourceFrame: Long = -1L
+
     // Bounded pre-allocated circular ring buffer
     private val pcmBuffer = FloatArray(BUFFER_SAMPLES)
     @Volatile private var bufferStartFrame: Long = 0L
@@ -277,6 +280,7 @@ class ClipAudioDecoder(val filePath: String) {
         val dec = codec ?: return
 
         try {
+            lastReadEndSourceFrame = -1L
             val clampedTargetFrame = maxOf(0L, targetFrame)
             val seekTargetUs = framesToUs(clampedTargetFrame)
 
@@ -316,9 +320,16 @@ class ClipAudioDecoder(val filePath: String) {
     fun read(sourceFrame: Long, count: Int, out: FloatArray, outOffset: Int, gain: Float) {
         if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
 
+        // Snap to lastReadEndSourceFrame if within ±96 frames (±2ms) to eliminate split boundary clicks
+        val actualSourceFrame = if (lastReadEndSourceFrame >= 0L && kotlin.math.abs(sourceFrame - lastReadEndSourceFrame) <= 96L) {
+            lastReadEndSourceFrame
+        } else {
+            sourceFrame
+        }
+
         val pcm = wavPcmData
         if (pcm != null) {
-            var curFrame = sourceFrame
+            var curFrame = actualSourceFrame
             var dstIdx = outOffset
             val totalFrames = wavTotalFrames
             for (i in 0 until count) {
@@ -330,24 +341,25 @@ class ClipAudioDecoder(val filePath: String) {
                 curFrame++
                 dstIdx += TARGET_CHANNELS
             }
+            lastReadEndSourceFrame = actualSourceFrame + count
             return
         }
 
         // Check if requested range is outside buffer
         val start = bufferStartFrame
         val countBuffered = bufferedFrames
-        if (sourceFrame < start || sourceFrame > start + countBuffered + 24_000L) {
-            seekToFrame(sourceFrame)
-        } else if (sourceFrame + count > start + countBuffered) {
+        if (actualSourceFrame < start || actualSourceFrame > start + countBuffered + 24_000L) {
+            seekToFrame(actualSourceFrame)
+        } else if (actualSourceFrame + count > start + countBuffered) {
             decodeChunk()
         } else {
-            val remaining = (start + countBuffered) - (sourceFrame + count)
+            val remaining = (start + countBuffered) - (actualSourceFrame + count)
             if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
                 decodeChunk()
             }
         }
 
-        var curFrame = sourceFrame
+        var curFrame = actualSourceFrame
         var dstIdx = outOffset
         val curStart = bufferStartFrame
         val curBuffered = bufferedFrames
@@ -361,6 +373,7 @@ class ClipAudioDecoder(val filePath: String) {
             curFrame++
             dstIdx += TARGET_CHANNELS
         }
+        lastReadEndSourceFrame = actualSourceFrame + count
     }
 
     /**
@@ -379,12 +392,19 @@ class ClipAudioDecoder(val filePath: String) {
             return
         }
 
+        // Snap to lastReadEndSourceFrame if within ±96 frames (±2ms) to eliminate split boundary clicks
+        val actualStartFrame = if (lastReadEndSourceFrame >= 0L && kotlin.math.abs(sourceStartFrame - lastReadEndSourceFrame) <= 96L) {
+            lastReadEndSourceFrame
+        } else {
+            sourceStartFrame
+        }
+
         val pcm = wavPcmData
         if (pcm != null) {
             val totalFrames = wavTotalFrames
             var dstIdx = outOffset
             for (i in 0 until count) {
-                val exactSrcPos = sourceStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+                val exactSrcPos = actualStartFrame.toDouble() + i.toDouble() * speed.toDouble()
                 val f0 = exactSrcPos.toLong()
                 val f1 = f0 + 1L
                 val frac = (exactSrcPos - f0.toDouble()).toFloat()
@@ -412,16 +432,18 @@ class ClipAudioDecoder(val filePath: String) {
                 }
                 dstIdx += TARGET_CHANNELS
             }
+            val consumedSrcFrames = (count.toDouble() * speed.toDouble()).toLong()
+            lastReadEndSourceFrame = actualStartFrame + consumedSrcFrames
             return
         }
 
         val totalNeededSrcFrames = (count * speed).toInt() + 2
-        val targetEnd = sourceStartFrame + totalNeededSrcFrames
+        val targetEnd = actualStartFrame + totalNeededSrcFrames
         val start = bufferStartFrame
         val countBuffered = bufferedFrames
 
-        if (sourceStartFrame < start || sourceStartFrame > start + countBuffered + 24_000L) {
-            seekToFrame(sourceStartFrame)
+        if (actualStartFrame < start || actualStartFrame > start + countBuffered + 24_000L) {
+            seekToFrame(actualStartFrame)
         } else if (targetEnd > start + countBuffered) {
             // Strictly at most 1 non-blocking chunk decode per 10ms block so AudioEngine thread never stalls!
             decodeChunk()
@@ -438,7 +460,7 @@ class ClipAudioDecoder(val filePath: String) {
 
         var dstIdx = outOffset
         for (i in 0 until count) {
-            val exactSrcPos = sourceStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+            val exactSrcPos = actualStartFrame.toDouble() + i.toDouble() * speed.toDouble()
             val f0 = exactSrcPos.toLong()
             val f1 = f0 + 1L
             val frac = (exactSrcPos - f0.toDouble()).toFloat()
@@ -466,6 +488,8 @@ class ClipAudioDecoder(val filePath: String) {
             }
             dstIdx += TARGET_CHANNELS
         }
+        val consumedSrcFrames = (count.toDouble() * speed.toDouble()).toLong()
+        lastReadEndSourceFrame = actualStartFrame + consumedSrcFrames
     }
 
     /**
@@ -482,10 +506,15 @@ class ClipAudioDecoder(val filePath: String) {
             return
         }
         synchronized(codecLock) {
+            val actualStartFrame = if (lastReadEndSourceFrame >= 0L && kotlin.math.abs(sourceStartFrame - lastReadEndSourceFrame) <= 96L) {
+                lastReadEndSourceFrame
+            } else {
+                sourceStartFrame
+            }
             val totalNeededSrcFrames = (count * speed).toInt() + 2
-            val targetEnd = sourceStartFrame + totalNeededSrcFrames
-            if (sourceStartFrame < bufferStartFrame || sourceStartFrame >= bufferStartFrame + bufferedFrames) {
-                internalSeekToFrame(sourceStartFrame)
+            val targetEnd = actualStartFrame + totalNeededSrcFrames
+            if (actualStartFrame < bufferStartFrame || actualStartFrame >= bufferStartFrame + bufferedFrames) {
+                internalSeekToFrame(actualStartFrame)
             }
 
             var retries = 0
@@ -504,7 +533,7 @@ class ClipAudioDecoder(val filePath: String) {
 
             var dstIdx = outOffset
             for (i in 0 until count) {
-                val exactSrcPos = sourceStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+                val exactSrcPos = actualStartFrame.toDouble() + i.toDouble() * speed.toDouble()
                 val f0 = exactSrcPos.toLong()
                 val f1 = f0 + 1L
                 val frac = (exactSrcPos - f0.toDouble()).toFloat()
@@ -532,6 +561,8 @@ class ClipAudioDecoder(val filePath: String) {
                 }
                 dstIdx += TARGET_CHANNELS
             }
+            val consumedSrcFrames = (count.toDouble() * speed.toDouble()).toLong()
+            lastReadEndSourceFrame = actualStartFrame + consumedSrcFrames
         }
     }
 
@@ -546,9 +577,14 @@ class ClipAudioDecoder(val filePath: String) {
             return
         }
         synchronized(codecLock) {
-            val targetEnd = sourceFrame + count
-            if (sourceFrame < bufferStartFrame || sourceFrame >= bufferStartFrame + bufferedFrames) {
-                internalSeekToFrame(sourceFrame)
+            val actualSourceFrame = if (lastReadEndSourceFrame >= 0L && kotlin.math.abs(sourceFrame - lastReadEndSourceFrame) <= 96L) {
+                lastReadEndSourceFrame
+            } else {
+                sourceFrame
+            }
+            val targetEnd = actualSourceFrame + count
+            if (actualSourceFrame < bufferStartFrame || actualSourceFrame >= bufferStartFrame + bufferedFrames) {
+                internalSeekToFrame(actualSourceFrame)
             }
 
             var retries = 0
@@ -561,7 +597,7 @@ class ClipAudioDecoder(val filePath: String) {
                 }
             }
 
-            var curFrame = sourceFrame
+            var curFrame = actualSourceFrame
             var dstIdx = outOffset
             val curStart = bufferStartFrame
             val curBuffered = bufferedFrames
@@ -575,6 +611,7 @@ class ClipAudioDecoder(val filePath: String) {
                 curFrame++
                 dstIdx += TARGET_CHANNELS
             }
+            lastReadEndSourceFrame = actualSourceFrame + count
         }
     }
 
@@ -760,5 +797,6 @@ class ClipAudioDecoder(val filePath: String) {
         bufferedFrames = 0
         wavPcmData = null
         wavTotalFrames = 0
+        lastReadEndSourceFrame = -1L
     }
 }

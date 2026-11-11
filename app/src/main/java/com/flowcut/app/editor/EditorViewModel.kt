@@ -510,7 +510,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         durationUs: Long = 3_000_000L,
         audioSubType: Int = 0,
         sourceInUs: Long = 0L,
-        volume: Float = 1.0f
+        volume: Float = 1.0f,
+        naturalDurationUs: Long = durationUs
     ): OverlayItem? {
         val endUs = startUs + durationUs
         val item = OverlayItem(
@@ -524,7 +525,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             mediaPath = mediaPath,
             audioSubType = audioSubType,
             volume = volume,
-            sourceInUs = sourceInUs
+            sourceInUs = sourceInUs,
+            naturalDurationUs = if (naturalDurationUs > 0L) naturalDurationUs else durationUs
         )
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
@@ -645,12 +647,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val endUs = startUs + durationUs
         var intrinsicWidth = 0
         var intrinsicHeight = 0
+        var naturalDurUs = 0L
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(mediaPath)
             val widthStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
             val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
             val rotationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+            val durMsStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            naturalDurUs = (durMsStr?.toLongOrNull() ?: 0L) * 1000L
             var w = widthStr?.toIntOrNull() ?: 0
             var h = heightStr?.toIntOrNull() ?: 0
             val rotation = rotationStr?.toIntOrNull() ?: 0
@@ -675,7 +680,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             endUs = endUs,
             mediaPath = mediaPath,
             intrinsicWidth = intrinsicWidth,
-            intrinsicHeight = intrinsicHeight
+            intrinsicHeight = intrinsicHeight,
+            naturalDurationUs = if (naturalDurUs > 0L) naturalDurUs else durationUs
         )
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
@@ -1049,16 +1055,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         pushUndoState()
 
-        val leftItem = item.copy(endUs = playheadUs)
+        val leftItem = item.copy(endUs = playheadUs, naturalDurationUs = item.naturalDurationUs)
         val rightId = UUID.randomUUID().toString()
         val topZ = getTopZIndex()
-        val splitOffsetUs = playheadUs - item.startUs
-        val rightSourceInUs = if (item.type == LayerType.AUDIO) item.sourceInUs + splitOffsetUs else item.sourceInUs
+        val leftDurationUs = playheadUs - item.startUs
+        val rightSourceInUs = if (item.type == LayerType.AUDIO || item.type == LayerType.VIDEO) {
+            item.sourceInUs + (leftDurationUs.toDouble() * item.speed.toDouble()).toLong()
+        } else {
+            item.sourceInUs
+        }
         val rightItem = item.copy(
             id = rightId,
             startUs = playheadUs,
             endUs = item.endUs,
             sourceInUs = rightSourceInUs,
+            naturalDurationUs = item.naturalDurationUs,
             zIndex = topZ
         )
 
@@ -1182,7 +1193,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
         if (clampedEndUs - clampedStartUs < OverlayItem.MIN_DURATION_US) return
         val deltaStartUs = clampedStartUs - item.startUs
-        val newSourceInUs = if (item.type == LayerType.AUDIO) (item.sourceInUs + deltaStartUs).coerceAtLeast(0L) else item.sourceInUs
+        val newSourceInUs = if (item.type == LayerType.AUDIO || item.type == LayerType.VIDEO) {
+            (item.sourceInUs + (deltaStartUs.toDouble() * item.speed.toDouble()).toLong()).coerceAtLeast(0L)
+        } else item.sourceInUs
         _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs, sourceInUs = newSourceInUs)
         syncLayerPlan()
     }
@@ -1204,7 +1217,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pushUndoState()
         val topZ = getTopZIndex()
         val deltaStartUs = clampedStartUs - item.startUs
-        val newSourceInUs = if (item.type == LayerType.AUDIO) (item.sourceInUs + deltaStartUs).coerceAtLeast(0L) else item.sourceInUs
+        val newSourceInUs = if (item.type == LayerType.AUDIO || item.type == LayerType.VIDEO) {
+            (item.sourceInUs + (deltaStartUs.toDouble() * item.speed.toDouble()).toLong()).coerceAtLeast(0L)
+        } else item.sourceInUs
         _layerItems[idx] = item.copy(startUs = clampedStartUs, endUs = clampedEndUs, sourceInUs = newSourceInUs, zIndex = topZ)
         syncLayerPlan()
         _uiState.update {
