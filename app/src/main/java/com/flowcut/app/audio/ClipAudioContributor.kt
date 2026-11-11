@@ -7,6 +7,9 @@ import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToAudioFrames
 import com.flowcut.app.core.timeline.ActiveSet
 import com.flowcut.app.core.timeline.SnapshotHolder
+import com.flowcut.app.engine.LayerType
+import com.flowcut.app.engine.OverlayItem
+import com.flowcut.app.engine.PreviewRenderer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
@@ -21,6 +24,7 @@ import java.util.concurrent.Executors
  * - Rule R10: Zero heap allocations on the hot audio path.
  * - Rule R11: Timeline-to-source mapping via clip.map().sourceUs().
  * - Fix 1: Lookahead background audio pre-warming of next clip + exact sub-block cut splitting.
+ * - Multi-track 4-row LayerType.AUDIO mixing with exact sourceInUs, volume, speed, fadeInUs/fadeOutUs.
  * - Failure isolation: Never throws or crashes the audio thread.
  */
 class ClipAudioContributor(
@@ -40,6 +44,10 @@ class ClipAudioContributor(
         Thread(runnable, "FlowCut-AudioPrewarm")
     }
 
+    // Pre-allocated scratch buffers for zero-allocation overlay mixing (Rule R10)
+    private val overlayScratch = FloatArray(MAX_SCRATCH_SAMPLES)
+    private val syncScratch = FloatArray(MAX_SCRATCH_SAMPLES)
+
     // De-click state tracking (~3 ms = 144 frames at 48 kHz)
     private var isFirstBlockAfterStop: Boolean = true
     private var lastAIndex: Int = -1
@@ -49,10 +57,49 @@ class ClipAudioContributor(
     companion object {
         const val DECLICK_RAMP_FRAMES = 144 // 3 ms at 48,000 Hz
         const val LOOKAHEAD_PREWARM_US = 1_000_000L // 1 second lookahead
+        const val MAX_SCRATCH_SAMPLES = 19200 // 9600 frames * 2 channels (200 ms at 48 kHz)
 
         // Shared lock-free state for audio volume & track mute
         @Volatile var isMainTrackMuted: Boolean = false
         val clipVolumes = ConcurrentHashMap<String, Float>()
+
+        // Active overlay audio items across 4 audio rows (updated by EditorViewModel / PreviewRenderer)
+        @Volatile var activeAudioOverlays: List<OverlayItem> = emptyList()
+
+        // Shared thread-safe decoder cache for audio overlay items
+        val sharedOverlayDecoders = ConcurrentHashMap<String, ClipAudioDecoder>()
+
+        private val staticPrewarmExecutor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "FlowCut-StaticAudioPrewarm")
+        }
+
+        fun syncAudioOverlays(items: List<OverlayItem>) {
+            activeAudioOverlays = items
+        }
+
+        fun getSharedOverlayDecoder(path: String): ClipAudioDecoder {
+            return sharedOverlayDecoders.computeIfAbsent(path) {
+                val dec = ClipAudioDecoder(path)
+                dec.prepare()
+                dec
+            }
+        }
+
+        fun prewarmAudioPath(path: String) {
+            if (path.isEmpty()) return
+            try {
+                staticPrewarmExecutor.execute {
+                    try {
+                        val dec = sharedOverlayDecoders.computeIfAbsent(path) {
+                            ClipAudioDecoder(path)
+                        }
+                        if (!dec.isPrepared) {
+                            dec.prepare()
+                        }
+                    } catch (_: Throwable) {}
+                }
+            } catch (_: Throwable) {}
+        }
 
         fun getClipVolume(clipId: String): Float = clipVolumes[clipId] ?: 1.0f
 
@@ -98,186 +145,193 @@ class ClipAudioContributor(
 
     override fun render(startFrame: Long, frames: Int, out: FloatArray) {
         if (frames <= 0) return
-        if (isMainTrackMuted) return
 
         try {
             val startTimelineUs = ClipAudioDecoder.framesToUs(startFrame)
             val snapshot = snapshotHolder.current
             val clips = snapshot.project.clips
-            if (clips.isEmpty()) return
 
-            // Resolve active clips for this timeline time block
-            snapshot.resolve(startTimelineUs, activeSet)
-            val aIndex = activeSet.aIndex
-            val bIndex = activeSet.bIndex
-
-            if (aIndex < 0 || aIndex >= clips.size) {
+            if (isMainTrackMuted || clips.isEmpty()) {
+                out.fill(0f, 0, frames * 2)
                 lastAIndex = -1
                 lastBIndex = -1
-                return
-            }
+            } else {
+                // Resolve active clips for this timeline time block
+                snapshot.resolve(startTimelineUs, activeSet)
+                val aIndex = activeSet.aIndex
+                val bIndex = activeSet.bIndex
 
-            val nextIndex = aIndex + 1
-            val clipA = clips[aIndex]
+                if (aIndex < 0 || aIndex >= clips.size) {
+                    out.fill(0f, 0, frames * 2)
+                    lastAIndex = -1
+                    lastBIndex = -1
+                } else {
+                    val nextIndex = aIndex + 1
+                    val clipA = clips[aIndex]
 
-            // Lookahead Pre-Warming: Trigger background decoding of upcoming different-path clip within 1s
-            var m = aIndex + 1
-            while (m < clips.size && clips[m].path == clipA.path) {
-                m++
-            }
-            if (m in clips.indices) {
-                val nextClip = clips[m]
-                val nextStartUs = msToUs(snapshot.main.startMs[m])
-                val remainingUs = nextStartUs - startTimelineUs
-                if (remainingUs in 0L..LOOKAHEAD_PREWARM_US) {
-                    val targetInUs = nextClip.map().inUs
-                    val prewarmKey = "${nextClip.path}:$targetInUs"
-                    if (lastPrewarmedKey != prewarmKey) {
-                        lastPrewarmedKey = prewarmKey
-                        prewarmClip(nextClip, targetInUs)
+                    // Lookahead Pre-Warming: Trigger background decoding of upcoming different-path clip within 1s
+                    var m = aIndex + 1
+                    while (m < clips.size && clips[m].path == clipA.path) {
+                        m++
                     }
-                }
-            }
+                    if (m in clips.indices) {
+                        val nextClip = clips[m]
+                        val nextStartUs = msToUs(snapshot.main.startMs[m])
+                        val remainingUs = nextStartUs - startTimelineUs
+                        if (remainingUs in 0L..LOOKAHEAD_PREWARM_US) {
+                            val targetInUs = nextClip.map().inUs
+                            val prewarmKey = "${nextClip.path}:$targetInUs"
+                            if (lastPrewarmedKey != prewarmKey) {
+                                lastPrewarmedKey = prewarmKey
+                                prewarmClip(nextClip, targetInUs)
+                            }
+                        }
+                    }
 
-            // Prune excess decoders to prevent hardware codec exhaustion (keep active + upcoming <= 3)
-            val activePaths = HashSet<String>(4)
-            activePaths.add(clipA.path)
-            if (bIndex in clips.indices) activePaths.add(clips[bIndex].path)
-            if (m in clips.indices) activePaths.add(clips[m].path)
-            pruneDecoders(activePaths)
+                    // Prune excess decoders to prevent hardware codec exhaustion
+                    val activePaths = HashSet<String>(4)
+                    activePaths.add(clipA.path)
+                    if (bIndex in clips.indices) activePaths.add(clips[bIndex].path)
+                    if (m in clips.indices) activePaths.add(clips[m].path)
+                    pruneDecoders(activePaths)
 
-            // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
-            if (bIndex == -1 && nextIndex in clips.indices) {
-                val nextClip = clips[nextIndex]
-                val isSamePathContiguous = nextClip.path == clipA.path &&
-                        kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 5_000L
+                    var handledCutSplit = false
+                    // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
+                    if (bIndex == -1 && nextIndex in clips.indices) {
+                        val nextClip = clips[nextIndex]
+                        val isSamePathContiguous = nextClip.path == clipA.path &&
+                                kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 5_000L
 
-                if (!isSamePathContiguous) {
-                    val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
-                    val blockDurationUs = (frames * 1000L) / 48L
-                    val blockEndTimelineUs = startTimelineUs + blockDurationUs
+                        if (!isSamePathContiguous) {
+                            val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
+                            val blockDurationUs = (frames * 1000L) / 48L
+                            val blockEndTimelineUs = startTimelineUs + blockDurationUs
 
-                    if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
-                        val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
-                        val framesAfterCut = frames - framesBeforeCut
+                            if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
+                                val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
+                                val framesAfterCut = frames - framesBeforeCut
 
-                        // 1. Render first N frames from Clip k
-                        if (framesBeforeCut > 0) {
+                                out.fill(0f, 0, frames * 2)
+
+                                // 1. Render first N frames from Clip k
+                                if (framesBeforeCut > 0) {
+                                    val mapA = clipA.map()
+                                    if (mapA.speedNum > 0) {
+                                        val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                                        if (speedA <= 4.0f) {
+                                            val decoderA = decoders[clipA.path]
+                                            if (decoderA != null) {
+                                                val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                                                val srcFrameA = usToAudioFrames(srcUsA)
+                                                val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                                                decoderA.readResampled(srcFrameA, framesBeforeCut, speedA, out, 0, volA)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 2. Render remaining (frames - N) frames from Clip k + 1
+                                if (framesAfterCut > 0) {
+                                    val mapNext = nextClip.map()
+                                    if (mapNext.speedNum > 0) {
+                                        val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
+                                        if (speedNext <= 4.0f) {
+                                            val decoderNext = decoders[nextClip.path]
+                                            if (decoderNext != null) {
+                                                val srcUsNext = mapNext.sourceUs(0L)
+                                                val srcFrameNext = usToAudioFrames(srcUsNext)
+                                                val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
+                                                decoderNext.readResampled(srcFrameNext, framesAfterCut, speedNext, out, framesBeforeCut * 2, volNext)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                lastAIndex = nextIndex
+                                lastBIndex = -1
+                                isFirstBlockAfterStop = false
+                                handledCutSplit = true
+                            }
+                        }
+                    }
+
+                    if (!handledCutSplit) {
+                        out.fill(0f, 0, frames * 2)
+                        val isSamePathContiguous = lastAIndex in clips.indices && aIndex in clips.indices &&
+                                clips[lastAIndex].path == clipA.path &&
+                                kotlin.math.abs(clipA.map().inUs - clips[lastAIndex].map().outUs) <= 5_000L
+
+                        val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1 && !isSamePathContiguous)
+                        val needsDeclick = isFirstBlockAfterStop || isCutTransition
+
+                        if (bIndex == -1) {
+                            // Case 1: Single clip playback
                             val mapA = clipA.map()
                             if (mapA.speedNum > 0) {
                                 val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
                                 if (speedA <= 4.0f) {
-                                    val decoderA = decoders[clipA.path]
-                                    if (decoderA != null) {
-                                        val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
-                                        val srcFrameA = usToAudioFrames(srcUsA)
-                                        val volA = computeEffectiveGain(getClipVolume(clipA.id))
-                                        decoderA.readResampled(srcFrameA, framesBeforeCut, speedA, out, 0, volA)
+                                    val decoderA = getOrCreateDecoder(clipA)
+                                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                                    val srcFrameA = usToAudioFrames(srcUsA)
+                                    val volA = computeEffectiveGain(getClipVolume(clipA.id))
+
+                                    decoderA.readResampled(srcFrameA, frames, speedA, out, 0, volA)
+
+                                    if (needsDeclick) {
+                                        applyDeclickRamp(out, 0, frames)
                                     }
                                 }
                             }
-                        }
+                        } else if (bIndex in clips.indices) {
+                            // Case 2: Transition crossfade between clip A and clip B
+                            val clipB = clips[bIndex]
+                            val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                            val volB = computeEffectiveGain(getClipVolume(clipB.id))
+                            val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
+                            val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
 
-                        // 2. Render remaining (frames - N) frames from Clip k + 1
-                        if (framesAfterCut > 0) {
-                            val mapNext = nextClip.map()
-                            if (mapNext.speedNum > 0) {
-                                val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
-                                if (speedNext <= 4.0f) {
-                                    val decoderNext = decoders[nextClip.path]
-                                    if (decoderNext != null) {
-                                        val srcUsNext = mapNext.sourceUs(0L)
-                                        val srcFrameNext = usToAudioFrames(srcUsNext)
-                                        val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
-                                        decoderNext.readResampled(srcFrameNext, framesAfterCut, speedNext, out, framesBeforeCut * 2, volNext)
-                                    }
+                            val mapA = clipA.map()
+                            if (mapA.speedNum > 0) {
+                                val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                                if (speedA <= 4.0f) {
+                                    val decoderA = getOrCreateDecoder(clipA)
+                                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                                    val srcFrameA = usToAudioFrames(srcUsA)
+                                    decoderA.readResampled(srcFrameA, frames, speedA, out, 0, gainA)
                                 }
+                            }
+
+                            val mapB = clipB.map()
+                            if (mapB.speedNum > 0) {
+                                val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
+                                if (speedB <= 4.0f) {
+                                    val decoderB = getOrCreateDecoder(clipB)
+                                    val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
+                                    val srcFrameB = usToAudioFrames(srcUsB)
+                                    decoderB.readResampled(srcFrameB, frames, speedB, out, 0, gainB)
+                                }
+                            }
+
+                            if (isFirstBlockAfterStop) {
+                                applyDeclickRamp(out, 0, frames)
                             }
                         }
 
-                        // Soft limit boosted audio cleanly (Rule R10: zero allocations)
-                        val totalCutSamples = frames * 2
-                        for (si in 0 until totalCutSamples) {
-                            out[si] = softLimit(out[si])
-                        }
-
-                        lastAIndex = nextIndex
-                        lastBIndex = -1
                         isFirstBlockAfterStop = false
-                        return
+                        lastAIndex = aIndex
+                        lastBIndex = bIndex
                     }
                 }
             }
 
-            val isSamePathContiguous = lastAIndex in clips.indices && aIndex in clips.indices &&
-                    clips[lastAIndex].path == clipA.path &&
-                    kotlin.math.abs(clipA.map().inUs - clips[lastAIndex].map().outUs) <= 5_000L
+            // Mix active LayerType.AUDIO overlay items across rows 0..3
+            mixAudioOverlays(startTimelineUs, frames, out, isSynchronous = false)
 
-            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1 && !isSamePathContiguous)
-            val needsDeclick = isFirstBlockAfterStop || isCutTransition
-
-            if (bIndex == -1) {
-                // Case 1: Single clip playback
-                val mapA = clipA.map()
-                if (mapA.speedNum > 0) {
-                    val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                    if (speedA <= 4.0f) {
-                        val decoderA = getOrCreateDecoder(clipA)
-                        val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
-                        val srcFrameA = usToAudioFrames(srcUsA)
-                        val volA = computeEffectiveGain(getClipVolume(clipA.id))
-
-                        decoderA.readResampled(srcFrameA, frames, speedA, out, 0, volA)
-
-                        if (needsDeclick) {
-                            applyDeclickRamp(out, 0, frames)
-                        }
-                    }
-                }
-            } else if (bIndex in clips.indices) {
-                // Case 2: Transition crossfade between clip A and clip B
-                val clipB = clips[bIndex]
-                val volA = computeEffectiveGain(getClipVolume(clipA.id))
-                val volB = computeEffectiveGain(getClipVolume(clipB.id))
-                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
-                val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
-
-                val mapA = clipA.map()
-                if (mapA.speedNum > 0) {
-                    val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                    if (speedA <= 4.0f) {
-                        val decoderA = getOrCreateDecoder(clipA)
-                        val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
-                        val srcFrameA = usToAudioFrames(srcUsA)
-                        decoderA.readResampled(srcFrameA, frames, speedA, out, 0, gainA)
-                    }
-                }
-
-                val mapB = clipB.map()
-                if (mapB.speedNum > 0) {
-                    val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
-                    if (speedB <= 4.0f) {
-                        val decoderB = getOrCreateDecoder(clipB)
-                        val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
-                        val srcFrameB = usToAudioFrames(srcUsB)
-                        decoderB.readResampled(srcFrameB, frames, speedB, out, 0, gainB)
-                    }
-                }
-
-                if (isFirstBlockAfterStop) {
-                    applyDeclickRamp(out, 0, frames)
-                }
-            }
-
-            // Soft limit boosted audio cleanly (Rule R10: zero allocations)
+            // Soft limit boosted/mixed audio cleanly (Rule R10: zero allocations)
             val sampleCount = frames * 2
             for (si in 0 until sampleCount) {
                 out[si] = softLimit(out[si])
             }
-
-            isFirstBlockAfterStop = false
-            lastAIndex = aIndex
-            lastBIndex = bIndex
         } catch (_: Throwable) {
             // Failure isolation: never bubble exceptions to AudioEngine
         }
@@ -285,50 +339,93 @@ class ClipAudioContributor(
 
     /**
      * Synchronous accurate audio render for offline export.
-     * Guarantees all samples are decoded from the source clip without relying on background prewarm.
+     * Guarantees all samples are decoded from source clips and overlay audio tracks.
      */
     fun renderSynchronous(startFrame: Long, frames: Int, out: FloatArray) {
         if (frames <= 0) return
-        if (isMainTrackMuted) {
-            out.fill(0f)
-            return
-        }
 
         try {
             val startTimelineUs = ClipAudioDecoder.framesToUs(startFrame)
             val snapshot = snapshotHolder.current
             val clips = snapshot.project.clips
-            if (clips.isEmpty()) return
 
-            snapshot.resolve(startTimelineUs, activeSet)
-            val aIndex = activeSet.aIndex
-            val bIndex = activeSet.bIndex
-
-            if (aIndex < 0 || aIndex >= clips.size) {
+            if (isMainTrackMuted || clips.isEmpty()) {
+                out.fill(0f, 0, frames * 2)
                 lastAIndex = -1
                 lastBIndex = -1
-                return
-            }
+            } else {
+                snapshot.resolve(startTimelineUs, activeSet)
+                val aIndex = activeSet.aIndex
+                val bIndex = activeSet.bIndex
 
-            val nextIndex = aIndex + 1
-            val clipA = clips[aIndex]
+                if (aIndex < 0 || aIndex >= clips.size) {
+                    out.fill(0f, 0, frames * 2)
+                    lastAIndex = -1
+                    lastBIndex = -1
+                } else {
+                    val nextIndex = aIndex + 1
+                    val clipA = clips[aIndex]
 
-            // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
-            if (bIndex == -1 && nextIndex in clips.indices) {
-                val nextClip = clips[nextIndex]
-                val isSamePathContiguous = nextClip.path == clipA.path &&
-                        kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 5_000L
+                    var handledCutSplit = false
+                    // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
+                    if (bIndex == -1 && nextIndex in clips.indices) {
+                        val nextClip = clips[nextIndex]
+                        val isSamePathContiguous = nextClip.path == clipA.path &&
+                                kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 5_000L
 
-                if (!isSamePathContiguous) {
-                    val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
-                    val blockDurationUs = (frames * 1000L) / 48L
-                    val blockEndTimelineUs = startTimelineUs + blockDurationUs
+                        if (!isSamePathContiguous) {
+                            val clipEndUs = msToUs(snapshot.main.endMs[aIndex])
+                            val blockDurationUs = (frames * 1000L) / 48L
+                            val blockEndTimelineUs = startTimelineUs + blockDurationUs
 
-                    if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
-                        val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
-                        val framesAfterCut = frames - framesBeforeCut
+                            if (clipEndUs in (startTimelineUs + 1) until blockEndTimelineUs) {
+                                val framesBeforeCut = usToAudioFrames(clipEndUs - startTimelineUs).toInt().coerceIn(0, frames)
+                                val framesAfterCut = frames - framesBeforeCut
 
-                        if (framesBeforeCut > 0) {
+                                out.fill(0f, 0, frames * 2)
+
+                                if (framesBeforeCut > 0) {
+                                    val mapA = clipA.map()
+                                    if (mapA.speedNum > 0) {
+                                        val decoderA = getOrCreateDecoder(clipA)
+                                        val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                                        val srcFrameA = usToAudioFrames(srcUsA)
+                                        val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                                        val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                                        decoderA.readResampledSynchronous(srcFrameA, framesBeforeCut, speedA, out, 0, volA)
+                                    }
+                                }
+
+                                if (framesAfterCut > 0) {
+                                    val mapNext = nextClip.map()
+                                    if (mapNext.speedNum > 0) {
+                                        val decoderNext = getOrCreateDecoder(nextClip)
+                                        val srcUsNext = mapNext.sourceUs(0L)
+                                        val srcFrameNext = usToAudioFrames(srcUsNext)
+                                        val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
+                                        val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
+                                        decoderNext.readResampledSynchronous(srcFrameNext, framesAfterCut, speedNext, out, framesBeforeCut * 2, volNext)
+                                    }
+                                }
+
+                                lastAIndex = nextIndex
+                                lastBIndex = -1
+                                isFirstBlockAfterStop = false
+                                handledCutSplit = true
+                            }
+                        }
+                    }
+
+                    if (!handledCutSplit) {
+                        out.fill(0f, 0, frames * 2)
+                        val isSamePathContiguous = lastAIndex in clips.indices && aIndex in clips.indices &&
+                                clips[lastAIndex].path == clipA.path &&
+                                kotlin.math.abs(clipA.map().inUs - clips[lastAIndex].map().outUs) <= 5_000L
+
+                        val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1 && !isSamePathContiguous)
+                        val needsDeclick = isFirstBlockAfterStop || isCutTransition
+
+                        if (bIndex == -1) {
                             val mapA = clipA.map()
                             if (mapA.speedNum > 0) {
                                 val decoderA = getOrCreateDecoder(clipA)
@@ -336,99 +433,145 @@ class ClipAudioContributor(
                                 val srcFrameA = usToAudioFrames(srcUsA)
                                 val volA = computeEffectiveGain(getClipVolume(clipA.id))
                                 val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                                decoderA.readResampledSynchronous(srcFrameA, framesBeforeCut, speedA, out, 0, volA)
+
+                                decoderA.readResampledSynchronous(srcFrameA, frames, speedA, out, 0, volA)
+
+                                if (needsDeclick) {
+                                    applyDeclickRamp(out, 0, frames)
+                                }
+                            }
+                        } else if (bIndex in clips.indices) {
+                            val clipB = clips[bIndex]
+                            val volA = computeEffectiveGain(getClipVolume(clipA.id))
+                            val volB = computeEffectiveGain(getClipVolume(clipB.id))
+                            val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
+                            val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
+
+                            val mapA = clipA.map()
+                            if (mapA.speedNum > 0) {
+                                val decoderA = getOrCreateDecoder(clipA)
+                                val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
+                                val srcFrameA = usToAudioFrames(srcUsA)
+                                val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
+                                decoderA.readResampledSynchronous(srcFrameA, frames, speedA, out, 0, gainA)
+                            }
+
+                            val mapB = clipB.map()
+                            if (mapB.speedNum > 0) {
+                                val decoderB = getOrCreateDecoder(clipB)
+                                val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
+                                val srcFrameB = usToAudioFrames(srcUsB)
+                                val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
+                                decoderB.readResampledSynchronous(srcFrameB, frames, speedB, out, 0, gainB)
+                            }
+
+                            if (isFirstBlockAfterStop) {
+                                applyDeclickRamp(out, 0, frames)
                             }
                         }
 
-                        if (framesAfterCut > 0) {
-                            val mapNext = nextClip.map()
-                            if (mapNext.speedNum > 0) {
-                                val decoderNext = getOrCreateDecoder(nextClip)
-                                val srcUsNext = mapNext.sourceUs(0L)
-                                val srcFrameNext = usToAudioFrames(srcUsNext)
-                                val volNext = computeEffectiveGain(getClipVolume(nextClip.id))
-                                val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
-                                decoderNext.readResampledSynchronous(srcFrameNext, framesAfterCut, speedNext, out, framesBeforeCut * 2, volNext)
-                            }
-                        }
-
-                        // Soft limit boosted audio cleanly (Rule R10: zero allocations)
-                        val totalCutSamples = frames * 2
-                        for (si in 0 until totalCutSamples) {
-                            out[si] = softLimit(out[si])
-                        }
-
-                        lastAIndex = nextIndex
-                        lastBIndex = -1
                         isFirstBlockAfterStop = false
-                        return
+                        lastAIndex = aIndex
+                        lastBIndex = bIndex
                     }
                 }
             }
 
-            val isSamePathContiguous = lastAIndex in clips.indices && aIndex in clips.indices &&
-                    clips[lastAIndex].path == clipA.path &&
-                    kotlin.math.abs(clipA.map().inUs - clips[lastAIndex].map().outUs) <= 5_000L
+            // Mix active LayerType.AUDIO overlay items across rows 0..3
+            mixAudioOverlays(startTimelineUs, frames, out, isSynchronous = true)
 
-            val isCutTransition = (lastAIndex != -1 && lastAIndex != aIndex && lastBIndex == -1 && bIndex == -1 && !isSamePathContiguous)
-            val needsDeclick = isFirstBlockAfterStop || isCutTransition
-
-            if (bIndex == -1) {
-                val mapA = clipA.map()
-                if (mapA.speedNum > 0) {
-                    val decoderA = getOrCreateDecoder(clipA)
-                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
-                    val srcFrameA = usToAudioFrames(srcUsA)
-                    val volA = computeEffectiveGain(getClipVolume(clipA.id))
-                    val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-
-                    decoderA.readResampledSynchronous(srcFrameA, frames, speedA, out, 0, volA)
-
-                    if (needsDeclick) {
-                        applyDeclickRamp(out, 0, frames)
-                    }
-                }
-            } else if (bIndex in clips.indices) {
-                val clipB = clips[bIndex]
-                val volA = computeEffectiveGain(getClipVolume(clipA.id))
-                val volB = computeEffectiveGain(getClipVolume(clipB.id))
-                val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
-                val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
-
-                val mapA = clipA.map()
-                if (mapA.speedNum > 0) {
-                    val decoderA = getOrCreateDecoder(clipA)
-                    val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
-                    val srcFrameA = usToAudioFrames(srcUsA)
-                    val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                    decoderA.readResampledSynchronous(srcFrameA, frames, speedA, out, 0, gainA)
-                }
-
-                val mapB = clipB.map()
-                if (mapB.speedNum > 0) {
-                    val decoderB = getOrCreateDecoder(clipB)
-                    val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
-                    val srcFrameB = usToAudioFrames(srcUsB)
-                    val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
-                    decoderB.readResampledSynchronous(srcFrameB, frames, speedB, out, 0, gainB)
-                }
-
-                if (isFirstBlockAfterStop) {
-                    applyDeclickRamp(out, 0, frames)
-                }
-            }
-
-            // Soft limit boosted audio cleanly (Rule R10: zero allocations)
+            // Soft limit boosted/mixed audio cleanly (Rule R10: zero allocations)
             val sampleCount = frames * 2
             for (si in 0 until sampleCount) {
                 out[si] = softLimit(out[si])
             }
-
-            isFirstBlockAfterStop = false
-            lastAIndex = aIndex
-            lastBIndex = bIndex
         } catch (_: Throwable) {
             // Failure isolation
+        }
+    }
+
+    /**
+     * Zero-allocation additive audio mixing for LayerType.AUDIO overlay items across rows 0..3 (Rule R10).
+     */
+    private fun mixAudioOverlays(
+        startTimelineUs: Long,
+        frames: Int,
+        out: FloatArray,
+        isSynchronous: Boolean
+    ) {
+        val overlays = if (activeAudioOverlays.isNotEmpty()) {
+            activeAudioOverlays
+        } else {
+            PreviewRenderer.currentLayerPlan.items
+        }
+        val overlayCount = overlays.size
+        if (overlayCount == 0) return
+
+        val blockDurationUs = (frames.toLong() * 1_000_000L) / 48000L
+        val endTimelineUs = startTimelineUs + blockDurationUs
+        val scratch = if (isSynchronous) syncScratch else overlayScratch
+
+        for (k in 0 until overlayCount) {
+            val item = overlays[k]
+            if (item.type != LayerType.AUDIO) continue
+            val path = item.mediaPath
+            if (path.isEmpty()) continue
+            if (item.startUs >= endTimelineUs || item.endUs <= startTimelineUs) continue
+
+            val frameOffset = if (item.startUs > startTimelineUs) {
+                usToAudioFrames(item.startUs - startTimelineUs).toInt().coerceIn(0, frames)
+            } else {
+                0
+            }
+            val framesToEnd = if (item.endUs < endTimelineUs) {
+                usToAudioFrames(item.endUs - startTimelineUs).toInt().coerceIn(0, frames)
+            } else {
+                frames
+            }
+            val framesToRender = (framesToEnd - frameOffset).coerceIn(0, frames - frameOffset)
+            if (framesToRender <= 0) continue
+
+            val renderTimelineUs = startTimelineUs + ClipAudioDecoder.framesToUs(frameOffset.toLong())
+            val localItemUs = (renderTimelineUs - item.startUs).coerceAtLeast(0L)
+            val sourceAudioUs = item.sourceInUs + (localItemUs.toDouble() * item.speed.toDouble()).toLong()
+            val sourceStartFrame = usToAudioFrames(sourceAudioUs.coerceAtLeast(0L))
+
+            val decoder = sharedOverlayDecoders[path] ?: getSharedOverlayDecoder(path)
+            val neededSamples = framesToRender * 2
+            if (neededSamples <= scratch.size) {
+                scratch.fill(0f, 0, neededSamples)
+                if (isSynchronous) {
+                    decoder.readResampledSynchronous(sourceStartFrame, framesToRender, item.speed, scratch, 0, 1.0f)
+                } else {
+                    decoder.readResampled(sourceStartFrame, framesToRender, item.speed, scratch, 0, 1.0f)
+                }
+
+                val baseGain = computeEffectiveGain(item.volume)
+
+                for (f in 0 until framesToRender) {
+                    val sampleLocalUs = localItemUs + (f.toLong() * 1_000_000L) / 48000L
+                    val sampleTimelinePosUs = renderTimelineUs + (f.toLong() * 1_000_000L) / 48000L
+                    val remainingItemUs = (item.endUs - sampleTimelinePosUs).coerceAtLeast(0L)
+
+                    val fadeInGain = if (item.fadeInUs > 0L && sampleLocalUs < item.fadeInUs) {
+                        (sampleLocalUs.toFloat() / item.fadeInUs.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        1.0f
+                    }
+
+                    val fadeOutGain = if (item.fadeOutUs > 0L && remainingItemUs < item.fadeOutUs) {
+                        (remainingItemUs.toFloat() / item.fadeOutUs.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        1.0f
+                    }
+
+                    val effectiveGain = baseGain * fadeInGain * fadeOutGain
+                    val dstIdx = (frameOffset + f) shl 1
+                    val srcIdx = f shl 1
+                    out[dstIdx] += scratch[srcIdx] * effectiveGain
+                    out[dstIdx + 1] += scratch[srcIdx + 1] * effectiveGain
+                }
+            }
         }
     }
 
@@ -454,7 +597,9 @@ class ClipAudioContributor(
     }
 
     private fun pruneDecoders(activePaths: Set<String>) {
-        if (decoders.size > 3) {
+        val totalExpected = activePaths.size + activeAudioOverlays.size + 2
+        val maxLimit = maxOf(8, totalExpected)
+        if (decoders.size > maxLimit) {
             val iterator = decoders.entries.iterator()
             while (iterator.hasNext()) {
                 val entry = iterator.next()
@@ -502,6 +647,12 @@ class ClipAudioContributor(
             d.release()
         }
         decoders.clear()
+
+        for (d in sharedOverlayDecoders.values) {
+            d.release()
+        }
+        sharedOverlayDecoders.clear()
+
         lastAIndex = -1
         lastBIndex = -1
         lastPrewarmedKey = null

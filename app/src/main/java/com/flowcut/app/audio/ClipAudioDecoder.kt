@@ -22,7 +22,9 @@ import java.nio.ByteOrder
  * - Failure isolation: Catches and recovers from MediaCodec IllegalStateException / errors cleanly.
  * - Bounded memory (~1.1 MB buffer per instance) preventing OOM.
  */
-class ClipAudioDecoder(private val clip: Clip) {
+class ClipAudioDecoder(val filePath: String) {
+
+    constructor(clip: Clip) : this(clip.path)
 
     companion object {
         const val TARGET_SAMPLE_RATE = 48000
@@ -51,6 +53,10 @@ class ClipAudioDecoder(private val clip: Clip) {
     private var srcChannels: Int = TARGET_CHANNELS
     private var srcPcmEncoding: Int = AudioFormat.ENCODING_PCM_16BIT
 
+    // Fast-path in-memory PCM data for WAV files (zero latency, zero allocations on audio thread)
+    private var wavPcmData: FloatArray? = null
+    private var wavTotalFrames: Int = 0
+
     // Bounded pre-allocated circular ring buffer
     private val pcmBuffer = FloatArray(BUFFER_SAMPLES)
     @Volatile private var bufferStartFrame: Long = 0L
@@ -73,15 +79,21 @@ class ClipAudioDecoder(private val clip: Clip) {
     fun prepare() {
         synchronized(codecLock) {
             if (isPrepared) return
-            val file = File(clip.path)
+            val file = File(filePath)
             if (!file.exists()) {
                 hasAudio = false
                 return
             }
 
+            if (filePath.endsWith(".wav", ignoreCase = true)) {
+                if (prepareWav(file)) {
+                    return
+                }
+            }
+
             try {
                 val ext = MediaExtractor()
-                ext.setDataSource(clip.path)
+                ext.setDataSource(filePath)
 
                 var audioTrack = -1
                 var audioFormat: MediaFormat? = null
@@ -135,7 +147,125 @@ class ClipAudioDecoder(private val clip: Clip) {
         }
     }
 
+    private fun prepareWav(file: File): Boolean {
+        try {
+            val bytes = file.readBytes()
+            if (bytes.size < 44) return false
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+
+            val riff = ByteArray(4)
+            buf.get(riff)
+            if (String(riff, Charsets.US_ASCII) != "RIFF") return false
+            buf.getInt() // total file size - 8
+            val wave = ByteArray(4)
+            buf.get(wave)
+            if (String(wave, Charsets.US_ASCII) != "WAVE") return false
+
+            var channels = 2
+            var sampleRate = TARGET_SAMPLE_RATE
+            var bitsPerSample = 16
+            var dataOffset = -1
+            var dataSize = 0
+
+            while (buf.remaining() >= 8) {
+                val chunkIdBytes = ByteArray(4)
+                buf.get(chunkIdBytes)
+                val chunkId = String(chunkIdBytes, Charsets.US_ASCII)
+                val chunkSize = buf.getInt()
+
+                if (chunkId == "fmt ") {
+                    val fmtStart = buf.position()
+                    if (chunkSize >= 16) {
+                        buf.getShort() // audioFormat (1 = PCM)
+                        channels = buf.getShort().toInt() and 0xFFFF
+                        sampleRate = buf.getInt()
+                        buf.getInt() // byteRate
+                        buf.getShort() // blockAlign
+                        bitsPerSample = buf.getShort().toInt() and 0xFFFF
+                    }
+                    val nextPos = fmtStart + chunkSize
+                    if (nextPos in 0..buf.limit()) {
+                        buf.position(nextPos)
+                    } else {
+                        break
+                    }
+                } else if (chunkId == "data") {
+                    dataOffset = buf.position()
+                    dataSize = minOf(chunkSize, buf.remaining())
+                    break
+                } else {
+                    val nextPos = buf.position() + chunkSize
+                    if (nextPos in 0..buf.limit()) {
+                        buf.position(nextPos)
+                    } else {
+                        break
+                    }
+                }
+            }
+
+            if (dataOffset < 0 || dataSize <= 0 || channels <= 0 || sampleRate <= 0) return false
+
+            buf.position(dataOffset)
+            if (bitsPerSample == 16) {
+                val bytesPerFrame = channels * 2
+                val srcFrames = dataSize / bytesPerFrame
+                if (srcFrames <= 0) return false
+
+                val srcFloats = FloatArray(srcFrames * channels)
+                var sIdx = 0
+                for (f in 0 until srcFrames) {
+                    for (c in 0 until channels) {
+                        val s16 = buf.getShort().toInt()
+                        srcFloats[sIdx++] = (s16 / 32768.0f).coerceIn(-1.0f, 1.0f)
+                    }
+                }
+
+                val targetFrames = if (sampleRate == TARGET_SAMPLE_RATE) {
+                    srcFrames
+                } else {
+                    ((srcFrames.toLong() * TARGET_SAMPLE_RATE) / sampleRate).toInt()
+                }
+
+                val pcm = FloatArray(targetFrames * TARGET_CHANNELS)
+                val rateRatio = sampleRate.toDouble() / TARGET_SAMPLE_RATE.toDouble()
+
+                for (f in 0 until targetFrames) {
+                    val exactSrc = f.toDouble() * rateRatio
+                    val f0 = exactSrc.toInt().coerceIn(0, srcFrames - 1)
+                    val f1 = (f0 + 1).coerceIn(0, srcFrames - 1)
+                    val frac = (exactSrc - f0.toDouble()).toFloat()
+
+                    val dstIdx = f shl 1
+                    if (channels == 1) {
+                        val s0 = srcFloats[f0]
+                        val s1 = srcFloats[f1]
+                        val s = s0 * (1f - frac) + s1 * frac
+                        pcm[dstIdx] = s
+                        pcm[dstIdx + 1] = s
+                    } else {
+                        val s0L = srcFloats[f0 * channels]
+                        val s0R = srcFloats[f0 * channels + 1]
+                        val s1L = srcFloats[f1 * channels]
+                        val s1R = srcFloats[f1 * channels + 1]
+                        pcm[dstIdx] = s0L * (1f - frac) + s1L * frac
+                        pcm[dstIdx + 1] = s0R * (1f - frac) + s1R * frac
+                    }
+                }
+
+                wavPcmData = pcm
+                wavTotalFrames = targetFrames
+                hasAudio = true
+                isPrepared = true
+                return true
+            }
+        } catch (_: Throwable) {
+            // Fall back to MediaExtractor if parsing fails
+        }
+        return false
+    }
+
     fun seekToFrame(targetFrame: Long) {
+        if (wavPcmData != null) return
         synchronized(codecLock) {
             internalSeekToFrame(targetFrame)
         }
@@ -186,6 +316,23 @@ class ClipAudioDecoder(private val clip: Clip) {
     fun read(sourceFrame: Long, count: Int, out: FloatArray, outOffset: Int, gain: Float) {
         if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
 
+        val pcm = wavPcmData
+        if (pcm != null) {
+            var curFrame = sourceFrame
+            var dstIdx = outOffset
+            val totalFrames = wavTotalFrames
+            for (i in 0 until count) {
+                if (curFrame in 0 until totalFrames) {
+                    val idx = (curFrame.toInt()) shl 1
+                    out[dstIdx] += pcm[idx] * gain
+                    out[dstIdx + 1] += pcm[idx + 1] * gain
+                }
+                curFrame++
+                dstIdx += TARGET_CHANNELS
+            }
+            return
+        }
+
         // Check if requested range is outside buffer
         val start = bufferStartFrame
         val countBuffered = bufferedFrames
@@ -229,6 +376,42 @@ class ClipAudioDecoder(private val clip: Clip) {
 
         // For extreme speed (> 4.0x), mute live audio to prevent audio thread starvation and AudioClock stalls
         if (speed > 4.0f) {
+            return
+        }
+
+        val pcm = wavPcmData
+        if (pcm != null) {
+            val totalFrames = wavTotalFrames
+            var dstIdx = outOffset
+            for (i in 0 until count) {
+                val exactSrcPos = sourceStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+                val f0 = exactSrcPos.toLong()
+                val f1 = f0 + 1L
+                val frac = (exactSrcPos - f0.toDouble()).toFloat()
+
+                if (f0 in 0 until totalFrames) {
+                    val idx0 = (f0.toInt()) shl 1
+                    val s0L = pcm[idx0]
+                    val s0R = pcm[idx0 + 1]
+
+                    val sL: Float
+                    val sR: Float
+                    if (f1 in 0 until totalFrames) {
+                        val idx1 = (f1.toInt()) shl 1
+                        val s1L = pcm[idx1]
+                        val s1R = pcm[idx1 + 1]
+                        sL = s0L * (1f - frac) + s1L * frac
+                        sR = s0R * (1f - frac) + s1R * frac
+                    } else {
+                        sL = s0L
+                        sR = s0R
+                    }
+
+                    out[dstIdx] += sL * gain
+                    out[dstIdx + 1] += sR * gain
+                }
+                dstIdx += TARGET_CHANNELS
+            }
             return
         }
 
@@ -290,6 +473,10 @@ class ClipAudioDecoder(private val clip: Clip) {
      */
     fun readResampledSynchronous(sourceStartFrame: Long, count: Int, speed: Float, out: FloatArray, outOffset: Int, gain: Float) {
         if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
+        if (wavPcmData != null) {
+            readResampled(sourceStartFrame, count, speed, out, outOffset, gain)
+            return
+        }
         if (kotlin.math.abs(speed - 1.0f) < 0.01f) {
             readSynchronous(sourceStartFrame, count, out, outOffset, gain)
             return
@@ -354,6 +541,10 @@ class ClipAudioDecoder(private val clip: Clip) {
      */
     fun readSynchronous(sourceFrame: Long, count: Int, out: FloatArray, outOffset: Int, gain: Float) {
         if (!hasAudio || !isPrepared || count <= 0 || gain <= 0f) return
+        if (wavPcmData != null) {
+            read(sourceFrame, count, out, outOffset, gain)
+            return
+        }
         synchronized(codecLock) {
             val targetEnd = sourceFrame + count
             if (sourceFrame < bufferStartFrame || sourceFrame >= bufferStartFrame + bufferedFrames) {
@@ -567,5 +758,7 @@ class ClipAudioDecoder(private val clip: Clip) {
         hasAudio = false
         isPrepared = false
         bufferedFrames = 0
+        wavPcmData = null
+        wavTotalFrames = 0
     }
 }

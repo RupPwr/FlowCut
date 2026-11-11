@@ -201,6 +201,17 @@ class ExportEngine(private val context: Context) {
         val audioContributor = ClipAudioContributor(snapshotHolder)
         val activeLayerSet = ActiveLayerSet()
 
+        val plan = PreviewRenderer.currentLayerPlan
+        val audioOverlays = plan.items.filter { it.type == LayerType.AUDIO }
+        if (audioOverlays.isNotEmpty()) {
+            ClipAudioContributor.syncAudioOverlays(audioOverlays)
+            for (item in audioOverlays) {
+                if (item.mediaPath.isNotEmpty()) {
+                    ClipAudioContributor.prewarmAudioPath(item.mediaPath)
+                }
+            }
+        }
+
         var muxerStarted = false
         var muxerReleased = false
 

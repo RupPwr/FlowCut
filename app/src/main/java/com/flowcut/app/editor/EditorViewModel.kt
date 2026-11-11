@@ -149,8 +149,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val layerItems: List<OverlayItem> get() = _layerItems
 
     private fun syncLayerPlan() {
-        val plan = CompiledLayerPlan.compile(_layerItems.toList())
+        val items = _layerItems.toList()
+        val plan = CompiledLayerPlan.compile(items)
         PreviewRenderer.setLayerPlan(plan)
+        val audioOverlays = items.filter { it.type == LayerType.AUDIO }
+        ClipAudioContributor.syncAudioOverlays(audioOverlays)
+        for (item in audioOverlays) {
+            if (item.mediaPath.isNotEmpty()) {
+                ClipAudioContributor.prewarmAudioPath(item.mediaPath)
+            }
+        }
     }
 
     fun getClipBackground(clipId: String): ClipBackground =
