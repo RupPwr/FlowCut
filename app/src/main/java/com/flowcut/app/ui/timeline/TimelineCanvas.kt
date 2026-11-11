@@ -50,6 +50,8 @@ import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.LayerType
+import com.flowcut.app.engine.OverlayItem
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -205,11 +207,14 @@ fun TimelineCanvas(
     zoomState: TimelineZoomState,
     frameTick: MutableLongState,
     selection: TimelineSelection = TimelineSelection.None,
+    overlayItems: List<OverlayItem> = emptyList(),
     lanePainters: Map<String, LanePainter> = emptyMap(),
     onSelect: (TimelineSelection) -> Unit = {},
     onLongPress: (TimelineSelection) -> Unit = {},
     onWakeFrameDriver: () -> Unit = {},
     onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> },
+    onCommitOverlayTrim: (itemId: String, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _ -> },
+    onLiveOverlayTrim: (itemId: String, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _ -> },
     onTrimPreview: (trimPreviewTimeUs: Long) -> Unit = {},
     getClipNaturalDurationUs: (clipIndex: Int) -> Long = { index ->
         val c = holder.current.project.clips.getOrNull(index)
@@ -225,9 +230,12 @@ fun TimelineCanvas(
 
     // Wrap dynamic parameters in rememberUpdatedState so pointerInput never sees stale closures (Bug #1)
     val currentSelection by rememberUpdatedState(selection)
+    val currentOverlayItems by rememberUpdatedState(overlayItems)
     val currentOnSelect by rememberUpdatedState(onSelect)
     val currentOnLongPress by rememberUpdatedState(onLongPress)
     val currentOnCommitTrim by rememberUpdatedState(onCommitTrim)
+    val currentOnCommitOverlayTrim by rememberUpdatedState(onCommitOverlayTrim)
+    val currentOnLiveOverlayTrim by rememberUpdatedState(onLiveOverlayTrim)
     val currentOnTrimPreview by rememberUpdatedState(onTrimPreview)
     val currentGetClipNaturalDurationUs by rememberUpdatedState(getClipNaturalDurationUs)
     val currentOnWakeFrameDriver by rememberUpdatedState(onWakeFrameDriver)
@@ -310,6 +318,31 @@ fun TimelineCanvas(
     val speakerWave1Path = remember { Path() }
     val speakerWave2Path = remember { Path() }
 
+    // Pre-allocated overlay styling (Rule R10)
+    val overlayLaneHeightPx = remember(density) { TimelineHitTester.OVERLAY_LANE_HEIGHT_DP * density }
+    val overlayLaneStepPx = remember(density) { (TimelineHitTester.OVERLAY_LANE_HEIGHT_DP + TimelineHitTester.OVERLAY_LANE_GAP_DP) * density }
+    val overlayTopOffsetPx = remember(density) { TimelineHitTester.LANES_PADDING_TOP_DP * density }
+    val overlayCornerRadiusPx = remember(density) { 4f * density }
+    val overlayLabelStyle = remember { TextStyle(fontSize = 11.sp, color = Color.White) }
+    val overlayHandleCornerRadiusPx = remember(density) { 4f * density }
+    val overlayHandleWidthPx = remember(density) { 15f * density }
+    val overlayChevronStroke = remember(density) { Stroke(width = 2f * density, cap = StrokeCap.Round) }
+
+    // LayerType Colors
+    val colorTextLayer = remember { Color(0xFFD97706) }
+    val colorStickerLayer = remember { Color(0xFF9333EA) }
+    val colorImageLayer = remember { Color(0xFF0D9488) }
+    val colorFilterLayer = remember { Color(0xFF0284C7) }
+    val colorVideoLayer = remember { Color(0xFF4F46E5) }
+
+    // Reusable overlay paths (Rule R10)
+    val overlayPath = remember { Path() }
+    val overlaySelectionPath = remember { Path() }
+    val overlayLeftHandlePath = remember { Path() }
+    val overlayRightHandlePath = remember { Path() }
+    val overlayLeftChevronPath = remember { Path() }
+    val overlayRightChevronPath = remember { Path() }
+
     // Unclamped virtual playhead for smooth, wall-free trim dragging (Rule R10)
     val activeTrimPlayheadUs = remember { mutableLongStateOf(Long.MIN_VALUE) }
 
@@ -330,6 +363,7 @@ fun TimelineCanvas(
                     // Bug #1: Read currentSelection dynamically on touch-down (never stale!)
                     val currentSel = currentSelection
                     val selectedClipIndex = (currentSel as? TimelineSelection.ClipSelected)?.index ?: -1
+                    val selectedOverlayId = (currentSel as? TimelineSelection.OverlaySelected)?.itemId
                     val snapshotOnDown = holder.current
                     val halfWidthPxOnDown = size.width / 2f
                     val trimHandleHit = if (selectedClipIndex in 0 until snapshotOnDown.main.n) {
@@ -350,8 +384,26 @@ fun TimelineCanvas(
                     val isTrimCandidate = trimHandleHit != TimelineHitTester.TrimHandleType.NONE
                     val isLeftHandle = trimHandleHit == TimelineHitTester.TrimHandleType.LEFT
 
+                    val overlayTrimHit = if (!isTrimCandidate && selectedOverlayId != null) {
+                        TimelineHitTester.hitTestOverlayTrimHandle(
+                            tapX = down.position.x,
+                            tapY = down.position.y,
+                            selectedOverlayId = selectedOverlayId,
+                            overlayItems = currentOverlayItems,
+                            playheadUs = playhead.timeUs,
+                            halfWidthPx = halfWidthPxOnDown,
+                            density = density,
+                            zoomState = zoomState
+                        )
+                    } else {
+                        TimelineHitTester.OverlayTrimEdge.NONE
+                    }
+
+                    val isOverlayTrimCandidate = overlayTrimHit != TimelineHitTester.OverlayTrimEdge.NONE
+                    val isOverlayLeftHandle = overlayTrimHit == TimelineHitTester.OverlayTrimEdge.LEFT
+
                     if (wasMovingOnDown) {
-                        if (isTrimCandidate) {
+                        if (isTrimCandidate || isOverlayTrimCandidate) {
                             controller.pause()
                         } else {
                             controller.beginScrub()
@@ -372,10 +424,18 @@ fun TimelineCanvas(
                     // Capture initial snapshot/clip/playhead state ONCE at touch-down
                     val initialPlayheadUs = playhead.timeUs
                     val curClip = if (isTrimCandidate) snapshotOnDown.project.clips.getOrNull(selectedClipIndex) else null
+                    val curOverlayItem = if (isOverlayTrimCandidate && selectedOverlayId != null) {
+                        currentOverlayItems.firstOrNull { it.id == selectedOverlayId }
+                    } else null
                     val initialMap = curClip?.map() ?: com.flowcut.app.core.time.TimeMap(0L, 0L)
                     val initialInUs = initialMap.inUs
                     val initialOutUs = initialMap.outUs
                     val pxPerUsAtStart = zoomState.pxPerUs(density)
+
+                    val initialOverlayStartUs = curOverlayItem?.startUs ?: 0L
+                    val initialOverlayEndUs = curOverlayItem?.endUs ?: 0L
+                    var currentOverlayStartUs = initialOverlayStartUs
+                    var currentOverlayEndUs = initialOverlayEndUs
 
                     val untrimmedDurationUs = if (isTrimCandidate && curClip != null) {
                         clipNaturalDurationCache.getOrPut(curClip.id) {
@@ -455,8 +515,40 @@ fun TimelineCanvas(
                         currentOnWakeFrameDriver()
                     }
 
+                    fun updateOverlayTrim(fingerX: Float) {
+                        if (pxPerUsAtStart <= 0.0 || curOverlayItem == null) return
+                        val totalDxPx = fingerX - startTouchX
+                        val dragDeltaUs = (totalDxPx / pxPerUsAtStart).roundToLong()
+                        val effectiveDeltaUs = dragDeltaUs + accumulatedAutoScrollUs
+
+                        val newStartUs: Long
+                        val newEndUs: Long
+                        if (isOverlayLeftHandle) {
+                            newStartUs = (initialOverlayStartUs + effectiveDeltaUs).coerceIn(0L, initialOverlayEndUs - OverlayItem.MIN_DURATION_US)
+                            newEndUs = initialOverlayEndUs
+                        } else {
+                            val maxTimelineUs = maxOf(
+                                msToUs(holder.current.totalMs),
+                                initialOverlayEndUs + 30_000_000L,
+                                60_000_000L
+                            )
+                            newStartUs = initialOverlayStartUs
+                            newEndUs = (initialOverlayEndUs + effectiveDeltaUs).coerceIn(initialOverlayStartUs + OverlayItem.MIN_DURATION_US, maxTimelineUs)
+                        }
+
+                        if (newStartUs != currentOverlayStartUs || newEndUs != currentOverlayEndUs) {
+                            currentOverlayStartUs = newStartUs
+                            currentOverlayEndUs = newEndUs
+                            currentOnLiveOverlayTrim(curOverlayItem.id, newStartUs, newEndUs)
+                        }
+
+                        val seekUs = if (isOverlayLeftHandle) newStartUs else newEndUs
+                        controller.seekTo(seekUs)
+                        currentOnWakeFrameDriver()
+                    }
+
                     // Asynchronous long-press timer: NEVER delays or blocks awaitPointerEvent!
-                    val longPressJob = if (!wasMovingOnDown && !isTrimCandidate) {
+                    val longPressJob = if (!wasMovingOnDown && !isTrimCandidate && !isOverlayTrimCandidate) {
                         coroutineScope.launch {
                             delay(viewConfiguration.longPressTimeoutMillis)
                             if (!isDragging && !isZooming && !wasMovingOnDown) {
@@ -470,7 +562,9 @@ fun TimelineCanvas(
                                     density = density,
                                     snapshot = holder.current,
                                     zoomState = zoomState,
-                                    selectedClipIndex = selectedClipIndex
+                                    selectedClipIndex = selectedClipIndex,
+                                    selectedOverlayId = selectedOverlayId,
+                                    overlayItems = currentOverlayItems
                                 )
                                 currentOnLongPress(hit)
                             }
@@ -593,6 +687,69 @@ fun TimelineCanvas(
                                         }
                                     }
                                     change.consume()
+                                } else if (isOverlayTrimCandidate) {
+                                    val totalDxPx = change.position.x - startTouchX
+                                    val dragDist = abs(totalDxPx)
+                                    if (!isTrimming && dragDist > dragSlop) {
+                                        isTrimming = true
+                                    }
+                                    if (isTrimming) {
+                                        currentFingerX = change.position.x
+                                        updateOverlayTrim(currentFingerX)
+
+                                        val canvasW = size.width.toFloat()
+                                        val inLeftZone = currentFingerX < edgeZonePx
+                                        val inRightZone = currentFingerX > canvasW - edgeZonePx
+
+                                        if ((inLeftZone || inRightZone) && autoScrollJob == null) {
+                                            autoScrollJob = coroutineScope.launch {
+                                                var lastNanos = System.nanoTime()
+                                                while (isActive) {
+                                                    delay(16L) // ~60 fps
+                                                    val nowNanos = System.nanoTime()
+                                                    val dtSec = ((nowNanos - lastNanos) / 1_000_000_000.0).coerceIn(0.001, 0.050)
+                                                    lastNanos = nowNanos
+
+                                                    val w = size.width.toFloat()
+                                                    val fX = currentFingerX
+                                                    val speedFactor = when {
+                                                        fX < edgeZonePx -> -((edgeZonePx - fX) / edgeZonePx).coerceIn(0f, 1f)
+                                                        fX > w - edgeZonePx -> ((fX - (w - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1f)
+                                                        else -> 0f
+                                                    }
+
+                                                    if (speedFactor == 0f) {
+                                                        break
+                                                    }
+
+                                                    val deltaPx = speedFactor * maxScrollSpeedPxPerSec * dtSec
+                                                    if (pxPerUsAtStart > 0.0) {
+                                                        val rawDeltaUs = (deltaPx / pxPerUsAtStart) + scrollRemainderUs
+                                                        val deltaUs = rawDeltaUs.roundToLong()
+                                                        scrollRemainderUs = rawDeltaUs - deltaUs
+
+                                                        if (deltaUs != 0L) {
+                                                            val canScroll = if (isOverlayLeftHandle) {
+                                                                if (deltaUs < 0) currentOverlayStartUs > 0L else currentOverlayStartUs < initialOverlayEndUs - OverlayItem.MIN_DURATION_US
+                                                            } else {
+                                                                deltaUs > 0 || currentOverlayEndUs > initialOverlayStartUs + OverlayItem.MIN_DURATION_US
+                                                            }
+
+                                                            if (canScroll) {
+                                                                accumulatedAutoScrollUs += deltaUs
+                                                                updateOverlayTrim(currentFingerX)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                autoScrollJob = null
+                                            }
+                                        } else if (!inLeftZone && !inRightZone) {
+                                            autoScrollJob?.cancel()
+                                            autoScrollJob = null
+                                        }
+                                    }
+                                    change.consume()
                                 } else {
                                     if (change.uptimeMillis > lastUptimeMillis) {
                                         velocityTracker.addPointerInputChange(change)
@@ -646,6 +803,11 @@ fun TimelineCanvas(
                                         controller.seekTo(totalUs)
                                     }
                                     currentOnWakeFrameDriver()
+                                } else if (isOverlayTrimCandidate) {
+                                    if (isTrimming && curOverlayItem != null && (currentOverlayStartUs != initialOverlayStartUs || currentOverlayEndUs != initialOverlayEndUs)) {
+                                        currentOnCommitOverlayTrim(curOverlayItem.id, currentOverlayStartUs, currentOverlayEndUs)
+                                    }
+                                    currentOnWakeFrameDriver()
                                 } else if (isDragging) {
                                     val pxPerUs = zoomState.pxPerUs(density)
                                     val maxVelocityPx = 8000f * density
@@ -682,7 +844,9 @@ fun TimelineCanvas(
                                             density = density,
                                             snapshot = holder.current,
                                             zoomState = zoomState,
-                                            selectedClipIndex = selectedClipIndex
+                                            selectedClipIndex = selectedClipIndex,
+                                            selectedOverlayId = selectedOverlayId,
+                                            overlayItems = currentOverlayItems
                                         )
                                         if (hit is TimelineSelection.TrackMuteClicked) {
                                             currentOnToggleTrackMute()
@@ -1192,8 +1356,161 @@ fun TimelineCanvas(
             }
         }
 
-        // 5. Draw Feature Lanes
-        val lanesTop = mainTop + mainTrackHeightPx + (8.dp.value * density)
+        // 5. Draw Overlay Lanes
+        val overlayBaseTop = mainTop + mainTrackHeightPx + overlayTopOffsetPx
+        val selectedOverlayId = (selection as? TimelineSelection.OverlaySelected)?.itemId
+
+        for (idx in overlayItems.indices) {
+            val item = overlayItems[idx]
+            val itemStartUs = item.startUs
+            val itemEndUs = item.endUs
+            val itemLeftX = zoomState.timeUsToX(itemStartUs, offsetPx, halfWidthInt, pxPerUs)
+            val itemRightX = zoomState.timeUsToX(itemEndUs, offsetPx, halfWidthInt, pxPerUs)
+            val pillWidth = itemRightX - itemLeftX
+            if (pillWidth <= 0f) continue
+            if (itemRightX < -50f || itemLeftX > size.width + 50f) continue
+
+            val itemTop = overlayBaseTop + item.laneIndex * overlayLaneStepPx
+            val itemBottom = itemTop + overlayLaneHeightPx
+
+            buildClipCornerPath(
+                path = overlayPath,
+                left = itemLeftX,
+                top = itemTop,
+                right = itemRightX,
+                bottom = itemBottom,
+                roundLeft = true,
+                roundRight = true,
+                radius = overlayCornerRadiusPx
+            )
+
+            val pillColor = when (item.type) {
+                LayerType.TEXT -> colorTextLayer
+                LayerType.STICKER -> colorStickerLayer
+                LayerType.IMAGE -> colorImageLayer
+                LayerType.FILTER -> colorFilterLayer
+                LayerType.VIDEO -> colorVideoLayer
+            }
+
+            drawPath(
+                path = overlayPath,
+                color = pillColor
+            )
+
+            val label = if (item.text.isNotEmpty()) item.text else item.type.name
+            val labelX = itemLeftX + 6f * density
+            val labelY = itemTop + 7f * density
+            if (itemLeftX + 16f * density < itemRightX) {
+                drawTextSafe(
+                    textMeasurer = textMeasurer,
+                    text = label,
+                    x = labelX,
+                    y = labelY,
+                    style = overlayLabelStyle
+                )
+            }
+        }
+
+        // Dedicated Pass: Selected Overlay White Rounded Border & Left/Right Chevron Handles
+        if (selectedOverlayId != null) {
+            var selItem: OverlayItem? = null
+            for (idx in overlayItems.indices) {
+                if (overlayItems[idx].id == selectedOverlayId) {
+                    selItem = overlayItems[idx]
+                    break
+                }
+            }
+            if (selItem != null) {
+                val sLeftX = zoomState.timeUsToX(selItem.startUs, offsetPx, halfWidthInt, pxPerUs)
+                val sRightX = zoomState.timeUsToX(selItem.endUs, offsetPx, halfWidthInt, pxPerUs)
+                val sWidth = sRightX - sLeftX
+                val itemTop = overlayBaseTop + selItem.laneIndex * overlayLaneStepPx
+                val itemBottom = itemTop + overlayLaneHeightPx
+                val itemCenterY = (itemTop + itemBottom) / 2f
+
+                if (sWidth > 0f && sRightX >= -overlayHandleWidthPx && sLeftX <= size.width + overlayHandleWidthPx) {
+                    // 1. Crisp solid White Rounded Border around selected overlay pill (2.5dp)
+                    val halfStroke = whiteSelectionStroke.width / 2f
+                    val bLeft = sLeftX + halfStroke
+                    val bRight = maxOf(bLeft, sRightX - halfStroke)
+                    val bTop = itemTop + halfStroke
+                    val bBottom = itemBottom - halfStroke
+                    val bRadius = maxOf(0f, overlayCornerRadiusPx - halfStroke)
+
+                    buildClipCornerPath(
+                        path = overlaySelectionPath,
+                        left = bLeft,
+                        top = bTop,
+                        right = bRight,
+                        bottom = bBottom,
+                        roundLeft = true,
+                        roundRight = true,
+                        radius = bRadius
+                    )
+                    drawPath(
+                        path = overlaySelectionPath,
+                        color = whiteColor,
+                        style = whiteSelectionStroke
+                    )
+
+                    // 2. Left and Right White Trim Handle Tabs
+                    val handleTop = itemTop
+                    val handleBottom = itemBottom
+                    val hr = minOf(overlayHandleCornerRadiusPx, overlayHandleWidthPx / 2f, overlayLaneHeightPx / 2f)
+
+                    // Left Handle Tab (<)
+                    val leftHandleLeft = sLeftX - overlayHandleWidthPx
+                    val leftHandleRight = sLeftX + 1f
+                    overlayLeftHandlePath.reset()
+                    overlayLeftHandlePath.moveTo(leftHandleRight, handleTop)
+                    overlayLeftHandlePath.lineTo(leftHandleLeft + hr, handleTop)
+                    overlayLeftHandlePath.quadraticTo(leftHandleLeft, handleTop, leftHandleLeft, handleTop + hr)
+                    overlayLeftHandlePath.lineTo(leftHandleLeft, handleBottom - hr)
+                    overlayLeftHandlePath.quadraticTo(leftHandleLeft, handleBottom, leftHandleLeft + hr, handleBottom)
+                    overlayLeftHandlePath.lineTo(leftHandleRight, handleBottom)
+                    overlayLeftHandlePath.close()
+                    drawPath(path = overlayLeftHandlePath, color = whiteColor)
+
+                    // Right Handle Tab (>)
+                    val rightHandleLeft = sRightX - 1f
+                    val rightHandleRight = sRightX + overlayHandleWidthPx
+                    overlayRightHandlePath.reset()
+                    overlayRightHandlePath.moveTo(rightHandleLeft, handleTop)
+                    overlayRightHandlePath.lineTo(rightHandleRight - hr, handleTop)
+                    overlayRightHandlePath.quadraticTo(rightHandleRight, handleTop, rightHandleRight, handleTop + hr)
+                    overlayRightHandlePath.lineTo(rightHandleRight, handleBottom - hr)
+                    overlayRightHandlePath.quadraticTo(rightHandleRight, handleBottom, rightHandleRight - hr, handleBottom)
+                    overlayRightHandlePath.lineTo(rightHandleLeft, handleBottom)
+                    overlayRightHandlePath.close()
+                    drawPath(path = overlayRightHandlePath, color = whiteColor)
+
+                    // 3. Sharp dark/black < and > Chevron icons
+                    val leftHandleCenterX = sLeftX - (overlayHandleWidthPx / 2f)
+                    overlayLeftChevronPath.reset()
+                    overlayLeftChevronPath.moveTo(leftHandleCenterX + chevronHalfWPx, itemCenterY - chevronHalfHPx)
+                    overlayLeftChevronPath.lineTo(leftHandleCenterX - chevronHalfWPx, itemCenterY)
+                    overlayLeftChevronPath.lineTo(leftHandleCenterX + chevronHalfWPx, itemCenterY + chevronHalfHPx)
+                    drawPath(path = overlayLeftChevronPath, color = chevronColor, style = overlayChevronStroke)
+
+                    val rightHandleCenterX = sRightX + (overlayHandleWidthPx / 2f)
+                    overlayRightChevronPath.reset()
+                    overlayRightChevronPath.moveTo(rightHandleCenterX - chevronHalfWPx, itemCenterY - chevronHalfHPx)
+                    overlayRightChevronPath.lineTo(rightHandleCenterX + chevronHalfWPx, itemCenterY)
+                    overlayRightChevronPath.lineTo(rightHandleCenterX - chevronHalfWPx, itemCenterY + chevronHalfHPx)
+                    drawPath(path = overlayRightChevronPath, color = chevronColor, style = overlayChevronStroke)
+                }
+            }
+        }
+
+        // 6. Draw Feature Lanes (shifted below overlay rows)
+        var maxOverlayLane = -1
+        for (idx in overlayItems.indices) {
+            val l = overlayItems[idx].laneIndex
+            if (l > maxOverlayLane) maxOverlayLane = l
+        }
+        val overlayRowsCount = if (maxOverlayLane >= 0) maxOverlayLane + 1 else 0
+        val overlayZoneHeightPx = overlayRowsCount * overlayLaneStepPx
+        val lanesTop = overlayBaseTop + overlayZoneHeightPx
         if (snapshot.lanes.isNotEmpty()) {
             for (laneIdx in snapshot.lanes.indices) {
                 val lane = snapshot.lanes[laneIdx]

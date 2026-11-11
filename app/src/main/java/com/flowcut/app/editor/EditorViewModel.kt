@@ -55,6 +55,7 @@ data class EditorUiState(
     val isPlaying: Boolean = false,
     val selectedClipIndex: Int? = null,
     val selectedJunctionIndex: Int? = null,
+    val selectedOverlayId: String? = null,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val isImporting: Boolean = false,
@@ -487,6 +488,224 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         syncLayerPlan()
         updateProject(currentProject, recordUndo = false)
         return copy
+    }
+
+    private fun pushUndoState() {
+        val currentProject = _uiState.value.project
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+        undoLayerItems.addLast(ArrayList(_layerItems))
+        redoLayerItems.clear()
+    }
+
+    fun selectOverlay(itemId: String?) {
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = itemId,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
+    }
+
+    fun getOverlayItem(itemId: String): OverlayItem? =
+        _layerItems.firstOrNull { it.id == itemId }
+
+    fun getOverlayOpacity(itemId: String): Float =
+        getOverlayItem(itemId)?.transform?.opacity ?: 1.0f
+
+    fun splitSelectedOverlayAtPlayhead(playheadUs: Long): String? {
+        val selectedId = _uiState.value.selectedOverlayId ?: return null
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return null
+        val item = _layerItems[idx]
+
+        val minSplitUs = item.startUs + OverlayItem.MIN_DURATION_US
+        val maxSplitUs = item.endUs - OverlayItem.MIN_DURATION_US
+        if (playheadUs < minSplitUs || playheadUs > maxSplitUs) return null
+
+        if (!canAddLayer(_layerItems, item.type)) return null
+
+        pushUndoState()
+
+        val leftItem = item.copy(endUs = playheadUs)
+        val rightId = UUID.randomUUID().toString()
+        val rightItem = item.copy(
+            id = rightId,
+            startUs = playheadUs,
+            endUs = item.endUs,
+            zIndex = item.zIndex + 1
+        )
+
+        _layerItems[idx] = leftItem
+        _layerItems.add(rightItem)
+        syncLayerPlan()
+
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = rightId,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+        return rightId
+    }
+
+    fun copySelectedOverlay(): OverlayItem? {
+        val selectedId = _uiState.value.selectedOverlayId ?: return null
+        val item = _layerItems.firstOrNull { it.id == selectedId } ?: return null
+        if (!canAddLayer(_layerItems, item.type)) return null
+
+        pushUndoState()
+
+        val durUs = item.durationUs
+        val newStartUs = item.endUs
+        val newEndUs = newStartUs + durUs
+        val maxZ = (_layerItems.maxOfOrNull { it.zIndex } ?: item.zIndex) + 1
+
+        val newId = UUID.randomUUID().toString()
+        val copy = item.copy(
+            id = newId,
+            startUs = newStartUs,
+            endUs = newEndUs,
+            zIndex = maxZ
+        )
+        _layerItems.add(copy)
+        syncLayerPlan()
+
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = newId,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+        return copy
+    }
+
+    fun deleteSelectedOverlay(): Boolean {
+        val selectedId = _uiState.value.selectedOverlayId ?: return false
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return false
+
+        pushUndoState()
+        _layerItems.removeAt(idx)
+        syncLayerPlan()
+
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = null,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
+    }
+
+    fun rotateSelectedOverlay(): ClipTransform? {
+        val selectedId = _uiState.value.selectedOverlayId ?: return null
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return null
+        val item = _layerItems[idx]
+
+        val current = item.transform
+        val nextDeg = (((Math.round(current.rotationDeg / 90.0) * 90 + 90) % 360 + 360) % 360).toFloat()
+        val newTransform = current.copy(rotationDeg = nextDeg)
+
+        pushUndoState()
+        _layerItems[idx] = item.copy(transform = newTransform)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+        return newTransform
+    }
+
+    fun flipSelectedOverlay(): ClipTransform? {
+        val selectedId = _uiState.value.selectedOverlayId ?: return null
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return null
+        val item = _layerItems[idx]
+
+        val current = item.transform
+        val newTransform = current.copy(isFlippedH = !current.isFlippedH)
+
+        pushUndoState()
+        _layerItems[idx] = item.copy(transform = newTransform)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+        return newTransform
+    }
+
+    fun liveOverlayTrim(itemId: String, newStartUs: Long, newEndUs: Long) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        if (newEndUs - newStartUs < OverlayItem.MIN_DURATION_US) return
+        _layerItems[idx] = item.copy(startUs = newStartUs, endUs = newEndUs)
+        syncLayerPlan()
+    }
+
+    fun commitOverlayTrim(itemId: String, newStartUs: Long, newEndUs: Long) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        if (newEndUs - newStartUs < OverlayItem.MIN_DURATION_US) return
+
+        pushUndoState()
+        _layerItems[idx] = item.copy(startUs = newStartUs, endUs = newEndUs)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+    }
+
+    fun setOverlayOpacityLive(itemId: String, opacity: Float) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        val clamped = opacity.coerceIn(0f, 1f)
+        _layerItems[idx] = item.copy(transform = item.transform.copy(opacity = clamped))
+        syncLayerPlan()
+    }
+
+    fun commitOverlayOpacity(itemId: String, opacity: Float) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        val clamped = opacity.coerceIn(0f, 1f)
+
+        pushUndoState()
+        _layerItems[idx] = item.copy(transform = item.transform.copy(opacity = clamped))
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
+    }
+
+    fun setOverlayTransformLive(itemId: String, transform: ClipTransform) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        _layerItems[idx] = item.copy(transform = transform)
+        syncLayerPlan()
+    }
+
+    fun commitOverlayTransform(itemId: String, transform: ClipTransform) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+
+        pushUndoState()
+        _layerItems[idx] = item.copy(transform = transform)
+        syncLayerPlan()
+        updateProject(_uiState.value.project, recordUndo = false)
     }
 
     fun applyTransformToAll(sourceClipId: String) {
@@ -1595,7 +1814,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 selectedClipIndex = index,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                selectedOverlayId = null
             )
         }
     }
@@ -1604,7 +1824,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 selectedJunctionIndex = index,
-                selectedClipIndex = null
+                selectedClipIndex = null,
+                selectedOverlayId = null
             )
         }
     }
@@ -1613,7 +1834,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 selectedClipIndex = null,
-                selectedJunctionIndex = null
+                selectedJunctionIndex = null,
+                selectedOverlayId = null
             )
         }
     }
@@ -1641,6 +1863,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
+                selectedOverlayId = null,
                 isMainTrackMuted = isAllMuted
             )
         }
@@ -1692,6 +1915,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     currentMs = 0L,
                     selectedClipIndex = null,
                     selectedJunctionIndex = null,
+                    selectedOverlayId = null,
                     isMainTrackMuted = false,
                     canUndo = false,
                     canRedo = false
@@ -1740,7 +1964,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         currentScreen = AppScreen.EDITOR,
                         currentMs = 0L,
                         selectedClipIndex = null,
-                        selectedJunctionIndex = null
+                        selectedJunctionIndex = null,
+                        selectedOverlayId = null
                     )
                 }
                 previewEngine?.seekTo(0L)
@@ -1940,6 +2165,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
+                selectedOverlayId = null,
                 isMainTrackMuted = isAllMuted
             )
         }
@@ -1995,6 +2221,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedClipIndex = null,
                 selectedJunctionIndex = null,
+                selectedOverlayId = null,
                 isMainTrackMuted = isAllMuted
             )
         }

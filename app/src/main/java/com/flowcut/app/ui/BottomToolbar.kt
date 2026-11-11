@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun BottomToolbar(
     isClipSelected: Boolean = false,
+    isOverlaySelected: Boolean = false,
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
     onVolumeClick: () -> Unit = {},
@@ -403,6 +404,193 @@ fun BottomToolbar(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "FREEZE",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Delete Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onDeleteClipClick?.invoke() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "DELETE",
+                            tint = colors.danger,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "DELETE",
+                            color = colors.danger,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        } else if (isOverlaySelected) {
+            // Contextual Selected Overlay Toolbar (SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(64.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 1. Back / Dismiss button on the far left
+                Box(
+                    modifier = Modifier
+                        .width(48.dp)
+                        .fillMaxHeight()
+                        .clickable { onClearSelection() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Dismiss",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // Vertical separator
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(24.dp)
+                        .background(colors.border)
+                )
+
+                // Actions: SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Split Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onSplitClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                            contentDescription = "SPLIT",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "SPLIT",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Copy Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onCopyClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "COPY",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "COPY",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Opacity Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onOpacityClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Opacity,
+                            contentDescription = "OPACITY",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "OPACITY",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Rotate Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onRotateClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.RotateRight,
+                            contentDescription = "ROTATE",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ROTATE",
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Flip Action
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .fillMaxHeight()
+                            .clickable { onFlipClick() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Flip,
+                            contentDescription = "FLIP",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "FLIP",
                             color = colors.textPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold

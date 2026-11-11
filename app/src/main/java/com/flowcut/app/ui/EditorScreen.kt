@@ -2,6 +2,7 @@ package com.flowcut.app.ui
 
 import android.view.View
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,22 +23,31 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +58,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import kotlin.math.roundToInt
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -894,6 +905,367 @@ fun EditorScreen(
                         }
                     }
 
+                    // On-Preview Free Transform Gestures overlay when an Overlay Item is selected
+                    if (hasClips && selectedClipIndex == null && vmUiState?.selectedOverlayId != null) {
+                        val activeOverlayId = vmUiState.selectedOverlayId
+                        val activeOverlay = resolvedViewModel?.getOverlayItem(activeOverlayId)
+                        if (activeOverlay != null && activeOverlay.type != com.flowcut.app.engine.LayerType.FILTER) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .pointerInput(activeOverlayId) {
+                                        var lastTapTimeMs = 0L
+                                        var lastTapPosition = Offset.Zero
+
+                                        awaitEachGesture {
+                                            val down = awaitFirstDown(requireUnconsumed = false)
+                                            val downTime = System.currentTimeMillis()
+                                            val downPos = down.position
+                                            var isDragOrTransform = false
+
+                                            val initialTransform = activeOverlay.transform
+
+                                            var rawPanX = initialTransform.panX
+                                            var rawPanY = initialTransform.panY
+                                            var rawScale = initialTransform.scale
+                                            var rawRotationDeg = initialTransform.rotationDeg
+                                            val isFlippedH = initialTransform.isFlippedH
+
+                                            var currentTransform = initialTransform
+                                            var totalMovedPx = 0f
+
+                                            var prevSnapCenterX = false
+                                            var prevSnapCenterY = false
+                                            var prevSnapEdgeLeft = false
+                                            var prevSnapEdgeRight = false
+                                            var prevSnapEdgeTop = false
+                                            var prevSnapEdgeBottom = false
+                                            var prevSnapScale100 = false
+                                            var prevSnapRotationCardinal = false
+
+                                            do {
+                                                val event = awaitPointerEvent()
+                                                val pressedList = event.changes.filter { it.pressed }
+                                                if (pressedList.isEmpty()) break
+
+                                                val outerW = size.width.toFloat().coerceAtLeast(1f)
+                                                val outerH = size.height.toFloat().coerceAtLeast(1f)
+                                                val previewH = outerH
+                                                val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+
+                                                if (pressedList.size == 1) {
+                                                    val p = pressedList[0]
+                                                    val dx = p.position.x - p.previousPosition.x
+                                                    val dy = p.position.y - p.previousPosition.y
+                                                    val moveDist = kotlin.math.sqrt(dx * dx + dy * dy)
+                                                    totalMovedPx += moveDist
+
+                                                    if (totalMovedPx > 10f) {
+                                                        isDragOrTransform = true
+                                                        p.consume()
+
+                                                        rawPanX = (rawPanX + dx / previewW).coerceIn(-1.5f, 1.5f)
+                                                        rawPanY = (rawPanY - dy / previewH).coerceIn(-1.5f, 1.5f)
+                                                    }
+                                                } else if (pressedList.size >= 2) {
+                                                    isDragOrTransform = true
+                                                    val p1 = pressedList[0]
+                                                    val p2 = pressedList[1]
+                                                    p1.consume()
+                                                    p2.consume()
+
+                                                    val prevPos1 = p1.previousPosition
+                                                    val prevPos2 = p2.previousPosition
+                                                    val currPos1 = p1.position
+                                                    val currPos2 = p2.position
+
+                                                    // 1. Pan (centroid delta)
+                                                    val prevCenter = (prevPos1 + prevPos2) / 2f
+                                                    val currCenter = (currPos1 + currPos2) / 2f
+                                                    val dPan = currCenter - prevCenter
+                                                    rawPanX = (rawPanX + dPan.x / previewW).coerceIn(-1.5f, 1.5f)
+                                                    rawPanY = (rawPanY - dPan.y / previewH).coerceIn(-1.5f, 1.5f)
+
+                                                    // 2. Zoom (distance ratio)
+                                                    val prevDist = (prevPos1 - prevPos2).getDistance()
+                                                    val currDist = (currPos1 - currPos2).getDistance()
+                                                    val zoomRatio = if (prevDist > 1f) currDist / prevDist else 1f
+                                                    rawScale = (rawScale * zoomRatio).coerceIn(0.25f, 5.0f)
+
+                                                    // 3. Twist (rotation delta)
+                                                    val prevAngle = Math.toDegrees(kotlin.math.atan2((prevPos2.y - prevPos1.y).toDouble(), (prevPos2.x - prevPos1.x).toDouble())).toFloat()
+                                                    val currAngle = Math.toDegrees(kotlin.math.atan2((currPos2.y - currPos1.y).toDouble(), (currPos2.x - currPos1.x).toDouble())).toFloat()
+                                                    var angleDelta = currAngle - prevAngle
+                                                    while (angleDelta > 180f) angleDelta -= 360f
+                                                    while (angleDelta < -180f) angleDelta += 360f
+                                                    rawRotationDeg += angleDelta
+                                                }
+
+                                                if (isDragOrTransform) {
+                                                    // --- Compute Snapping from Raw Accumulators ---
+                                                    // 1. Rotation Snap
+                                                    val normRot = ((rawRotationDeg % 360f) + 360f) % 360f
+                                                    val nearestCardinal = (Math.round(normRot / 90f) * 90f).toFloat()
+                                                    val diffRot = kotlin.math.abs(normRot - nearestCardinal)
+                                                    val snapRotationCardinal = diffRot <= 3.0f
+                                                    val snappedRotationDeg = if (snapRotationCardinal) (nearestCardinal % 360f) else rawRotationDeg
+
+                                                    // 2. Scale Snap
+                                                    val diffScale = kotlin.math.abs(rawScale - 1.0f)
+                                                    val snapScale100 = diffScale < 0.04f
+                                                    val snappedScale = if (snapScale100) 1.0f else rawScale
+
+                                                    // 3. Effective Dimensions for Edge Snapping
+                                                    val aScreen = 9.0f / 16.0f
+                                                    val aClip = 1.0f
+
+                                                    val cardinalAngle = ((Math.round(snappedRotationDeg / 90f) * 90) % 360 + 360) % 360
+                                                    val isRot90or270 = (cardinalAngle == 90 || cardinalAngle == 270) && kotlin.math.abs(snappedRotationDeg - cardinalAngle) < 15f
+                                                    val effAspect = if (isRot90or270) (1.0f / aClip) else aClip
+
+                                                    val baseHw = if (effAspect >= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
+                                                    val baseHh = if (effAspect >= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
+                                                    val hw = baseHw * snappedScale
+                                                    val hh = baseHh * snappedScale
+
+                                                    // Target pan offsets for edge flush alignment
+                                                    val targetPanXLeft = hw - 0.5f
+                                                    val targetPanXRight = 0.5f - hw
+                                                    val targetPanYBottom = hh - 0.5f
+                                                    val targetPanYTop = 0.5f - hh
+
+                                                    // 4. Center & Edge Snap for panX
+                                                    var snappedPanX = rawPanX
+                                                    var snapCenterX = false
+                                                    var snapEdgeLeft = false
+                                                    var snapEdgeRight = false
+
+                                                    if (kotlin.math.abs(rawPanX) < 0.035f) {
+                                                        snappedPanX = 0f
+                                                        snapCenterX = true
+                                                    } else if (kotlin.math.abs(rawPanX - targetPanXLeft) < 0.035f) {
+                                                        snappedPanX = targetPanXLeft
+                                                        snapEdgeLeft = true
+                                                    } else if (kotlin.math.abs(rawPanX - targetPanXRight) < 0.035f) {
+                                                        snappedPanX = targetPanXRight
+                                                        snapEdgeRight = true
+                                                    }
+
+                                                    // 5. Center & Edge Snap for panY
+                                                    var snappedPanY = rawPanY
+                                                    var snapCenterY = false
+                                                    var snapEdgeBottom = false
+                                                    var snapEdgeTop = false
+
+                                                    if (kotlin.math.abs(rawPanY) < 0.035f) {
+                                                        snappedPanY = 0f
+                                                        snapCenterY = true
+                                                    } else if (kotlin.math.abs(rawPanY - targetPanYBottom) < 0.035f) {
+                                                        snappedPanY = targetPanYBottom
+                                                        snapEdgeBottom = true
+                                                    } else if (kotlin.math.abs(rawPanY - targetPanYTop) < 0.035f) {
+                                                        snappedPanY = targetPanYTop
+                                                        snapEdgeTop = true
+                                                    }
+
+                                                    // --- Haptic Feedback Tick on State Transition ---
+                                                    val newlySnapped = (!prevSnapCenterX && snapCenterX) ||
+                                                            (!prevSnapCenterY && snapCenterY) ||
+                                                            (!prevSnapEdgeLeft && snapEdgeLeft) ||
+                                                            (!prevSnapEdgeRight && snapEdgeRight) ||
+                                                            (!prevSnapEdgeTop && snapEdgeTop) ||
+                                                            (!prevSnapEdgeBottom && snapEdgeBottom) ||
+                                                            (!prevSnapScale100 && snapScale100) ||
+                                                            (!prevSnapRotationCardinal && snapRotationCardinal)
+
+                                                    if (newlySnapped) {
+                                                        try {
+                                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                        } catch (_: Throwable) {}
+                                                    }
+
+                                                    prevSnapCenterX = snapCenterX
+                                                    prevSnapCenterY = snapCenterY
+                                                    prevSnapEdgeLeft = snapEdgeLeft
+                                                    prevSnapEdgeRight = snapEdgeRight
+                                                    prevSnapEdgeTop = snapEdgeTop
+                                                    prevSnapEdgeBottom = snapEdgeBottom
+                                                    prevSnapScale100 = snapScale100
+                                                    prevSnapRotationCardinal = snapRotationCardinal
+
+                                                    // --- Update Compose Guide Overlay State ---
+                                                    isTransforming = true
+                                                    guideSnapCenterX = snapCenterX
+                                                    guideSnapCenterY = snapCenterY
+                                                    guideSnapEdgeLeft = snapEdgeLeft
+                                                    guideSnapEdgeRight = snapEdgeRight
+                                                    guideSnapEdgeTop = snapEdgeTop
+                                                    guideSnapEdgeBottom = snapEdgeBottom
+
+                                                    // Badge text: show rotation or scale
+                                                    guideBadgeText = when {
+                                                        snapRotationCardinal -> "${snappedRotationDeg.toInt()}°"
+                                                        snapScale100 -> "100%"
+                                                        pressedList.size >= 2 && kotlin.math.abs(rawRotationDeg - initialTransform.rotationDeg) > 1.5f ->
+                                                            "${Math.round(snappedRotationDeg)}°"
+                                                        pressedList.size >= 2 && kotlin.math.abs(rawScale - initialTransform.scale) > 0.03f ->
+                                                            "${Math.round(snappedScale * 100f)}%"
+                                                        else -> null
+                                                    }
+
+                                                    currentTransform = currentTransform.copy(
+                                                        scale = snappedScale,
+                                                        panX = snappedPanX,
+                                                        panY = snappedPanY,
+                                                        rotationDeg = snappedRotationDeg,
+                                                        isFlippedH = isFlippedH
+                                                    )
+                                                    resolvedViewModel?.setOverlayTransformLive(activeOverlayId, currentTransform)
+                                                    previewRenderer.requestRender()
+                                                    frameDriver.wake()
+                                                }
+                                            } while (true)
+
+                                            // Clear visual guides immediately on gesture end
+                                            isTransforming = false
+                                            guideSnapCenterX = false
+                                            guideSnapCenterY = false
+                                            guideSnapEdgeLeft = false
+                                            guideSnapEdgeRight = false
+                                            guideSnapEdgeTop = false
+                                            guideSnapEdgeBottom = false
+                                            guideBadgeText = null
+
+                                            // Gesture completed (all fingers up)
+                                            if (isDragOrTransform) {
+                                                resolvedViewModel?.commitOverlayTransform(activeOverlayId, currentTransform)
+                                                previewRenderer.requestRender()
+                                                frameDriver.wake()
+                                            } else {
+                                                // Check for double-tap
+                                                val upTime = System.currentTimeMillis()
+                                                val tapDuration = upTime - downTime
+                                                val tapDist = (downPos - lastTapPosition).getDistance()
+
+                                                if (tapDuration < 300L && (upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
+                                                    // Double-tap detected: reset transform!
+                                                    val resetTransform = currentTransform.copy(
+                                                        scale = 1.0f,
+                                                        panX = 0f,
+                                                        panY = 0f,
+                                                        rotationDeg = 0f
+                                                    )
+                                                    resolvedViewModel?.commitOverlayTransform(activeOverlayId, resetTransform)
+                                                    previewRenderer.requestRender()
+                                                    frameDriver.wake()
+                                                    lastTapTimeMs = 0L
+                                                } else if (tapDuration < 300L) {
+                                                    lastTapTimeMs = upTime
+                                                    lastTapPosition = downPos
+                                                }
+                                            }
+                                        }
+                                    }
+                            ) {
+                                // 9:16 Guide Overlay Canvas & Badge
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxHeight()
+                                        .aspectRatio(9f / 16f)
+                                        .align(Alignment.Center)
+                                ) {
+                                    if (isTransforming) {
+                                        Canvas(modifier = Modifier.fillMaxSize()) {
+                                            val strokeWidth1_5 = 1.5.dp.toPx()
+                                            val strokeWidth2 = 2.dp.toPx()
+                                            val cyanColor = Color(0xFF00E5FF)
+
+                                            // Vertical Center Guide
+                                            if (guideSnapCenterX) {
+                                                drawLine(
+                                                    color = cyanColor,
+                                                    start = Offset(size.width / 2f, 0f),
+                                                    end = Offset(size.width / 2f, size.height),
+                                                    strokeWidth = strokeWidth2
+                                                )
+                                            }
+
+                                            // Horizontal Center Guide
+                                            if (guideSnapCenterY) {
+                                                drawLine(
+                                                    color = cyanColor,
+                                                    start = Offset(0f, size.height / 2f),
+                                                    end = Offset(size.width, size.height / 2f),
+                                                    strokeWidth = strokeWidth2
+                                                )
+                                            }
+
+                                            // Left Screen Edge Guide
+                                            if (guideSnapEdgeLeft) {
+                                                drawLine(
+                                                    color = cyanColor,
+                                                    start = Offset(0f, 0f),
+                                                    end = Offset(0f, size.height),
+                                                    strokeWidth = strokeWidth1_5
+                                                )
+                                            }
+
+                                            // Right Screen Edge Guide
+                                            if (guideSnapEdgeRight) {
+                                                drawLine(
+                                                    color = cyanColor,
+                                                    start = Offset(size.width, 0f),
+                                                    end = Offset(size.width, size.height),
+                                                    strokeWidth = strokeWidth1_5
+                                                )
+                                            }
+
+                                            // Top Screen Edge Guide
+                                            if (guideSnapEdgeTop) {
+                                                drawLine(
+                                                    color = cyanColor,
+                                                    start = Offset(0f, 0f),
+                                                    end = Offset(size.width, 0f),
+                                                    strokeWidth = strokeWidth1_5
+                                                )
+                                            }
+
+                                            // Bottom Screen Edge Guide
+                                            if (guideSnapEdgeBottom) {
+                                                drawLine(
+                                                    color = cyanColor,
+                                                    start = Offset(0f, size.height),
+                                                    end = Offset(size.width, size.height),
+                                                    strokeWidth = strokeWidth1_5
+                                                )
+                                            }
+                                        }
+
+                                        // Snapping Info Badge
+                                        if (guideBadgeText != null) {
+                                            Surface(
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = Color(0xCC141414),
+                                                border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.6f)),
+                                                modifier = Modifier
+                                                    .align(Alignment.TopCenter)
+                                                    .padding(top = 12.dp)
+                                            ) {
+                                                Text(
+                                                    text = guideBadgeText!!,
+                                                    color = Color(0xFF00E5FF),
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Floating 3-Second "Apply to All" Pill in bottom-right corner of preview
                     if (hasClips && selectedClipIndex != null && showApplyToAll) {
                         Surface(
@@ -1004,9 +1376,10 @@ fun EditorScreen(
 
                 // 4. Timeline block: 240 dp (New Core TimelineCanvas or legacy TimelineBlock)
                 if (USE_NEW_CORE) {
-                    val selection = remember(selectedClipIndex, selectedJunctionIndex) {
+                    val selection = remember(selectedClipIndex, selectedJunctionIndex, vmUiState?.selectedOverlayId) {
                         selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
                             ?: selectedJunctionIndex?.let { TimelineSelection.JunctionSelected(it) }
+                            ?: vmUiState?.selectedOverlayId?.let { TimelineSelection.OverlaySelected(it) }
                             ?: TimelineSelection.None
                     }
                     Box(
@@ -1022,10 +1395,14 @@ fun EditorScreen(
                             zoomState = zoomState,
                             frameTick = frameTick,
                             selection = selection,
+                            overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
                             onSelect = { sel ->
                                 when (sel) {
                                     is TimelineSelection.ClipSelected -> onSelectClip(sel.index)
                                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
+                                    is TimelineSelection.OverlaySelected -> {
+                                        resolvedViewModel?.selectOverlay(sel.itemId)
+                                    }
                                     TimelineSelection.None -> onDeselectAll()
                                     is TimelineSelection.LaneItemSelected -> {}
                                     is TimelineSelection.TrimHandleLeft -> {}
@@ -1053,6 +1430,16 @@ fun EditorScreen(
                             onCommitTrim = { k, inUs, outUs, durMs ->
                                 resolvedViewModel?.commitClipTrim(k, inUs, outUs, durMs)
                                 onCommitTrim(k, inUs, outUs, durMs)
+                            },
+                            onCommitOverlayTrim = { id, startUs, endUs ->
+                                resolvedViewModel?.commitOverlayTrim(id, startUs, endUs)
+                                previewRenderer.requestRender()
+                                frameDriver.wake()
+                            },
+                            onLiveOverlayTrim = { id, startUs, endUs ->
+                                resolvedViewModel?.liveOverlayTrim(id, startUs, endUs)
+                                previewRenderer.requestRender()
+                                frameDriver.wake()
                             },
                             onTrimPreview = { previewUs ->
                                 previewRenderer.trimPreviewTimeUs = previewUs
@@ -1113,10 +1500,20 @@ fun EditorScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 7. Bottom toolbar: 64 dp + navigation bar inset (Contextual Main vs Clip toolbar)
+            // 7. Bottom toolbar: 64 dp + navigation bar inset (Contextual Main vs Clip vs Overlay toolbar)
             BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
-                onSplitClick = onSplitClick ?: handleSplit,
+                isOverlaySelected = vmUiState?.selectedOverlayId != null,
+                onSplitClick = onSplitClick ?: {
+                    if (vmUiState?.selectedOverlayId != null) {
+                        val playheadUs = playbackController.playhead.timeUs
+                        resolvedViewModel?.splitSelectedOverlayAtPlayhead(playheadUs)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    } else {
+                        handleSplit()
+                    }
+                },
                 onTrimClick = handleOpenTrim,
                 onVolumeClick = {
                     isAdjustSheetVisible = false
@@ -1154,26 +1551,38 @@ fun EditorScreen(
                     isBackgroundSheetVisible = true
                 },
                 onRotateClick = onRotateClip ?: {
-                    resolvedViewModel?.rotateSelectedClip()
-                    if (USE_NEW_CORE) {
-                        resolvedViewModel?.let { vm ->
-                            snapshotHolder.current = vm.getSnapshot()
+                    if (vmUiState?.selectedOverlayId != null) {
+                        resolvedViewModel?.rotateSelectedOverlay()
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    } else {
+                        resolvedViewModel?.rotateSelectedClip()
+                        if (USE_NEW_CORE) {
+                            resolvedViewModel?.let { vm ->
+                                snapshotHolder.current = vm.getSnapshot()
+                            }
                         }
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        triggerApplyToAllPill()
                     }
-                    previewRenderer.requestRender()
-                    frameDriver.wake()
-                    triggerApplyToAllPill()
                 },
                 onFlipClick = onFlipClip ?: {
-                    resolvedViewModel?.flipSelectedClip()
-                    if (USE_NEW_CORE) {
-                        resolvedViewModel?.let { vm ->
-                            snapshotHolder.current = vm.getSnapshot()
+                    if (vmUiState?.selectedOverlayId != null) {
+                        resolvedViewModel?.flipSelectedOverlay()
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    } else {
+                        resolvedViewModel?.flipSelectedClip()
+                        if (USE_NEW_CORE) {
+                            resolvedViewModel?.let { vm ->
+                                snapshotHolder.current = vm.getSnapshot()
+                            }
                         }
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        triggerApplyToAllPill()
                     }
-                    previewRenderer.requestRender()
-                    frameDriver.wake()
-                    triggerApplyToAllPill()
                 },
                 onOpacityClick = {
                     if (playbackController.playhead.mode == PlayMode.PLAYING) {
@@ -1189,7 +1598,11 @@ fun EditorScreen(
                     isOpacitySheetVisible = true
                 },
                 onCopyClick = {
-                    if (selectedClipIndex != null) {
+                    if (vmUiState?.selectedOverlayId != null) {
+                        resolvedViewModel?.copySelectedOverlay()
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    } else if (selectedClipIndex != null) {
                         val result = resolvedViewModel?.duplicateClip(selectedClipIndex)
                         if (result != null) {
                             if (USE_NEW_CORE) {
@@ -1220,7 +1633,13 @@ fun EditorScreen(
                         }
                     }
                 },
-                onDeleteClipClick = selectedClipIndex?.let { k ->
+                onDeleteClipClick = if (vmUiState?.selectedOverlayId != null) {
+                    {
+                        resolvedViewModel?.deleteSelectedOverlay()
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    }
+                } else selectedClipIndex?.let { k ->
                     {
                         onDeleteClip(k)
                         if (USE_NEW_CORE) {
@@ -1439,6 +1858,169 @@ fun EditorScreen(
                 },
                 onDismiss = { isOpacitySheetVisible = false }
             )
+        }
+
+        // Opacity BottomSheet (0% to 100%) for selected overlay item
+        if (isOpacitySheetVisible && selectedClipIndex == null && vmUiState?.selectedOverlayId != null) {
+            val activeOverlayId = vmUiState.selectedOverlayId
+            val activeOverlay = resolvedViewModel?.getOverlayItem(activeOverlayId)
+            if (activeOverlay != null) {
+                val origOpacity = remember(activeOverlayId) { activeOverlay.transform.opacity }
+                var sliderOpacity by remember(activeOverlayId) { mutableFloatStateOf(origOpacity) }
+                var isCommitted by remember { mutableStateOf(false) }
+
+                BackHandler {
+                    if (!isCommitted) {
+                        resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    }
+                    isOpacitySheetVisible = false
+                }
+
+                DisposableEffect(activeOverlayId) {
+                    onDispose {
+                        if (!isCommitted) {
+                            resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(WindowInsets.navigationBars),
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                    color = colors.surface1,
+                    shadowElevation = 16.dp,
+                    border = BorderStroke(1.dp, colors.border)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 16.dp)
+                    ) {
+                        // Header: Close (✕), Title + live %, Reset (100%), Done (✓)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
+                                    previewRenderer.requestRender()
+                                    frameDriver.wake()
+                                    isOpacitySheetVisible = false
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = colors.textSecondary
+                                )
+                            }
+
+                            val percent = (sliderOpacity * 100f).roundToInt()
+                            Text(
+                                text = "Opacity $percent%",
+                                color = colors.textPrimary,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(
+                                    onClick = {
+                                        sliderOpacity = 1.0f
+                                        resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, 1.0f)
+                                        previewRenderer.requestRender()
+                                        frameDriver.wake()
+                                    }
+                                ) {
+                                    Text(
+                                        text = "Reset",
+                                        color = colors.accent,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        isCommitted = true
+                                        resolvedViewModel?.commitOverlayOpacity(activeOverlayId, sliderOpacity)
+                                        previewRenderer.requestRender()
+                                        frameDriver.wake()
+                                        isOpacitySheetVisible = false
+                                    },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Done",
+                                        tint = colors.accent
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Slider: 0% to 100%
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "0%",
+                                color = colors.textSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Slider(
+                                value = sliderOpacity,
+                                onValueChange = { newOp ->
+                                    sliderOpacity = newOp
+                                    resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, newOp)
+                                    previewRenderer.requestRender()
+                                    frameDriver.wake()
+                                },
+                                onValueChangeFinished = {
+                                    resolvedViewModel?.commitOverlayOpacity(activeOverlayId, sliderOpacity)
+                                    previewRenderer.requestRender()
+                                    frameDriver.wake()
+                                },
+                                valueRange = 0.0f..1.0f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = colors.accent,
+                                    activeTrackColor = colors.accent,
+                                    inactiveTrackColor = colors.surface2
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Text(
+                                text = "100%",
+                                color = colors.textSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
