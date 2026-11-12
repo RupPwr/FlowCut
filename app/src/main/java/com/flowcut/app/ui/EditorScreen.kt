@@ -67,6 +67,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -78,6 +79,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import com.flowcut.app.editor.EditorUiState
+import com.flowcut.app.editor.EditorViewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -1138,6 +1141,7 @@ fun EditorScreen(
 
                     val activeOverlayId = vmUiState?.selectedOverlayId
                     val activeOverlay = if (activeOverlayId != null) resolvedViewModel?.getOverlayItem(activeOverlayId) else null
+                    val animEvaluator = remember { com.flowcut.app.engine.AnimatedTransformEvaluator() }
                     val isSelectedOverlayActiveAtPlayhead = run {
                         val tick = frameTick.longValue
                         val playheadUs = playbackController.playhead.timeUs
@@ -1570,7 +1574,12 @@ fun EditorScreen(
                                             val downPos = down.position
                                             var isDragOrTransform = false
 
-                                            val initialTransform = activeOverlay.transform
+                                            val currentPlayheadUs = playbackController.playhead.timeUs
+                                            val initialTransform = if (activeOverlay.keyframes.isNotEmpty()) {
+                                                animEvaluator.evaluate(activeOverlay, currentPlayheadUs)
+                                            } else {
+                                                activeOverlay.transform
+                                            }
 
                                             var rawPanX = initialTransform.panX
                                             var rawPanY = initialTransform.panY
@@ -1888,7 +1897,7 @@ fun EditorScreen(
                                                         rotationDeg = snappedRotationDeg,
                                                         isFlippedH = isFlippedH
                                                     )
-                                                    resolvedViewModel?.setOverlayTransformLive(activeOverlayId, currentTransform)
+                                                    resolvedViewModel?.setOverlayTransformLive(activeOverlayId, currentTransform, currentPlayheadUs)
                                                     previewRenderer.requestRender()
                                                     frameDriver.wake()
                                                 }
@@ -1907,7 +1916,7 @@ fun EditorScreen(
                                             // Gesture completed (all fingers up)
                                             if (isDragOrTransform) {
                                                 if (activeHandle == 0 || activeHandle == 4 || activeHandle == 5) {
-                                                    resolvedViewModel?.commitOverlayTransform(activeOverlayId, currentTransform)
+                                                    resolvedViewModel?.commitOverlayTransform(activeOverlayId, currentTransform, currentPlayheadUs)
                                                     previewRenderer.requestRender()
                                                     frameDriver.wake()
                                                 }
@@ -1949,7 +1958,7 @@ fun EditorScreen(
                                                                     panY = 0f,
                                                                     rotationDeg = 0f
                                                                 )
-                                                                resolvedViewModel?.commitOverlayTransform(activeOverlayId, resetTransform)
+                                                                resolvedViewModel?.commitOverlayTransform(activeOverlayId, resetTransform, currentPlayheadUs)
                                                                 previewRenderer.requestRender()
                                                                 frameDriver.wake()
                                                                 lastTapTimeMs = 0L
@@ -2001,6 +2010,12 @@ fun EditorScreen(
                                     // Interactive CapCut-Style Selection Frame + 5 Action Badges around Selected Overlay
                                     Canvas(modifier = Modifier.fillMaxSize()) {
                                         val selOverlay = activeOverlay
+                                        val currentPlayhead = playbackController.playhead.timeUs
+                                        val effTransform = if (selOverlay.keyframes.isNotEmpty()) {
+                                            animEvaluator.evaluate(selOverlay, currentPlayhead)
+                                        } else {
+                                            selOverlay.transform
+                                        }
                                         val displayText = if (selOverlay.text.isBlank()) "Your Text" else selOverlay.text
                                         val aTex: Float = when (selOverlay.type) {
                                                 com.flowcut.app.engine.LayerType.STICKER -> 1.0f
@@ -2027,7 +2042,7 @@ fun EditorScreen(
                                                 hh *= factor
                                             }
 
-                                            val scale = selOverlay.transform.scale.coerceIn(0.01f, 10.0f)
+                                            val scale = effTransform.scale.coerceIn(0.01f, 10.0f)
                                             val rawQuadW = hw * scale * size.width
                                             val rawQuadH = hh * scale * size.width
                                             val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
@@ -2040,11 +2055,11 @@ fun EditorScreen(
                                             val handleBoxW = boxW.coerceAtLeast(handleSeparationMin)
                                             val handleBoxH = boxH.coerceAtLeast(handleSeparationMin)
 
-                                            val cx = size.width / 2f + selOverlay.transform.panX * size.width
-                                            val cy = size.height / 2f - selOverlay.transform.panY * size.height
+                                            val cx = size.width / 2f + effTransform.panX * size.width
+                                            val cy = size.height / 2f - effTransform.panY * size.height
 
                                             withTransform({
-                                                rotate(selOverlay.transform.rotationDeg, pivot = Offset(cx, cy))
+                                                rotate(effTransform.rotationDeg, pivot = Offset(cx, cy))
                                             }) {
                                                 val left = cx - boxW / 2f
                                                 val top = cy - boxH / 2f
@@ -2346,68 +2361,38 @@ fun EditorScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // 3. Playback row: 40 dp
-                PlaybackRow(
-                    modifier = Modifier.onGloballyPositioned { coords ->
-                        val rowBounds = coords.boundsInRoot()
-                        val btnWidth = 48f * density
-                        playPauseBoundsInRoot = androidx.compose.ui.geometry.Rect(
-                            left = rowBounds.right - btnWidth,
-                            top = rowBounds.top - (6f * density),
-                            right = rowBounds.right + (6f * density),
-                            bottom = rowBounds.bottom + (6f * density)
-                        )
-                    },
+                // 3. Playback row: 40 dp with Diamond Keyframe Button to the left of Undo
+                val currentFocus = vmUiState?.focusMode ?: TimelineFocusState.S0_NONE
+                val selection = remember(selectedClipIndex, selectedJunctionIndex, vmUiState?.selectedOverlayId) {
+                    selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
+                        ?: selectedJunctionIndex?.let { TimelineSelection.JunctionSelected(it) }
+                        ?: vmUiState?.selectedOverlayId?.let { TimelineSelection.OverlaySelected(it) }
+                        ?: TimelineSelection.None
+                }
+
+                TransportControlsRow(
+                    vmUiState = vmUiState,
+                    resolvedViewModel = resolvedViewModel,
+                    selection = selection,
+                    currentFocus = currentFocus,
+                    frameTick = frameTick,
+                    displayedMs = displayedMs,
+                    playbackController = playbackController,
+                    previewRenderer = previewRenderer,
+                    frameDriver = frameDriver,
+                    density = density,
                     canUndo = canUndo,
                     canRedo = canRedo,
-                    onUndoClick = {
-                        onUndoClick()
-                        if (USE_NEW_CORE) {
-                            resolvedViewModel?.let { vm ->
-                                snapshotHolder.current = vm.getSnapshot()
-                                frameDriver.wake()
-                                previewRenderer.requestRender()
-                            }
-                        }
-                    },
-                    onRedoClick = {
-                        onRedoClick()
-                        if (USE_NEW_CORE) {
-                            resolvedViewModel?.let { vm ->
-                                snapshotHolder.current = vm.getSnapshot()
-                                frameDriver.wake()
-                                previewRenderer.requestRender()
-                            }
-                        }
-                    },
-                    currentMs = displayedMs.longValue,
-                    totalMs = timeline.total,
+                    onUndoClick = onUndoClick,
+                    onRedoClick = onRedoClick,
+                    timelineTotalMs = timeline.total,
                     isPlaying = isPlaying,
-                    onPlayPauseClick = {
-                        if (USE_NEW_CORE) {
-                            if (playbackController.playhead.mode == PlayMode.PLAYING) {
-                                playbackController.pause()
-                                frameDriver.wake()
-                                onPlaybackStateChange(false)
-                            } else {
-                                val totalMs = snapshotHolder.current.totalMs
-                                if (totalMs > 0L && playbackController.playhead.timeUs >= msToUs(totalMs)) {
-                                    playbackController.seekTo(0L)
-                                }
-                                playbackController.play()
-                                frameDriver.wake()
-                                onPlaybackStateChange(true)
-                            }
-                        } else {
-                            onPlayPauseClick()
-                        }
-                    },
-                    onSeekScrub = { ms ->
-                        onSeekScrub(ms)
-                        if (USE_NEW_CORE) {
-                            playbackController.seekTo(msToUs(ms))
-                            frameDriver.wake()
-                        }
+                    onPlayPauseClick = onPlayPauseClick,
+                    onPlaybackStateChange = onPlaybackStateChange,
+                    onSeekScrub = onSeekScrub,
+                    snapshotHolder = snapshotHolder,
+                    onSetPlayPauseBounds = { bounds ->
+                        playPauseBoundsInRoot = bounds
                     }
                 )
 
@@ -2415,15 +2400,7 @@ fun EditorScreen(
 
                 // 4. Timeline block: constant fixed height (New Core TimelineCanvas or legacy TimelineBlock)
                 if (USE_NEW_CORE) {
-                    val currentFocus = vmUiState?.focusMode ?: TimelineFocusState.S0_NONE
                     val timelineHeight = 224.dp
-
-                    val selection = remember(selectedClipIndex, selectedJunctionIndex, vmUiState?.selectedOverlayId) {
-                        selectedClipIndex?.let { TimelineSelection.ClipSelected(it) }
-                            ?: selectedJunctionIndex?.let { TimelineSelection.JunctionSelected(it) }
-                            ?: vmUiState?.selectedOverlayId?.let { TimelineSelection.OverlaySelected(it) }
-                            ?: TimelineSelection.None
-                    }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -5641,5 +5618,214 @@ private fun EffectPinLayerSheet(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TransportControlsRow(
+    vmUiState: EditorUiState?,
+    resolvedViewModel: EditorViewModel?,
+    selection: TimelineSelection,
+    currentFocus: TimelineFocusState,
+    frameTick: MutableLongState,
+    displayedMs: MutableLongState,
+    playbackController: PlaybackController,
+    previewRenderer: PreviewRenderer,
+    frameDriver: FrameDriver,
+    density: Float,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    onUndoClick: () -> Unit,
+    onRedoClick: () -> Unit,
+    timelineTotalMs: Long,
+    isPlaying: Boolean,
+    onPlayPauseClick: () -> Unit,
+    onPlaybackStateChange: (Boolean) -> Unit,
+    onSeekScrub: (Long) -> Unit,
+    snapshotHolder: com.flowcut.app.core.timeline.SnapshotHolder,
+    onSetPlayPauseBounds: (androidx.compose.ui.geometry.Rect) -> Unit
+) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val tick = frameTick.longValue
+        val currentMs = displayedMs.longValue
+        val currentPlayheadUs = playbackController.playhead.timeUs
+        val allOverlayItems = resolvedViewModel?.layerItems ?: emptyList()
+
+        val targetKeyframeOverlay = remember(allOverlayItems, vmUiState?.selectedOverlayId, selection, currentFocus, currentPlayheadUs) {
+            val explicitId = vmUiState?.selectedOverlayId
+                ?: (selection as? TimelineSelection.OverlaySelected)?.itemId
+                ?: when (val fm = currentFocus) {
+                    is TimelineFocusState.S2_PIP_ITEM -> fm.itemId
+                    is TimelineFocusState.S3_STICKER_ITEM -> fm.itemId
+                    is TimelineFocusState.S4_TEXT_ITEM -> fm.itemId
+                    else -> null
+                }
+            val byId = explicitId?.let { id -> allOverlayItems.firstOrNull { it.id == id } }
+            val visualCandidate = byId?.takeIf {
+                it.type == com.flowcut.app.engine.LayerType.TEXT || it.type == com.flowcut.app.engine.LayerType.STICKER || it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
+            }
+            visualCandidate ?: allOverlayItems
+                .filter { (it.type == com.flowcut.app.engine.LayerType.TEXT || it.type == com.flowcut.app.engine.LayerType.STICKER || it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO) && currentPlayheadUs in it.startUs..it.endUs }
+                .maxByOrNull { it.zIndex }
+        }
+
+        val canKeyframe = targetKeyframeOverlay != null
+        val localUs = if (targetKeyframeOverlay != null) {
+            (currentPlayheadUs - targetKeyframeOverlay.startUs).coerceIn(0L, targetKeyframeOverlay.durationUs)
+        } else 0L
+        val isPlayheadInside = targetKeyframeOverlay != null && currentPlayheadUs in targetKeyframeOverlay.startUs..targetKeyframeOverlay.endUs
+        val hasKeyframeAtPlayhead = canKeyframe && isPlayheadInside && targetKeyframeOverlay!!.keyframes.any {
+            kotlin.math.abs(it.offsetUs - localUs) <= 50_000L
+        }
+
+        IconButton(
+            onClick = {
+                if (targetKeyframeOverlay != null) {
+                    if (vmUiState?.selectedOverlayId != targetKeyframeOverlay.id) {
+                        resolvedViewModel?.selectOverlay(targetKeyframeOverlay.id)
+                    }
+                    val effectivePlayheadUs = currentPlayheadUs.coerceIn(targetKeyframeOverlay.startUs, targetKeyframeOverlay.endUs)
+                    if (currentPlayheadUs != effectivePlayheadUs) {
+                        playbackController.seekTo(effectivePlayheadUs)
+                        frameDriver.wake()
+                    }
+                    val effLocalUs = (effectivePlayheadUs - targetKeyframeOverlay.startUs).coerceIn(0L, targetKeyframeOverlay.durationUs)
+                    val hasMatch = targetKeyframeOverlay.keyframes.any { kotlin.math.abs(it.offsetUs - effLocalUs) <= 50_000L }
+                    if (hasMatch) {
+                        resolvedViewModel?.removeKeyframeAtPlayhead(effectivePlayheadUs)
+                    } else {
+                        resolvedViewModel?.addOrUpdateKeyframeAtPlayhead(effectivePlayheadUs)
+                    }
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                } else {
+                    Toast.makeText(context, "Select a Text, Sticker, or PIP layer to add keyframes", Toast.LENGTH_SHORT).show()
+                }
+            },
+            enabled = true,
+            modifier = Modifier.size(40.dp)
+        ) {
+            Canvas(modifier = Modifier.size(24.dp)) {
+                val alpha = if (canKeyframe) 1f else 0.35f
+                val diamondColor = if (hasKeyframeAtPlayhead) Color(0xFFFF2D55).copy(alpha = alpha) else Color.White.copy(alpha = alpha)
+                val badgeColor = diamondColor
+
+                val cx = size.width * 0.42f
+                val cy = size.height * 0.5f
+                val r = 6f * density
+
+                val path = Path()
+                path.moveTo(cx, cy - r)
+                path.lineTo(cx + r, cy)
+                path.lineTo(cx, cy + r)
+                path.lineTo(cx - r, cy)
+                path.close()
+
+                if (hasKeyframeAtPlayhead) {
+                    drawPath(path = path, color = diamondColor)
+                } else {
+                    drawPath(path = path, color = diamondColor, style = Stroke(width = 1.6f * density))
+                }
+
+                // Badge + or - at upper right
+                val badgeX = size.width * 0.74f
+                val badgeY = size.height * 0.36f
+                val armLen = 2.8f * density
+
+                // Minus arm (horizontal line)
+                drawLine(
+                    color = badgeColor,
+                    start = Offset(badgeX - armLen, badgeY),
+                    end = Offset(badgeX + armLen, badgeY),
+                    strokeWidth = 1.8f * density,
+                    cap = StrokeCap.Round
+                )
+
+                // Plus vertical arm (if not hasKeyframeAtPlayhead)
+                if (!hasKeyframeAtPlayhead) {
+                    drawLine(
+                        color = badgeColor,
+                        start = Offset(badgeX, badgeY - armLen),
+                        end = Offset(badgeX, badgeY + armLen),
+                        strokeWidth = 1.8f * density,
+                        cap = StrokeCap.Round
+                    )
+                }
+            }
+        }
+
+        PlaybackRow(
+            modifier = Modifier
+                .weight(1f)
+                .onGloballyPositioned { coords ->
+                    val rowBounds = coords.boundsInRoot()
+                    val btnWidth = 48f * density
+                    onSetPlayPauseBounds(
+                        androidx.compose.ui.geometry.Rect(
+                            left = rowBounds.right - btnWidth,
+                            top = rowBounds.top - (6f * density),
+                            right = rowBounds.right + (6f * density),
+                            bottom = rowBounds.bottom + (6f * density)
+                        )
+                    )
+                },
+            canUndo = canUndo,
+            canRedo = canRedo,
+            onUndoClick = {
+                onUndoClick()
+                if (USE_NEW_CORE) {
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                        previewRenderer.requestRender()
+                    }
+                }
+            },
+            onRedoClick = {
+                onRedoClick()
+                if (USE_NEW_CORE) {
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                        frameDriver.wake()
+                        previewRenderer.requestRender()
+                    }
+                }
+            },
+            currentMs = displayedMs.longValue,
+            totalMs = timelineTotalMs,
+            isPlaying = isPlaying,
+            onPlayPauseClick = {
+                if (USE_NEW_CORE) {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    } else {
+                        val totalMs = snapshotHolder.current.totalMs
+                        if (totalMs > 0L && playbackController.playhead.timeUs >= msToUs(totalMs)) {
+                            playbackController.seekTo(0L)
+                        }
+                        playbackController.play()
+                        frameDriver.wake()
+                        onPlaybackStateChange(true)
+                    }
+                } else {
+                    onPlayPauseClick()
+                }
+            },
+            onSeekScrub = { ms ->
+                onSeekScrub(ms)
+                if (USE_NEW_CORE) {
+                    playbackController.seekTo(msToUs(ms))
+                    frameDriver.wake()
+                }
+            }
+        )
     }
 }

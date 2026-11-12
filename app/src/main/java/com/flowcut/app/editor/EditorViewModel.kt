@@ -15,6 +15,7 @@ import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.MainIndex
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.ActiveLayerSet
+import com.flowcut.app.engine.AnimatedTransformEvaluator
 import com.flowcut.app.engine.BackgroundType
 import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipColorAdjust
@@ -24,6 +25,7 @@ import com.flowcut.app.engine.ExportEngine
 import com.flowcut.app.engine.LayerTrackGroup
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
+import com.flowcut.app.engine.OverlayKeyframe
 import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.engine.canAddLayer
@@ -103,6 +105,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val clipImporter = ClipImporter(application)
     private val exportEngine = ExportEngine(application)
     private val undoStack = UndoStack()
+    private val animEvaluator = AnimatedTransformEvaluator()
 
     private val _uiState = MutableStateFlow(EditorUiState())
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
@@ -1234,7 +1237,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         pushUndoState()
 
-        val leftItem = item.copy(endUs = playheadUs, naturalDurationUs = item.naturalDurationUs)
+        val splitOffsetUs = playheadUs - item.startUs
+        val leftKeyframes = item.keyframes.filter { it.offsetUs <= splitOffsetUs }
+        val rightKeyframes = item.keyframes.filter { it.offsetUs >= splitOffsetUs }.map {
+            it.copy(offsetUs = (it.offsetUs - splitOffsetUs).coerceAtLeast(0L))
+        }
+
+        val leftItem = item.copy(endUs = playheadUs, naturalDurationUs = item.naturalDurationUs, keyframes = leftKeyframes)
         val rightId = UUID.randomUUID().toString()
         val topZ = getTopZIndex()
         val leftDurationUs = playheadUs - item.startUs
@@ -1249,7 +1258,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             endUs = item.endUs,
             sourceInUs = rightSourceInUs,
             naturalDurationUs = item.naturalDurationUs,
-            zIndex = topZ
+            zIndex = topZ,
+            keyframes = rightKeyframes
         )
 
         _layerItems[idx] = leftItem
@@ -1527,22 +1537,165 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         updateProject(_uiState.value.project, recordUndo = false)
     }
 
-    fun setOverlayTransformLive(itemId: String, transform: ClipTransform) {
+    fun resolveTargetVisualOverlay(playheadUs: Long): Pair<Int, OverlayItem>? {
+        val explicitId = _uiState.value.selectedOverlayId
+            ?: when (val fm = _uiState.value.focusMode) {
+                is TimelineFocusState.S2_PIP_ITEM -> fm.itemId
+                is TimelineFocusState.S3_STICKER_ITEM -> fm.itemId
+                is TimelineFocusState.S4_TEXT_ITEM -> fm.itemId
+                else -> null
+            }
+        if (explicitId != null) {
+            val idx = _layerItems.indexOfFirst { it.id == explicitId }
+            if (idx >= 0) {
+                val item = _layerItems[idx]
+                if (item.type == LayerType.TEXT || item.type == LayerType.STICKER ||
+                    item.type == LayerType.IMAGE || item.type == LayerType.VIDEO) {
+                    return Pair(idx, item)
+                }
+            }
+        }
+        // Fallback: topmost visual overlay under playheadUs
+        var topIdx = -1
+        var topItem: OverlayItem? = null
+        for (i in _layerItems.indices) {
+            val item = _layerItems[i]
+            if (item.type == LayerType.TEXT || item.type == LayerType.STICKER ||
+                item.type == LayerType.IMAGE || item.type == LayerType.VIDEO) {
+                if (playheadUs in item.startUs..item.endUs) {
+                    if (topItem == null || item.zIndex > topItem.zIndex) {
+                        topItem = item
+                        topIdx = i
+                    }
+                }
+            }
+        }
+        return if (topIdx >= 0 && topItem != null) Pair(topIdx, topItem) else null
+    }
+
+    fun addOrUpdateKeyframeAtPlayhead(playheadUs: Long): Boolean {
+        val resolved = resolveTargetVisualOverlay(playheadUs) ?: return false
+        val idx = resolved.first
+        val item = resolved.second
+
+        val effectivePlayheadUs = playheadUs.coerceIn(item.startUs, item.endUs)
+        val localUs = (effectivePlayheadUs - item.startUs).coerceIn(0L, item.durationUs)
+        val effTransform = animEvaluator.evaluate(item, effectivePlayheadUs)
+
+        pushUndoState()
+
+        val newKf = OverlayKeyframe(
+            offsetUs = localUs,
+            panX = effTransform.panX,
+            panY = effTransform.panY,
+            scale = effTransform.scale,
+            rotationDeg = effTransform.rotationDeg,
+            opacity = effTransform.opacity
+        )
+
+        val updated = item.keyframes.filterNot { kotlin.math.abs(it.offsetUs - localUs) <= 50_000L }.toMutableList()
+        updated.add(newKf)
+        updated.sortBy { it.offsetUs }
+
+        _layerItems[idx] = item.copy(keyframes = updated)
+        syncLayerPlan()
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = item.id,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null,
+                focusMode = when (item.type) {
+                    LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(item.id)
+                    LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(item.id)
+                    LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(item.id)
+                    else -> it.focusMode
+                }
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
+    }
+
+    fun removeKeyframeAtPlayhead(playheadUs: Long): Boolean {
+        val resolved = resolveTargetVisualOverlay(playheadUs) ?: return false
+        val idx = resolved.first
+        val item = resolved.second
+        if (item.keyframes.isEmpty()) return false
+
+        val effectivePlayheadUs = playheadUs.coerceIn(item.startUs, item.endUs)
+        val localUs = (effectivePlayheadUs - item.startUs).coerceIn(0L, item.durationUs)
+        val hasMatch = item.keyframes.any { kotlin.math.abs(it.offsetUs - localUs) <= 50_000L }
+        if (!hasMatch) return false
+
+        pushUndoState()
+        val updated = item.keyframes.filterNot { kotlin.math.abs(it.offsetUs - localUs) <= 50_000L }
+        _layerItems[idx] = item.copy(keyframes = updated)
+        syncLayerPlan()
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = item.id,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null,
+                focusMode = when (item.type) {
+                    LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(item.id)
+                    LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(item.id)
+                    LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(item.id)
+                    else -> it.focusMode
+                }
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
+    }
+
+    fun setOverlayTransformLive(itemId: String, transform: ClipTransform, playheadUs: Long? = null) {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val item = _layerItems[idx]
-        _layerItems[idx] = item.copy(transform = transform)
+        if (item.keyframes.isNotEmpty() && playheadUs != null && playheadUs >= item.startUs && playheadUs <= item.endUs) {
+            val localUs = (playheadUs - item.startUs).coerceIn(0L, item.durationUs)
+            val newKf = OverlayKeyframe(
+                offsetUs = localUs,
+                panX = transform.panX,
+                panY = transform.panY,
+                scale = transform.scale,
+                rotationDeg = transform.rotationDeg,
+                opacity = transform.opacity
+            )
+            val updated = item.keyframes.filterNot { kotlin.math.abs(it.offsetUs - localUs) <= 50_000L }.toMutableList()
+            updated.add(newKf)
+            updated.sortBy { it.offsetUs }
+            _layerItems[idx] = item.copy(keyframes = updated)
+        } else {
+            _layerItems[idx] = item.copy(transform = transform)
+        }
         syncLayerPlan()
     }
 
-    fun commitOverlayTransform(itemId: String, transform: ClipTransform) {
+    fun commitOverlayTransform(itemId: String, transform: ClipTransform, playheadUs: Long? = null) {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val item = _layerItems[idx]
 
         pushUndoState()
         val topZ = getTopZIndex()
-        _layerItems[idx] = item.copy(transform = transform, zIndex = topZ)
+        if (item.keyframes.isNotEmpty() && playheadUs != null && playheadUs >= item.startUs && playheadUs <= item.endUs) {
+            val localUs = (playheadUs - item.startUs).coerceIn(0L, item.durationUs)
+            val newKf = OverlayKeyframe(
+                offsetUs = localUs,
+                panX = transform.panX,
+                panY = transform.panY,
+                scale = transform.scale,
+                rotationDeg = transform.rotationDeg,
+                opacity = transform.opacity
+            )
+            val updated = item.keyframes.filterNot { kotlin.math.abs(it.offsetUs - localUs) <= 50_000L }.toMutableList()
+            updated.add(newKf)
+            updated.sortBy { it.offsetUs }
+            _layerItems[idx] = item.copy(keyframes = updated, zIndex = topZ)
+        } else {
+            _layerItems[idx] = item.copy(transform = transform, zIndex = topZ)
+        }
         syncLayerPlan()
         _uiState.update {
             it.copy(

@@ -1,5 +1,8 @@
 package com.flowcut.app.ui.timeline
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -398,6 +401,20 @@ fun TimelineCanvas(
     val currentSelection by rememberUpdatedState(selection)
     val currentFocusMode by rememberUpdatedState(focusMode)
     val currentOverlayItems by rememberUpdatedState(overlayItems)
+
+    val isUpperPinTarget = TimelineHitTester.isUpperPinLayerSelected(focusMode)
+    val isPipExpandedTarget = focusMode is TimelineFocusState.S1_PIP_GROUP || focusMode is TimelineFocusState.S2_PIP_ITEM
+
+    val rowCPushProgress by animateFloatAsState(
+        targetValue = if (isUpperPinTarget) 1f else 0f,
+        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+        label = "rowCPushProgress"
+    )
+    val pipExpandProgress by animateFloatAsState(
+        targetValue = if (isPipExpandedTarget) 1f else 0f,
+        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+        label = "pipExpandProgress"
+    )
     val currentOnSelect by rememberUpdatedState(onSelect)
     val currentOnLongPress by rememberUpdatedState(onLongPress)
     val currentOnCommitTrim by rememberUpdatedState(onCommitTrim)
@@ -602,6 +619,12 @@ fun TimelineCanvas(
     val audioRightHandlePath = remember { Path() }
 
     val soundBarPath = remember { Path() }
+
+    val keyframeDiamondPath = remember { Path() }
+    val keyframeDiamondFillColor = remember { Color(0xFFFF2D55) }
+    val keyframeDiamondStrokeColor = remember { Color.White }
+    val keyframeDiamondStroke = remember(density) { Stroke(width = 1.2f * density) }
+    val keyframeGlowStroke = remember(density) { Stroke(width = 2.2f * density) }
 
     val activeTrimPlayheadUs = remember { mutableLongStateOf(Long.MIN_VALUE) }
 
@@ -1421,7 +1444,6 @@ fun TimelineCanvas(
 
         val focus = currentFocusMode
         val isUpperPinSel = TimelineHitTester.isUpperPinLayerSelected(focus)
-        val isRowBOpen = isUpperPinSel
         val isPipExpanded = focus is TimelineFocusState.S1_PIP_GROUP || focus is TimelineFocusState.S2_PIP_ITEM
         val isAudioExpanded = focus is TimelineFocusState.S5_AUDIO_GROUP || focus is TimelineFocusState.S6_AUDIO_ITEM
 
@@ -1445,13 +1467,19 @@ fun TimelineCanvas(
         val rowABottom = rowABottomPx
         val pinHeight = pinHeightClosedPx
 
+        val currentPush = rowCPushProgress
+        val isRowBOpen = currentPush > 0.001f
+
         val rowBTop = rowBTopPx
-        val rowBBottom = rowBBottomPx
+        val currentBarH = 24f * density * currentPush
+        val currentBarTop = rowBTop + (rowBBarHeightPx - currentBarH) / 2f
+        val currentBarBottom = currentBarTop + currentBarH
+        val rowBBottom = currentBarBottom
 
-        val rowCTop = TimelineHitTester.rowCTopDp(isUpperPinSel) * density
-        val rowCBottom = TimelineHitTester.rowCBottomDp(isUpperPinSel) * density
+        val rowCTop = (TimelineHitTester.ROW_C_TOP_STATE_A_DP + 32f * currentPush) * density
+        val rowCBottom = rowCTop + (TimelineHitTester.MAIN_TRACK_HEIGHT_DP * density)
 
-        val rowDTop = TimelineHitTester.rowDTopDp(isUpperPinSel) * density
+        val rowDTop = (TimelineHitTester.ROW_D_TOP_STATE_A_DP + 32f * currentPush) * density
         val lowerRowHeightPx = lowerRowHeightPx
         val lowerRowStepPx = lowerRowStepPx
 
@@ -1461,19 +1489,12 @@ fun TimelineCanvas(
             rowDTop
         }
 
-        val soundBarTop: Float
-        val soundBarBottom: Float
-        if (isUpperPinSel) {
-            soundBarTop = TimelineHitTester.ROW_E_TOP_STATE_B_DP * density
-            soundBarBottom = TimelineHitTester.ROW_E_BOTTOM_STATE_B_DP * density
-        } else {
-            if (activePipLaneCount > 0) {
-                soundBarTop = thinLinesBottomPx + (8f * density)
-            } else {
-                soundBarTop = rowDTop + (4f * density)
-            }
-            soundBarBottom = soundBarTop + soundBarHeightPx
-        }
+        val targetSoundBarTopB = TimelineHitTester.ROW_E_TOP_STATE_B_DP * density
+        val targetSoundBarBottomB = TimelineHitTester.ROW_E_BOTTOM_STATE_B_DP * density
+        val normalSoundBarTop = if (activePipLaneCount > 0) thinLinesBottomPx + (8f * density) else rowDTop + (4f * density)
+        val normalSoundBarBottom = normalSoundBarTop + soundBarHeightPx
+        val soundBarTop = normalSoundBarTop + (targetSoundBarTopB - normalSoundBarTop) * currentPush
+        val soundBarBottom = normalSoundBarBottom + (targetSoundBarBottomB - normalSoundBarBottom) * currentPush
 
         val selectedOverlayId = (currentSelection as? TimelineSelection.OverlaySelected)?.itemId ?: focus.currentSelectedItemId
 
@@ -1729,18 +1750,21 @@ fun TimelineCanvas(
                 val barW = endX - startX
 
                 if (barW > 0f && endX >= -50f && startX <= size.width + 50f) {
-                    val barH = 24f * density
+                    val alpha = currentPush.coerceIn(0f, 1f)
+                    val barH = 24f * density * currentPush
                     val barTop = rowBTop + (rowBBarHeightPx - barH) / 2f
                     val barBottom = barTop + barH
                     val barR = 5f * density
 
-                    val fillColor = when (selItem.type) {
+                    val rawFillColor = when (selItem.type) {
                         LayerType.TEXT -> colorTextWarmOrange
                         LayerType.FILTER -> Color(0xFF06B6D4)
                         LayerType.EFFECT -> Color(0xFFA855F7)
                         LayerType.STICKER -> if (selItem.mediaPath.isNotEmpty()) colorStickerGreen else colorStickerTeal
                         else -> colorStickerTeal
                     }
+                    val fillColor = if (alpha < 1f) rawFillColor.copy(alpha = rawFillColor.alpha * alpha) else rawFillColor
+                    val currentWhite = if (alpha < 1f) whiteColor.copy(alpha = alpha) else whiteColor
 
                     // 1. Solid Orange or Teal bar across [startX, endX] (NO white border around entire bar)
                     buildClipCornerPath(
@@ -1836,6 +1860,37 @@ fun TimelineCanvas(
                         y = barBottom - (13f * density),
                         style = rowBTextStyle
                     )
+
+                    // 5. Keyframe Diamonds (◆) centered vertically inside Row B bar
+                    if (selItem.keyframes.isNotEmpty()) {
+                        val kfList = selItem.keyframes
+                        val barCenterY = barTop + barH / 2f
+                        for (k in kfList.indices) {
+                            val kf = kfList[k]
+                            val kfTimeUs = selItem.startUs + kf.offsetUs
+                            val kfX = zoomState.timeUsToX(kfTimeUs, offsetPx, halfWidthInt, pxPerUs)
+                            if (kfX >= -20f && kfX <= size.width + 20f) {
+                                val isLocked = kotlin.math.abs(tUs - kfTimeUs) <= 50_000L
+                                val diamondRadius = if (isLocked) 4.5f * density else 3.5f * density
+                                keyframeDiamondPath.reset()
+                                keyframeDiamondPath.moveTo(kfX, barCenterY - diamondRadius)
+                                keyframeDiamondPath.lineTo(kfX + diamondRadius, barCenterY)
+                                keyframeDiamondPath.lineTo(kfX, barCenterY + diamondRadius)
+                                keyframeDiamondPath.lineTo(kfX - diamondRadius, barCenterY)
+                                keyframeDiamondPath.close()
+
+                                val diamondFill = if (alpha < 1f) keyframeDiamondFillColor.copy(alpha = alpha) else keyframeDiamondFillColor
+                                val diamondStroke = if (alpha < 1f) keyframeDiamondStrokeColor.copy(alpha = alpha) else keyframeDiamondStrokeColor
+
+                                drawPath(path = keyframeDiamondPath, color = diamondFill)
+                                drawPath(
+                                    path = keyframeDiamondPath,
+                                    color = diamondStroke,
+                                    style = if (isLocked) keyframeGlowStroke else keyframeDiamondStroke
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2409,6 +2464,34 @@ fun TimelineCanvas(
                         strokeWidth = 1.5f * density,
                         cap = StrokeCap.Round
                     )
+
+                    // Keyframe Diamonds (◆) centered vertically inside PIP bar
+                    if (selPipItem.keyframes.isNotEmpty()) {
+                        val kfList = selPipItem.keyframes
+                        val barCenterY = laneTop + lowerRowHeightPx / 2f
+                        for (k in kfList.indices) {
+                            val kf = kfList[k]
+                            val kfTimeUs = selPipItem.startUs + kf.offsetUs
+                            val kfX = zoomState.timeUsToX(kfTimeUs, offsetPx, halfWidthInt, pxPerUs)
+                            if (kfX >= -20f && kfX <= size.width + 20f) {
+                                val isLocked = kotlin.math.abs(tUs - kfTimeUs) <= 50_000L
+                                val diamondRadius = if (isLocked) 4.5f * density else 3.5f * density
+                                keyframeDiamondPath.reset()
+                                keyframeDiamondPath.moveTo(kfX, barCenterY - diamondRadius)
+                                keyframeDiamondPath.lineTo(kfX + diamondRadius, barCenterY)
+                                keyframeDiamondPath.lineTo(kfX, barCenterY + diamondRadius)
+                                keyframeDiamondPath.lineTo(kfX - diamondRadius, barCenterY)
+                                keyframeDiamondPath.close()
+
+                                drawPath(path = keyframeDiamondPath, color = keyframeDiamondFillColor)
+                                drawPath(
+                                    path = keyframeDiamondPath,
+                                    color = keyframeDiamondStrokeColor,
+                                    style = if (isLocked) keyframeGlowStroke else keyframeDiamondStroke
+                                )
+                            }
+                        }
+                    }
                 }
             }
         } else if (isAudioExpanded) {

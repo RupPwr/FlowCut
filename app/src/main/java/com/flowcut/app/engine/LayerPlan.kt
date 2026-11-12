@@ -66,7 +66,8 @@ data class OverlayItem(
     val fadeOutUs: Long = 0L,
     val speed: Float = 1.0f,
     val sourceInUs: Long = 0L,
-    val naturalDurationUs: Long = 0L
+    val naturalDurationUs: Long = 0L,
+    val keyframes: List<OverlayKeyframe> = emptyList()
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L
@@ -78,8 +79,20 @@ data class OverlayItem(
 }
 
 /**
- * Pre-allocated zero-allocation evaluator for time-based overlay animations (Rule R10).
- * Evaluates IN, OUT, and LOOP animations at 60fps without heap allocations.
+ * Immutable keyframe representing spatial transform & opacity at an offset relative to item.startUs.
+ */
+data class OverlayKeyframe(
+    val offsetUs: Long, // offset relative to item.startUs (0L .. item.durationUs)
+    val panX: Float,
+    val panY: Float,
+    val scale: Float,
+    val rotationDeg: Float,
+    val opacity: Float = 1.0f
+)
+
+/**
+ * Pre-allocated zero-allocation evaluator for time-based overlay animations and keyframe interpolation (Rule R10).
+ * Evaluates keyframes, IN, OUT, and LOOP animations at 60fps without heap allocations.
  */
 class AnimatedTransformEvaluator {
     val animatedTransform = ClipTransform()
@@ -89,12 +102,13 @@ class AnimatedTransformEvaluator {
         val inType = item.animInType
         val outType = item.animOutType
         val loopType = item.animLoopType
+        val kfs = item.keyframes
 
-        if (inType == 0 && outType == 0 && loopType == 0) {
+        if (inType == 0 && outType == 0 && loopType == 0 && kfs.isEmpty()) {
             return base
         }
 
-        val localUs = (timeUs - item.startUs).coerceAtLeast(0L)
+        val localUs = (timeUs - item.startUs).coerceIn(0L, item.durationUs)
         val remainingUs = (item.endUs - timeUs).coerceAtLeast(0L)
         val inDurUs = item.animInDurationUs.coerceAtLeast(100_000L)
         val outDurUs = item.animOutDurationUs.coerceAtLeast(100_000L)
@@ -104,6 +118,51 @@ class AnimatedTransformEvaluator {
         var panX = base.panX
         var panY = base.panY
         var rotationDeg = base.rotationDeg
+
+        // 0. Keyframe Transform Interpolation (smoothstep 60fps zero-allocation)
+        if (kfs.isNotEmpty()) {
+            if (kfs.size == 1) {
+                val kf = kfs[0]
+                panX = kf.panX
+                panY = kf.panY
+                scale = kf.scale
+                rotationDeg = kf.rotationDeg
+                opacity = kf.opacity
+            } else if (localUs <= kfs[0].offsetUs) {
+                val kf = kfs[0]
+                panX = kf.panX
+                panY = kf.panY
+                scale = kf.scale
+                rotationDeg = kf.rotationDeg
+                opacity = kf.opacity
+            } else if (localUs >= kfs[kfs.size - 1].offsetUs) {
+                val kf = kfs[kfs.size - 1]
+                panX = kf.panX
+                panY = kf.panY
+                scale = kf.scale
+                rotationDeg = kf.rotationDeg
+                opacity = kf.opacity
+            } else {
+                var idx = 0
+                for (i in 0 until kfs.size - 1) {
+                    if (localUs >= kfs[i].offsetUs && localUs <= kfs[i + 1].offsetUs) {
+                        idx = i
+                        break
+                    }
+                }
+                val kfA = kfs[idx]
+                val kfB = kfs[idx + 1]
+                val span = (kfB.offsetUs - kfA.offsetUs).coerceAtLeast(1L).toFloat()
+                val linearT = ((localUs - kfA.offsetUs).toFloat() / span).coerceIn(0f, 1f)
+                val t = linearT * linearT * (3f - 2f * linearT)
+
+                panX = kfA.panX + (kfB.panX - kfA.panX) * t
+                panY = kfA.panY + (kfB.panY - kfA.panY) * t
+                scale = kfA.scale + (kfB.scale - kfA.scale) * t
+                rotationDeg = kfA.rotationDeg + (kfB.rotationDeg - kfA.rotationDeg) * t
+                opacity = kfA.opacity + (kfB.opacity - kfA.opacity) * t
+            }
+        }
 
         // 1. IN Animation (0=None, 1=Fade In, 2=Zoom In, 3=Zoom Out, 4=Slide L, 5=Slide R, 6=Slide Up, 7=Slide Down, 8=Spin In, 9=Pop Bounce)
         if (inType > 0 && localUs < inDurUs) {
