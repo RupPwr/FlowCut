@@ -1,5 +1,7 @@
 package com.flowcut.app.ui
 
+import androidx.compose.ui.graphics.Color
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -76,6 +78,10 @@ fun BottomToolbar(
     canSplitAudio: Boolean = true,
     isTextOverlaySelected: Boolean = false,
     isTextToolbarActive: Boolean = false,
+    isFilterOverlaySelected: Boolean = false,
+    isEffectOverlaySelected: Boolean = false,
+    onEditFilterOverlayClick: () -> Unit = {},
+    onEditEffectOverlayClick: () -> Unit = {},
     onAddOverlayClick: () -> Unit = {},
     onSplitClick: () -> Unit = {},
     onTrimClick: () -> Unit = {},
@@ -158,6 +164,16 @@ fun BottomToolbar(
                 onDeleteClipClick = onDeleteClipClick,
                 onOpacityClick = onOpacityClick,
                 onCopyClick = onCopyClick
+            )
+        } else if (isOverlaySelected && (isFilterOverlaySelected || isEffectOverlaySelected)) {
+            FilterEffectToolbarContent(
+                isFilter = isFilterOverlaySelected,
+                onClearSelection = onClearSelection,
+                onAddClick = if (isFilterOverlaySelected) onFilterClick else onEffectClick,
+                onEditClick = if (isFilterOverlaySelected) onEditFilterOverlayClick else onEditEffectOverlayClick,
+                onSplitClick = onSplitClick,
+                onCopyClick = onCopyClick,
+                onDeleteOverlayClick = { onDeleteClipClick?.invoke() }
             )
         } else if (isPipActive) {
             PipToolbarContent(
@@ -1012,6 +1028,201 @@ private fun TextToolbarContent(
                 }
             }
 
+}
+
+@Composable
+private fun FilterEffectToolbarContent(
+    isFilter: Boolean,
+    onClearSelection: () -> Unit,
+    onAddClick: () -> Unit,
+    onEditClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onDeleteOverlayClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    val accentColor = if (isFilter) Color(0xFF06B6D4) else Color(0xFFA855F7)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 1. Back / Dismiss button on the far left
+        Box(
+            modifier = Modifier
+                .width(48.dp)
+                .fillMaxHeight()
+                .clickable { onClearSelection() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Dismiss",
+                tint = colors.textPrimary,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        // Vertical separator
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .height(24.dp)
+                .background(colors.border)
+        )
+
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 1. Add (Add another Filter / Effect at playhead)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onAddClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "ADD",
+                    tint = accentColor,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "ADD",
+                    color = accentColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 2. Edit / Adjust (Re-opens FilterSheet or EffectSheet)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onEditClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = "EDIT",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "EDIT",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 3. Split Action
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onSplitClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                    contentDescription = "SPLIT",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "SPLIT",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 4. Copy Action
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onCopyClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ContentCopy,
+                    contentDescription = "COPY",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "COPY",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 5. Delete Action
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onDeleteOverlayClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "DELETE",
+                    tint = colors.danger,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "DELETE",
+                    color = colors.danger,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
 }
 
 @Composable

@@ -19,6 +19,7 @@ sealed interface TimelineFocusState {
     data class S4_TEXT_ITEM(val itemId: String) : TimelineFocusState
     data object S5_AUDIO_GROUP : TimelineFocusState
     data class S6_AUDIO_ITEM(val itemId: String) : TimelineFocusState
+    data class S7_FILTER_EFFECT_ITEM(val itemId: String) : TimelineFocusState
 
     val currentSelectedItemId: String?
         get() = when (this) {
@@ -26,6 +27,7 @@ sealed interface TimelineFocusState {
             is S3_STICKER_ITEM -> itemId
             is S4_TEXT_ITEM -> itemId
             is S6_AUDIO_ITEM -> itemId
+            is S7_FILTER_EFFECT_ITEM -> itemId
             else -> null
         }
 }
@@ -59,30 +61,74 @@ object TimelineHitTester {
     const val JUNCTION_TOUCH_TARGET_DP = 20f
     const val RULER_HEIGHT_DP = 20f
     const val RULER_TOP_HEIGHT_DP = 16f
-    const val ROW_A_PINS_HEIGHT_DP = 24f
+
+    // Row A: Pins Band + duration underlines: 18.dp .. 54.dp (Pins occupy 18..49dp, duration lines at 52..54dp)
     const val ROW_A_TOP_DP = 18f
-    const val ROW_A_BOTTOM_CLOSED_DP = 62f
-    const val ROW_A_BOTTOM_OPEN_DP = 36f
-    const val ROW_B_BAR_HEIGHT_DP = 26f
-    const val ROW_B_TOP_DP = 38f
-    const val ROW_B_BOTTOM_DP = 64f
+    const val ROW_A_BOTTOM_DP = 54f
+    const val ROW_A_PINS_HEIGHT_DP = 36f
+    const val ROW_A_BOTTOM_CLOSED_DP = 54f
+    const val ROW_A_BOTTOM_OPEN_DP = 54f
+    const val ROW_A_PIN_BOTTOM_DP = 49f
+    const val ROW_A_UNDERLINE_TOP_DP = 52f
+    const val ROW_A_UNDERLINE_BOTTOM_DP = 54f
+
+    // Row B: Selected Active Pin Bar with < > handles: 60.dp .. 84.dp (24.dp tall)
+    const val ROW_B_TOP_DP = 60f
+    const val ROW_B_BAR_HEIGHT_DP = 24f
+    const val ROW_B_BOTTOM_DP = 84f
+
+    // Row C: Main Video Track (42.dp tall)
+    // State A (No Upper Pin Selected): 58.dp .. 100.dp
+    // State B (Upper Pin Selected): 90.dp .. 132.dp
+    const val MAIN_TRACK_HEIGHT_DP = 42f
+    const val ROW_C_TOP_STATE_A_DP = 58f
+    const val ROW_C_BOTTOM_STATE_A_DP = 100f
+    const val ROW_C_TOP_STATE_B_DP = 90f
+    const val ROW_C_BOTTOM_STATE_B_DP = 132f
+
+    // Backwards-compatible constants
+    const val ROW_C_TOP_DP = ROW_C_TOP_STATE_A_DP
+    const val ROW_C_BOTTOM_DP = ROW_C_BOTTOM_STATE_A_DP
     const val ROW_GAP_DP = 2f
     const val ROW_C_GAP_DP = ROW_GAP_DP
-    const val ROW_C_TOP_DP = 66f
-    const val MAIN_TRACK_HEIGHT_DP = 42f
-    const val ROW_C_BOTTOM_DP = 108f
+
+    fun isUpperPinLayerSelected(focusMode: TimelineFocusState): Boolean =
+        focusMode is TimelineFocusState.S3_STICKER_ITEM ||
+        focusMode is TimelineFocusState.S4_TEXT_ITEM ||
+        focusMode is TimelineFocusState.S7_FILTER_EFFECT_ITEM
+
+    fun rowCTopDp(isUpperPinLayerSelected: Boolean): Float =
+        if (isUpperPinLayerSelected) ROW_C_TOP_STATE_B_DP else ROW_C_TOP_STATE_A_DP
+
+    fun rowCBottomDp(isUpperPinLayerSelected: Boolean): Float =
+        if (isUpperPinLayerSelected) ROW_C_BOTTOM_STATE_B_DP else ROW_C_BOTTOM_STATE_A_DP
+
+    // Lower Zone / Row D (PIP & Audio Zone)
+    // State A: 106.dp .. 218.dp
+    // State B: 138.dp .. 164.dp
+    const val ROW_D_TOP_STATE_A_DP = 106f
+    const val ROW_D_TOP_STATE_B_DP = 138f
+    const val ROW_D_TOP_DP = ROW_D_TOP_STATE_A_DP
     const val ROW_D_TOP_MARGIN_DP = 4f
-    const val ROW_D_TOP_DP = 112f
+
+    fun rowDTopDp(isUpperPinLayerSelected: Boolean): Float =
+        if (isUpperPinLayerSelected) ROW_D_TOP_STATE_B_DP else ROW_D_TOP_STATE_A_DP
+
     const val LOWER_ROW_HEIGHT_DP = 24f
     const val LOWER_ROW_GAP_DP = 4f
     const val LOWER_ROW_STEP_DP = 28f // 24f + 4f
     const val LOWER_4_ROWS_TOTAL_HEIGHT_DP = 112f
-    const val LOWER_ZONE_BOTTOM_DP = 220f // 112f + 108f = 220f
+    const val LOWER_ZONE_BOTTOM_DP = 218f // 106f + 112f = 218f
     const val ROW_D_PIP_EXPANDED_LANE_HEIGHT_DP = LOWER_ROW_HEIGHT_DP
     const val ROW_D_PIP_EXPANDED_LANE_STEP_DP = LOWER_ROW_STEP_DP
     const val ROW_D_PIP_EXPANDED_TOTAL_HEIGHT_DP = LOWER_4_ROWS_TOTAL_HEIGHT_DP
     const val ROW_D_PIP_COLLAPSED_LINE_HEIGHT_DP = 3.5f
     const val ROW_D_PIP_COLLAPSED_STEP_DP = 7f
+
+    // Row E: Sound collection bar
+    // State B: 170.dp .. 196.dp (26.dp tall)
+    const val ROW_E_TOP_STATE_B_DP = 170f
+    const val ROW_E_BOTTOM_STATE_B_DP = 196f
     const val ROW_E_SOUND_BAR_HEIGHT_DP = 24f
     const val COVER_BOX_WIDTH_DP = 38f
     const val COVER_BOX_HEIGHT_DP = 42f
@@ -190,21 +236,22 @@ object TimelineHitTester {
         if (selectedOverlayId == null) return OverlayTrimEdge.NONE
         val item = overlayItems.firstOrNull { it.id == selectedOverlayId } ?: return OverlayTrimEdge.NONE
 
-        val isTextOrSticker = item.type == LayerType.TEXT || item.type == LayerType.STICKER
+        val isUpperPin = item.type == LayerType.TEXT || item.type == LayerType.STICKER ||
+                item.type == LayerType.FILTER || item.type == LayerType.EFFECT
         val itemTopPx: Float
         val itemBottomPx: Float
 
-        val isRowBOpen = focusMode is TimelineFocusState.S3_STICKER_ITEM || focusMode is TimelineFocusState.S4_TEXT_ITEM
+        val isUpperPinSel = isUpperPinLayerSelected(focusMode)
         val rowBTopDp = ROW_B_TOP_DP
         val rowBBottomDp = ROW_B_BOTTOM_DP
-        val rowDTopDp = ROW_D_TOP_DP
+        val rowDTopDp = rowDTopDp(isUpperPinSel)
 
-        if (isTextOrSticker) {
-            // Row B bounds: 38..64.dp when open
+        if (isUpperPin) {
+            // Row B bounds: 60..84.dp when open
             itemTopPx = rowBTopDp * density
             itemBottomPx = rowBBottomDp * density
         } else {
-            // Lower 4-Row Area (Row D PIP or Audio): 112..220.dp
+            // Lower 4-Row Area (Row D PIP or Audio): 106..218.dp
             val lane = item.laneIndex.coerceIn(0, 3)
             val laneTopDp = rowDTopDp + (lane * LOWER_ROW_STEP_DP)
             itemTopPx = laneTopDp * density
@@ -346,7 +393,8 @@ object TimelineHitTester {
         val pinTouchRadiusPx = 18f * density
 
         val rowAPins = overlayItems.filter {
-            it.type == LayerType.TEXT || it.type == LayerType.STICKER
+            it.type == LayerType.TEXT || it.type == LayerType.STICKER ||
+            it.type == LayerType.FILTER || it.type == LayerType.EFFECT
         }
         if (rowAPins.isEmpty()) return null
 
@@ -428,24 +476,25 @@ object TimelineHitTester {
         val n = snapshot.main.n
         val totalUs = msToUs(snapshot.totalMs)
 
-        // Calculate constant vertical row coordinates
+        // Calculate dynamic vertical row coordinates based on isUpperPinLayerSelected
         val rulerHeightPx = rulerHeightDp * density
-        val isRowBOpen = focusMode is TimelineFocusState.S3_STICKER_ITEM || focusMode is TimelineFocusState.S4_TEXT_ITEM
+        val isUpperPinSel = isUpperPinLayerSelected(focusMode)
+        val isRowBOpen = isUpperPinSel
 
         val rowATopPx = ROW_A_TOP_DP * density
-        val rowABottomPx = (if (isRowBOpen) ROW_A_BOTTOM_OPEN_DP else ROW_A_BOTTOM_CLOSED_DP) * density
+        val rowABottomPx = ROW_A_BOTTOM_DP * density
 
         val rowBTopPx = ROW_B_TOP_DP * density
         val rowBBottomPx = ROW_B_BOTTOM_DP * density
 
-        val rowCTopPx = ROW_C_TOP_DP * density
+        val rowCTopPx = rowCTopDp(isUpperPinSel) * density
         val mainTrackHeightPx = mainTrackHeightDp * density
-        val rowCBottomPx = ROW_C_BOTTOM_DP * density
+        val rowCBottomPx = rowCBottomDp(isUpperPinSel) * density
 
-        val rowDTopPx = ROW_D_TOP_DP * density
+        val rowDTopPx = rowDTopDp(isUpperPinSel) * density
         val lowerRowHeightPx = LOWER_ROW_HEIGHT_DP * density
         val lowerRowStepPx = LOWER_ROW_STEP_DP * density
-        val lower4RowsBottomPx = LOWER_ZONE_BOTTOM_DP * density
+        val lower4RowsBottomPx = (rowDTopDp(isUpperPinSel) + LOWER_4_ROWS_TOTAL_HEIGHT_DP) * density
 
         val pipItems = overlayItems.filter { it.type == LayerType.VIDEO || it.type == LayerType.IMAGE }
         val audioItems = overlayItems.filter { it.type == LayerType.AUDIO }
@@ -461,12 +510,19 @@ object TimelineHitTester {
             rowDTopPx
         }
 
-        val soundBarTopPx = if (activePipLaneCount > 0) {
-            thinLinesBottomPx + (8f * density)
+        val soundBarTopPx: Float
+        val soundBarBottomPx: Float
+        if (isUpperPinSel) {
+            soundBarTopPx = ROW_E_TOP_STATE_B_DP * density
+            soundBarBottomPx = ROW_E_BOTTOM_STATE_B_DP * density
         } else {
-            rowDTopPx + (4f * density)
+            if (activePipLaneCount > 0) {
+                soundBarTopPx = thinLinesBottomPx + (8f * density)
+            } else {
+                soundBarTopPx = rowDTopPx + (4f * density)
+            }
+            soundBarBottomPx = soundBarTopPx + (ROW_E_SOUND_BAR_HEIGHT_DP * density)
         }
-        val soundBarBottomPx = soundBarTopPx + (ROW_E_SOUND_BAR_HEIGHT_DP * density)
         val rowEBottomPx = soundBarBottomPx
 
         val canvasWidthPx = halfWidthPx * 2f

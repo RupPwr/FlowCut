@@ -10,7 +10,8 @@ enum class LayerType(val maxCap: Int) {
     TEXT(maxCap = 20),
     IMAGE(maxCap = 1000),
     STICKER(maxCap = 20),
-    FILTER(maxCap = 3),
+    FILTER(maxCap = 20),
+    EFFECT(maxCap = 20),
     AUDIO(maxCap = 1000)
 }
 
@@ -640,7 +641,7 @@ class CompiledLayerPlan(
                 for (idx in items.indices) {
                     val itm = items[idx]
                     if (itm.startUs <= tStart && itm.endUs >= tEnd) {
-                        if (itm.type == LayerType.FILTER) {
+                        if (itm.type == LayerType.FILTER || itm.type == LayerType.EFFECT) {
                             filterIndices.add(idx)
                         } else if (itm.type != LayerType.AUDIO) {
                             visualIndices.add(idx)

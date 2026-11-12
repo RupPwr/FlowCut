@@ -421,8 +421,9 @@ fun TimelineCanvas(
     val rulerHeightPx = remember(density) { TimelineHitTester.RULER_TOP_HEIGHT_DP * density }
     val rowAPinsHeightPx = remember(density) { TimelineHitTester.ROW_A_PINS_HEIGHT_DP * density }
     val rowATopPx = remember(density) { TimelineHitTester.ROW_A_TOP_DP * density }
-    val rowABottomClosedPx = remember(density) { TimelineHitTester.ROW_A_BOTTOM_CLOSED_DP * density }
-    val rowABottomOpenPx = remember(density) { TimelineHitTester.ROW_A_BOTTOM_OPEN_DP * density }
+    val rowABottomPx = remember(density) { TimelineHitTester.ROW_A_BOTTOM_DP * density }
+    val rowABottomClosedPx = rowABottomPx
+    val rowABottomOpenPx = rowABottomPx
     val pinHeightClosedPx = remember(density) { TimelineHitTester.PIN_HEIGHT_CLOSED_DP * density }
     val pinHeightOpenPx = remember(density) { TimelineHitTester.PIN_HEIGHT_OPEN_DP * density }
 
@@ -684,8 +685,8 @@ fun TimelineCanvas(
                     val snapshotOnDown = holder.current
                     val halfWidthPxOnDown = size.width / 2f
 
-                    val isRowBOpenOnDown = focus is TimelineFocusState.S3_STICKER_ITEM || focus is TimelineFocusState.S4_TEXT_ITEM
-                    val rowCTopDpOnDown = TimelineHitTester.ROW_C_TOP_DP
+                    val isUpperPinSelOnDown = TimelineHitTester.isUpperPinLayerSelected(focus)
+                    val rowCTopDpOnDown = TimelineHitTester.rowCTopDp(isUpperPinSelOnDown)
 
                     val trimHandleHit = if (selectedClipIndex in 0 until snapshotOnDown.main.n) {
                         TimelineHitTester.hitTestTrimHandle(
@@ -728,7 +729,7 @@ fun TimelineCanvas(
 
                     // Mode A: Direct Drag candidate on Row A pins
                     val rowATopPxOnDown = rowATopPx
-                    val rowABottomPxOnDown = if (isRowBOpenOnDown) rowABottomOpenPx else rowABottomClosedPx
+                    val rowABottomPxOnDown = rowABottomPx
                     val pinHitOnDown = if (!isTrimCandidate && !isOverlayTrimCandidate) {
                         TimelineHitTester.hitTestRowAPins(
                             tapX = down.position.x,
@@ -1419,7 +1420,8 @@ fun TimelineCanvas(
         val rightMs = usToMs(rightUs)
 
         val focus = currentFocusMode
-        val isRowBOpen = focus is TimelineFocusState.S3_STICKER_ITEM || focus is TimelineFocusState.S4_TEXT_ITEM
+        val isUpperPinSel = TimelineHitTester.isUpperPinLayerSelected(focus)
+        val isRowBOpen = isUpperPinSel
         val isPipExpanded = focus is TimelineFocusState.S1_PIP_GROUP || focus is TimelineFocusState.S2_PIP_ITEM
         val isAudioExpanded = focus is TimelineFocusState.S5_AUDIO_GROUP || focus is TimelineFocusState.S6_AUDIO_ITEM
 
@@ -1438,18 +1440,18 @@ fun TimelineCanvas(
             }
         }
 
-        // Constant vertical layout coordinates
+        // Vertical layout coordinates synchronized with TimelineHitTester
         val rowATop = rowATopPx
-        val rowABottom = if (isRowBOpen) rowABottomOpenPx else rowABottomClosedPx
-        val pinHeight = if (isRowBOpen) pinHeightOpenPx else pinHeightClosedPx
+        val rowABottom = rowABottomPx
+        val pinHeight = pinHeightClosedPx
 
         val rowBTop = rowBTopPx
         val rowBBottom = rowBBottomPx
 
-        val rowCTop = rowCTopPx
-        val rowCBottom = rowCBottomPx
+        val rowCTop = TimelineHitTester.rowCTopDp(isUpperPinSel) * density
+        val rowCBottom = TimelineHitTester.rowCBottomDp(isUpperPinSel) * density
 
-        val rowDTop = rowDTopPx
+        val rowDTop = TimelineHitTester.rowDTopDp(isUpperPinSel) * density
         val lowerRowHeightPx = lowerRowHeightPx
         val lowerRowStepPx = lowerRowStepPx
 
@@ -1459,12 +1461,19 @@ fun TimelineCanvas(
             rowDTop
         }
 
-        val soundBarTop = if (activePipLaneCount > 0) {
-            thinLinesBottomPx + (8f * density)
+        val soundBarTop: Float
+        val soundBarBottom: Float
+        if (isUpperPinSel) {
+            soundBarTop = TimelineHitTester.ROW_E_TOP_STATE_B_DP * density
+            soundBarBottom = TimelineHitTester.ROW_E_BOTTOM_STATE_B_DP * density
         } else {
-            rowDTop + (4f * density)
+            if (activePipLaneCount > 0) {
+                soundBarTop = thinLinesBottomPx + (8f * density)
+            } else {
+                soundBarTop = rowDTop + (4f * density)
+            }
+            soundBarBottom = soundBarTop + soundBarHeightPx
         }
-        val soundBarBottom = soundBarTop + soundBarHeightPx
 
         val selectedOverlayId = (currentSelection as? TimelineSelection.OverlaySelected)?.itemId ?: focus.currentSelectedItemId
 
@@ -1549,15 +1558,18 @@ fun TimelineCanvas(
 
         for (idx in overlayItems.indices) {
             val item = overlayItems[idx]
-            if (item.type != LayerType.TEXT && item.type != LayerType.STICKER) continue
+            if (item.type != LayerType.TEXT && item.type != LayerType.STICKER &&
+                item.type != LayerType.FILTER && item.type != LayerType.EFFECT) continue
 
             val isSelectedPin = (item.id == selectedOverlayId)
             val startX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
             val endX = zoomState.timeUsToX(item.endUs, offsetPx, halfWidthInt, pxPerUs)
 
-            val pinColor = when {
-                item.type == LayerType.TEXT -> colorTextWarmOrange
-                item.mediaPath.isNotEmpty() -> colorStickerGreen
+            val pinColor = when (item.type) {
+                LayerType.TEXT -> colorTextWarmOrange
+                LayerType.FILTER -> Color(0xFF06B6D4)
+                LayerType.EFFECT -> Color(0xFFA855F7)
+                LayerType.STICKER -> if (item.mediaPath.isNotEmpty()) colorStickerGreen else colorStickerTeal
                 else -> colorStickerTeal
             }
 
@@ -1583,7 +1595,8 @@ fun TimelineCanvas(
                 for (otherIdx in overlayItems.indices) {
                     if (otherIdx == idx) continue
                     val other = overlayItems[otherIdx]
-                    if (other.type != LayerType.TEXT && other.type != LayerType.STICKER) continue
+                    if (other.type != LayerType.TEXT && other.type != LayerType.STICKER &&
+                        other.type != LayerType.FILTER && other.type != LayerType.EFFECT) continue
                     val otherStartX = zoomState.timeUsToX(other.startUs, offsetPx, halfWidthInt, pxPerUs)
                     if (abs(startX - otherStartX) <= stackDistPx) {
                         clusterSize++
@@ -1634,7 +1647,7 @@ fun TimelineCanvas(
 
                 val pinCenterY = pinTopY + pinBodyHeightPx / 2f
 
-                // Pin inner icon: crisp white "T" for TEXT, smiley for STICKER
+                // Pin inner icon: crisp white "T" for TEXT, "F" for FILTER, "E" for EFFECT, smiley for STICKER
                 if (item.type == LayerType.TEXT) {
                     val tTop = pinCenterY - (4.5f * density)
                     val tStemBottom = pinCenterY + (4.5f * density)
@@ -1644,6 +1657,32 @@ fun TimelineCanvas(
                     pinTPath.lineTo(startX + tHalfBar, tTop)
                     pinTPath.moveTo(startX, tTop)
                     pinTPath.lineTo(startX, tStemBottom)
+                    drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
+                } else if (item.type == LayerType.FILTER) {
+                    val fTop = pinCenterY - (4.5f * density)
+                    val fStemBottom = pinCenterY + (4.5f * density)
+                    val fStemX = startX - (3f * density)
+                    pinTPath.reset()
+                    pinTPath.moveTo(fStemX, fTop)
+                    pinTPath.lineTo(fStemX, fStemBottom)
+                    pinTPath.moveTo(fStemX, fTop)
+                    pinTPath.lineTo(startX + (3.5f * density), fTop)
+                    pinTPath.moveTo(fStemX, pinCenterY)
+                    pinTPath.lineTo(startX + (2f * density), pinCenterY)
+                    drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
+                } else if (item.type == LayerType.EFFECT) {
+                    val eTop = pinCenterY - (4.5f * density)
+                    val eStemBottom = pinCenterY + (4.5f * density)
+                    val eStemX = startX - (3f * density)
+                    pinTPath.reset()
+                    pinTPath.moveTo(eStemX, eTop)
+                    pinTPath.lineTo(eStemX, eStemBottom)
+                    pinTPath.moveTo(eStemX, eTop)
+                    pinTPath.lineTo(startX + (3.5f * density), eTop)
+                    pinTPath.moveTo(eStemX, pinCenterY)
+                    pinTPath.lineTo(startX + (2f * density), pinCenterY)
+                    pinTPath.moveTo(eStemX, eStemBottom)
+                    pinTPath.lineTo(startX + (3.5f * density), eStemBottom)
                     drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
                 } else {
                     if (item.mediaPath.isNotEmpty()) {
@@ -1665,16 +1704,15 @@ fun TimelineCanvas(
                     }
                 }
 
-                // If selected: 1.5.dp crisp white outline stroke and 3.dp vertical white connector tick pointing down toward Row B
+                // If selected: 1.5.dp crisp white outline stroke and vertical white connector tick pointing down toward Row B
                 if (isSelectedPin) {
                     drawPath(path = pinPath, color = whiteColor, style = whitePinSelectionStroke)
 
-                    // 3.dp vertical white connector tick directly below bottom tip
+                    // Vertical white connector tick drops from pin tip down to rowBTop (60.dp)
                     val pinTipY = pinTopY + pinBodyHeightPx + pinTipHeightPx
-                    val tickLengthPx = 3f * density
                     connectorTickPath.reset()
                     connectorTickPath.moveTo(startX, pinTipY)
-                    connectorTickPath.lineTo(startX, pinTipY + tickLengthPx)
+                    connectorTickPath.lineTo(startX, rowBTop)
                     drawPath(path = connectorTickPath, color = whiteColor, style = connectorTickStroke)
                 }
             }
@@ -1696,12 +1734,12 @@ fun TimelineCanvas(
                     val barBottom = barTop + barH
                     val barR = 5f * density
 
-                    val fillColor = if (focus is TimelineFocusState.S4_TEXT_ITEM) {
-                        colorTextWarmOrange
-                    } else if (selItem.mediaPath.isNotEmpty()) {
-                        colorStickerGreen
-                    } else {
-                        colorStickerTeal
+                    val fillColor = when (selItem.type) {
+                        LayerType.TEXT -> colorTextWarmOrange
+                        LayerType.FILTER -> Color(0xFF06B6D4)
+                        LayerType.EFFECT -> Color(0xFFA855F7)
+                        LayerType.STICKER -> if (selItem.mediaPath.isNotEmpty()) colorStickerGreen else colorStickerTeal
+                        else -> colorStickerTeal
                     }
 
                     // 1. Solid Orange or Teal bar across [startX, endX] (NO white border around entire bar)
@@ -1783,7 +1821,13 @@ fun TimelineCanvas(
                     }
 
                     // 4. Text snippet at bottom-left (startX + 6.dp) in clean 10.sp white text
-                    val previewSnippet = if (selItem.text.isNotBlank()) selItem.text else if (focus is TimelineFocusState.S4_TEXT_ITEM) "Your Text" else "Sticker"
+                    val previewSnippet = when (selItem.type) {
+                        LayerType.FILTER -> filterPresetName(selItem.filterPresetId)
+                        LayerType.EFFECT -> effectPresetName(selItem.effectPresetId)
+                        LayerType.TEXT -> if (selItem.text.isNotBlank()) selItem.text else "Your Text"
+                        LayerType.STICKER -> if (selItem.text.isNotBlank()) selItem.text else "Sticker"
+                        else -> ""
+                    }
                     val snippetX = if (showHandleCaps && barW >= 44f * density) startX + handleCapW + (4f * density) else startX + (6f * density)
                     drawTextSafe(
                         textMeasurer = textMeasurer,
@@ -2751,4 +2795,31 @@ fun TimelineCanvas(
             cap = StrokeCap.Round
         )
     }
+}
+
+private fun filterPresetName(id: Int): String = when (id) {
+    1 -> "Vivid"
+    2 -> "Warm"
+    3 -> "Cool"
+    4 -> "Teal & Orange"
+    5 -> "Vintage"
+    6 -> "Noir B&W"
+    7 -> "Matte Fade"
+    8 -> "Cyberpunk"
+    9 -> "Golden Hour"
+    10 -> "Dramatic"
+    11 -> "Pastel"
+    else -> "Filter"
+}
+
+private fun effectPresetName(id: Int): String = when (id) {
+    1 -> "RGB Split"
+    2 -> "Vignette"
+    3 -> "VHS"
+    4 -> "Pulse"
+    5 -> "Shake"
+    6 -> "Flash"
+    7 -> "Glow"
+    8 -> "Pixelate"
+    else -> "Effect"
 }

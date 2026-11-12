@@ -679,11 +679,11 @@ class ExportEngine(private val context: Context) {
                         for (f in 0 until activeLayerSet.filterCount) {
                             val idx = activeLayerSet.activeFilterIndices[f]
                             val item = plan.items.getOrNull(idx) ?: continue
-                            if (item.filterPresetId > 0) {
+                            if (item.type == LayerType.FILTER && item.filterPresetId > 0) {
                                 filterId = item.filterPresetId
                                 filterInt = item.filterIntensity
                             }
-                            if (item.effectPresetId > 0) {
+                            if (item.type == LayerType.EFFECT && item.effectPresetId > 0) {
                                 effectId = item.effectPresetId
                                 effectInt = item.effectIntensity
                             }

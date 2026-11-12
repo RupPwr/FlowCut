@@ -364,19 +364,85 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun addFilterLayer(presetId: Int, intensity: Float, startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
-        val endUs = startUs + durationUs
+        val totalUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+        val clampedStart = startUs.coerceIn(0L, maxOf(0L, totalUs - OverlayItem.MIN_DURATION_US))
+        val endUs = minOf(clampedStart + durationUs, totalUs).coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US)
         val newItem = OverlayItem(
             id = UUID.randomUUID().toString(),
             type = LayerType.FILTER,
             laneIndex = 0,
             zIndex = (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1,
-            startUs = startUs,
+            startUs = clampedStart,
             endUs = endUs,
             filterPresetId = presetId,
             filterIntensity = intensity
         )
         addLayerItem(newItem)
+        selectOverlay(newItem.id)
         return newItem
+    }
+
+    fun addEffectLayer(presetId: Int, intensity: Float, startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
+        val totalUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+        val clampedStart = startUs.coerceIn(0L, maxOf(0L, totalUs - OverlayItem.MIN_DURATION_US))
+        val endUs = minOf(clampedStart + durationUs, totalUs).coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US)
+        val newItem = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.EFFECT,
+            laneIndex = 0,
+            zIndex = (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1,
+            startUs = clampedStart,
+            endUs = endUs,
+            effectPresetId = presetId,
+            effectIntensity = intensity
+        )
+        addLayerItem(newItem)
+        selectOverlay(newItem.id)
+        return newItem
+    }
+
+    fun updateSelectedFilterLayer(presetId: Int, intensity: Float): OverlayItem? {
+        val selectedId = _uiState.value.selectedOverlayId ?: return null
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return null
+        val item = _layerItems[idx]
+        if (item.type != LayerType.FILTER) return null
+        val updated = item.copy(filterPresetId = presetId, filterIntensity = intensity)
+        _layerItems[idx] = updated
+        syncLayerPlan()
+        return updated
+    }
+
+    fun updateSelectedEffectLayer(presetId: Int, intensity: Float): OverlayItem? {
+        val selectedId = _uiState.value.selectedOverlayId ?: return null
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return null
+        val item = _layerItems[idx]
+        if (item.type != LayerType.EFFECT) return null
+        val updated = item.copy(effectPresetId = presetId, effectIntensity = intensity)
+        _layerItems[idx] = updated
+        syncLayerPlan()
+        return updated
+    }
+
+    fun commitSelectedFilterLayer(presetId: Int, intensity: Float) {
+        val selectedId = _uiState.value.selectedOverlayId ?: return
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return
+        pushUndoState()
+        val item = _layerItems[idx]
+        _layerItems[idx] = item.copy(filterPresetId = presetId, filterIntensity = intensity)
+        syncLayerPlan()
+    }
+
+    fun commitSelectedEffectLayer(presetId: Int, intensity: Float) {
+        val selectedId = _uiState.value.selectedOverlayId ?: return
+        val idx = _layerItems.indexOfFirst { it.id == selectedId }
+        if (idx < 0) return
+        pushUndoState()
+        val item = _layerItems[idx]
+        _layerItems[idx] = item.copy(effectPresetId = presetId, effectIntensity = intensity)
+        syncLayerPlan()
     }
 
     fun getClipTransform(clipId: String): ClipTransform =
@@ -1123,6 +1189,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(itemId)
             LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(itemId)
             LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(itemId)
+            LayerType.FILTER, LayerType.EFFECT -> TimelineFocusState.S7_FILTER_EFFECT_ITEM(itemId)
             else -> TimelineFocusState.S0_NONE
         }
         _uiState.update {
