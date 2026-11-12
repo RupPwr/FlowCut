@@ -400,6 +400,100 @@ fun clampItemTrimBoundsOnRow(
 }
 
 /**
+ * Computes a valid, non-overlapping drop position on the 4-row lower timeline (rows 0..3)
+ * or anywhere on the timeline for Row A items (TEXT / STICKER).
+ * Guarantees that two PIP items or two Audio items on the same row NEVER overlap.
+ */
+fun findValidDropPositionOnRows(
+    items: List<OverlayItem>,
+    itemId: String,
+    targetLaneIndex: Int,
+    desiredStartUs: Long,
+    totalProjectDurationUs: Long
+): RowAllocationResult? {
+    val item = items.firstOrNull { it.id == itemId } ?: return null
+    val durationUs = item.durationUs
+    if (durationUs < OverlayItem.MIN_DURATION_US) return null
+
+    val maxProjectEndUs = totalProjectDurationUs.coerceAtLeast(durationUs)
+    val maxStartUs = (maxProjectEndUs - durationUs).coerceAtLeast(0L)
+    val candidateStartUs = desiredStartUs.coerceIn(0L, maxStartUs)
+    val candidateEndUs = candidateStartUs + durationUs
+
+    val group = item.trackGroup()
+    if (group == null) {
+        // Text or Sticker (Row A)
+        return RowAllocationResult(
+            laneIndex = 0,
+            startUs = candidateStartUs,
+            endUs = candidateEndUs
+        )
+    }
+
+    val sameGroupNeighbors = items.filter { it.id != itemId && it.trackGroup() == group }
+    val desiredLane = targetLaneIndex.coerceIn(0, 3)
+
+    // Option 1: Desired lane has NO overlap
+    val targetLaneItems = sameGroupNeighbors.filter { it.laneIndex.coerceIn(0, 3) == desiredLane }
+    val targetOverlap = targetLaneItems.any { it.startUs < candidateEndUs && it.endUs > candidateStartUs }
+    if (!targetOverlap) {
+        return RowAllocationResult(
+            laneIndex = desiredLane,
+            startUs = candidateStartUs,
+            endUs = candidateEndUs
+        )
+    }
+
+    // Option 2: Try other rows in 0..3 ordered by closeness to desiredLane
+    val alternateRows = (0..3).sortedBy { kotlin.math.abs(it - desiredLane) }
+    for (row in alternateRows) {
+        if (row == desiredLane) continue
+        val rowItems = sameGroupNeighbors.filter { it.laneIndex.coerceIn(0, 3) == row }
+        val overlap = rowItems.any { it.startUs < candidateEndUs && it.endUs > candidateStartUs }
+        if (!overlap) {
+            return RowAllocationResult(
+                laneIndex = row,
+                startUs = candidateStartUs,
+                endUs = candidateEndUs
+            )
+        }
+    }
+
+    // Option 3: Clamp flush against neighbor on desiredLane
+    val prevNeighbor = targetLaneItems
+        .filter { it.endUs <= candidateStartUs + (durationUs / 2L) }
+        .maxByOrNull { it.endUs }
+    val nextNeighbor = targetLaneItems
+        .filter { it.startUs >= candidateEndUs - (durationUs / 2L) }
+        .minByOrNull { it.startUs }
+
+    if (prevNeighbor != null) {
+        val flushStart = prevNeighbor.endUs
+        val flushEnd = flushStart + durationUs
+        val nextAfterFlush = targetLaneItems.filter { it.startUs >= flushEnd }.minOfOrNull { it.startUs } ?: maxProjectEndUs
+        if (flushEnd <= nextAfterFlush && flushEnd <= maxProjectEndUs) {
+            return RowAllocationResult(desiredLane, flushStart, flushEnd)
+        }
+    }
+
+    if (nextNeighbor != null) {
+        val flushEnd = nextNeighbor.startUs
+        val flushStart = flushEnd - durationUs
+        val prevBeforeFlush = targetLaneItems.filter { it.endUs <= flushStart }.maxOfOrNull { it.endUs } ?: 0L
+        if (flushStart >= prevBeforeFlush && flushStart >= 0L) {
+            return RowAllocationResult(desiredLane, flushStart, flushEnd)
+        }
+    }
+
+    // Fallback: stay at item's current valid non-overlapping position
+    return RowAllocationResult(
+        laneIndex = item.laneIndex.coerceIn(0, 3),
+        startUs = item.startUs,
+        endUs = item.endUs
+    )
+}
+
+/**
  * Pre-compiled non-overlapping timeline interval.
  * Visual item indices are pre-sorted back-to-front by (zIndex, laneIndex).
  */

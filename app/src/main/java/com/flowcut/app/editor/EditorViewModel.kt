@@ -75,7 +75,9 @@ data class EditorUiState(
     val exportState: ExportState = ExportState.Ready,
     val exportedUri: Uri? = null,
     val toastMessage: String? = null,
-    val isMainTrackMuted: Boolean = false
+    val isMainTrackMuted: Boolean = false,
+    val coverTimeUs: Long = 0L,
+    val customCoverPath: String? = null
 )
 
 data class SplitResult(
@@ -1232,6 +1234,41 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         updateProject(_uiState.value.project, recordUndo = false)
     }
 
+    fun liveOverlayMove(itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        _layerItems[idx] = item.copy(
+            laneIndex = newLaneIndex,
+            startUs = newStartUs,
+            endUs = newEndUs
+        )
+        syncLayerPlan()
+    }
+
+    fun commitOverlayMove(itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val item = _layerItems[idx]
+        pushUndoState()
+        val topZ = getTopZIndex()
+        _layerItems[idx] = item.copy(
+            laneIndex = newLaneIndex,
+            startUs = newStartUs,
+            endUs = newEndUs,
+            zIndex = topZ
+        )
+        syncLayerPlan()
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = itemId,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+    }
+
     fun updateAudioVolume(itemId: String, volume: Float): Boolean {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return false
@@ -1479,6 +1516,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         updateProject(currentProject, recordUndo = false)
+    }
+
+    fun setCoverFromTimelineFrame(timeUs: Long) {
+        _uiState.update { it.copy(coverTimeUs = timeUs, customCoverPath = null) }
+    }
+
+    fun setCoverFromGalleryImage(path: String) {
+        _uiState.update { it.copy(customCoverPath = path, coverTimeUs = 0L) }
     }
 
     fun commitClipVolume(clipIndex: Int, volume: Float) {

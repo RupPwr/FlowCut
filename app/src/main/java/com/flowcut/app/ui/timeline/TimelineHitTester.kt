@@ -58,28 +58,42 @@ object TimelineHitTester {
     const val JUNCTION_BOX_SIZE_DP = 20f
     const val JUNCTION_TOUCH_TARGET_DP = 20f
     const val RULER_HEIGHT_DP = 20f
+    const val RULER_TOP_HEIGHT_DP = 16f
     const val ROW_A_PINS_HEIGHT_DP = 24f
+    const val ROW_A_TOP_DP = 18f
+    const val ROW_A_BOTTOM_CLOSED_DP = 62f
+    const val ROW_A_BOTTOM_OPEN_DP = 36f
     const val ROW_B_BAR_HEIGHT_DP = 26f
+    const val ROW_B_TOP_DP = 38f
+    const val ROW_B_BOTTOM_DP = 64f
     const val ROW_GAP_DP = 2f
     const val ROW_C_GAP_DP = ROW_GAP_DP
+    const val ROW_C_TOP_DP = 66f
     const val MAIN_TRACK_HEIGHT_DP = 42f
+    const val ROW_C_BOTTOM_DP = 108f
     const val ROW_D_TOP_MARGIN_DP = 4f
+    const val ROW_D_TOP_DP = 112f
     const val LOWER_ROW_HEIGHT_DP = 24f
     const val LOWER_ROW_GAP_DP = 4f
     const val LOWER_ROW_STEP_DP = 28f // 24f + 4f
     const val LOWER_4_ROWS_TOTAL_HEIGHT_DP = 112f
+    const val LOWER_ZONE_BOTTOM_DP = 220f // 112f + 108f = 220f
     const val ROW_D_PIP_EXPANDED_LANE_HEIGHT_DP = LOWER_ROW_HEIGHT_DP
     const val ROW_D_PIP_EXPANDED_LANE_STEP_DP = LOWER_ROW_STEP_DP
     const val ROW_D_PIP_EXPANDED_TOTAL_HEIGHT_DP = LOWER_4_ROWS_TOTAL_HEIGHT_DP
     const val ROW_D_PIP_COLLAPSED_LINE_HEIGHT_DP = 3.5f
     const val ROW_D_PIP_COLLAPSED_STEP_DP = 7f
     const val ROW_E_SOUND_BAR_HEIGHT_DP = 24f
-    const val COVER_BOX_WIDTH_DP = 32f
-    const val COVER_BOX_HEIGHT_DP = 36f
-    const val ADD_BTN_WIDTH_DP = 26f
-    const val ADD_BTN_HEIGHT_DP = 32f
+    const val COVER_BOX_WIDTH_DP = 38f
+    const val COVER_BOX_HEIGHT_DP = 42f
+    const val MUTE_BTN_SIZE_DP = 36f
+    const val COVER_GAP_TO_CLIP0_DP = 22f
+    const val ADD_BTN_WIDTH_DP = 34f
+    const val ADD_BTN_HEIGHT_DP = 34f
     const val PIN_WIDTH_DP = 22f
-    const val PIN_HEIGHT_DP = 20f
+    const val PIN_HEIGHT_CLOSED_DP = 44f
+    const val PIN_HEIGHT_OPEN_DP = 18f
+    const val PIN_HEIGHT_DP = 44f
     const val TRIM_HANDLE_WIDTH_DP = 15f
     const val TRIM_HANDLE_HEIGHT_DP = 34f
     const val TRIM_HANDLE_TOUCH_TARGET_DP = 28f
@@ -110,7 +124,7 @@ object TimelineHitTester {
         density: Float,
         snapshot: TimelineSnapshot,
         zoomState: TimelineZoomState,
-        rowCTopDp: Float = 46f,
+        rowCTopDp: Float = ROW_C_TOP_DP,
         mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
         handleWidthDp: Float = TRIM_HANDLE_WIDTH_DP
     ): TrimHandleType {
@@ -181,19 +195,16 @@ object TimelineHitTester {
         val itemBottomPx: Float
 
         val isRowBOpen = focusMode is TimelineFocusState.S3_STICKER_ITEM || focusMode is TimelineFocusState.S4_TEXT_ITEM
-        val rowBHeightDp = if (isRowBOpen) ROW_B_BAR_HEIGHT_DP else 0f
-        val rowBTopDp = RULER_HEIGHT_DP + ROW_A_PINS_HEIGHT_DP + ROW_GAP_DP
-        val rowBBottomDp = rowBTopDp + rowBHeightDp
-        val rowCTopDp = if (isRowBOpen) rowBBottomDp + ROW_GAP_DP else rowBTopDp
-        val rowCBottomDp = rowCTopDp + MAIN_TRACK_HEIGHT_DP
-        val rowDTopDp = rowCBottomDp + ROW_D_TOP_MARGIN_DP
+        val rowBTopDp = ROW_B_TOP_DP
+        val rowBBottomDp = ROW_B_BOTTOM_DP
+        val rowDTopDp = ROW_D_TOP_DP
 
         if (isTextOrSticker) {
-            // Row B bounds: 46..72.dp when open
+            // Row B bounds: 38..64.dp when open
             itemTopPx = rowBTopDp * density
             itemBottomPx = rowBBottomDp * density
         } else {
-            // Lower 4-Row Area (Row D PIP or Audio)
+            // Lower 4-Row Area (Row D PIP or Audio): 112..220.dp
             val lane = item.laneIndex.coerceIn(0, 3)
             val laneTopDp = rowDTopDp + (lane * LOWER_ROW_STEP_DP)
             itemTopPx = laneTopDp * density
@@ -245,12 +256,14 @@ object TimelineHitTester {
         mainTrackHeightPx: Float
     ): Boolean {
         val clip0LeftX = zoomState.timeUsToX(0L, playheadUs, halfWidthPx, density)
-        val coverRight = clip0LeftX - (10f * density)
+        val coverRight = clip0LeftX - (COVER_GAP_TO_CLIP0_DP * density)
         val coverLeft = coverRight - (COVER_BOX_WIDTH_DP * density)
-        val muteBtnCenterX = coverLeft - (20f * density)
+        val muteBtnRight = coverLeft - (10f * density)
+        val muteBtnLeft = muteBtnRight - (MUTE_BTN_SIZE_DP * density)
+        val muteBtnCenterX = (muteBtnLeft + muteBtnRight) / 2f
         val muteBtnCenterY = rowCTopPx + mainTrackHeightPx / 2f
 
-        val touchRadiusPx = 24f * density
+        val touchRadiusPx = (MUTE_BTN_SIZE_DP / 2f + 6f) * density
         val dx = abs(tapX - muteBtnCenterX)
         val dy = abs(tapY - muteBtnCenterY)
         return dx <= touchRadiusPx && dy <= touchRadiusPx
@@ -267,7 +280,7 @@ object TimelineHitTester {
         mainTrackHeightPx: Float
     ): Boolean {
         val clip0LeftX = zoomState.timeUsToX(0L, playheadUs, halfWidthPx, density)
-        val coverRight = clip0LeftX - (10f * density)
+        val coverRight = clip0LeftX - (COVER_GAP_TO_CLIP0_DP * density)
         val coverLeft = coverRight - (COVER_BOX_WIDTH_DP * density)
         val coverTop = rowCTopPx + (mainTrackHeightPx - (COVER_BOX_HEIGHT_DP * density)) / 2f
         val coverBottom = coverTop + (COVER_BOX_HEIGHT_DP * density)
@@ -275,6 +288,24 @@ object TimelineHitTester {
 
         return tapX in (coverLeft - margin)..(coverRight + margin) &&
                 tapY in (coverTop - margin)..(coverBottom + margin)
+    }
+
+    fun hitTestAddClipButton(
+        tapX: Float,
+        tapY: Float,
+        canvasWidthPx: Float,
+        density: Float,
+        rowCTopPx: Float,
+        mainTrackHeightPx: Float
+    ): Boolean {
+        val addBtnRight = canvasWidthPx - (12f * density)
+        val addBtnLeft = addBtnRight - (ADD_BTN_WIDTH_DP * density)
+        val addBtnTop = rowCTopPx + (mainTrackHeightPx - (ADD_BTN_HEIGHT_DP * density)) / 2f
+        val addBtnBottom = addBtnTop + (ADD_BTN_HEIGHT_DP * density)
+        val margin = 8f * density
+
+        return tapX in (addBtnLeft - margin)..(addBtnRight + margin) &&
+                tapY in (addBtnTop - margin)..(addBtnBottom + margin)
     }
 
     fun hitTestAddClipButton(
@@ -288,15 +319,7 @@ object TimelineHitTester {
         rowCTopPx: Float,
         mainTrackHeightPx: Float
     ): Boolean {
-        val lastClipRightX = zoomState.timeUsToX(totalUs, playheadUs, halfWidthPx, density)
-        val addBtnLeft = lastClipRightX + (10f * density)
-        val addBtnRight = addBtnLeft + (ADD_BTN_WIDTH_DP * density)
-        val addBtnTop = rowCTopPx + (mainTrackHeightPx - (ADD_BTN_HEIGHT_DP * density)) / 2f
-        val addBtnBottom = addBtnTop + (ADD_BTN_HEIGHT_DP * density)
-        val margin = 8f * density
-
-        return tapX in (addBtnLeft - margin)..(addBtnRight + margin) &&
-                tapY in (addBtnTop - margin)..(addBtnBottom + margin)
+        return hitTestAddClipButton(tapX, tapY, halfWidthPx * 2f, density, rowCTopPx, mainTrackHeightPx)
     }
 
     /**
@@ -394,7 +417,7 @@ object TimelineHitTester {
         density: Float,
         snapshot: TimelineSnapshot,
         zoomState: TimelineZoomState,
-        rulerHeightDp: Float = RULER_HEIGHT_DP,
+        rulerHeightDp: Float = RULER_TOP_HEIGHT_DP,
         mainTrackHeightDp: Float = MAIN_TRACK_HEIGHT_DP,
         laneHeightDp: Float = LANE_HEIGHT_DP,
         selectedClipIndex: Int = -1,
@@ -407,23 +430,22 @@ object TimelineHitTester {
 
         // Calculate constant vertical row coordinates
         val rulerHeightPx = rulerHeightDp * density
-        val rowATopPx = rulerHeightPx
-        val rowAPinsHeightPx = ROW_A_PINS_HEIGHT_DP * density
-        val rowABottomPx = rowATopPx + rowAPinsHeightPx
-
         val isRowBOpen = focusMode is TimelineFocusState.S3_STICKER_ITEM || focusMode is TimelineFocusState.S4_TEXT_ITEM
-        val rowBTopPx = rowABottomPx + (ROW_GAP_DP * density)
-        val rowBHeightPx = if (isRowBOpen) ROW_B_BAR_HEIGHT_DP * density else 0f
-        val rowBBottomPx = rowBTopPx + rowBHeightPx
 
-        val rowCTopPx = if (isRowBOpen) rowBBottomPx + (ROW_GAP_DP * density) else rowBTopPx
+        val rowATopPx = ROW_A_TOP_DP * density
+        val rowABottomPx = (if (isRowBOpen) ROW_A_BOTTOM_OPEN_DP else ROW_A_BOTTOM_CLOSED_DP) * density
+
+        val rowBTopPx = ROW_B_TOP_DP * density
+        val rowBBottomPx = ROW_B_BOTTOM_DP * density
+
+        val rowCTopPx = ROW_C_TOP_DP * density
         val mainTrackHeightPx = mainTrackHeightDp * density
-        val rowCBottomPx = rowCTopPx + mainTrackHeightPx
+        val rowCBottomPx = ROW_C_BOTTOM_DP * density
 
-        val rowDTopPx = rowCBottomPx + (ROW_D_TOP_MARGIN_DP * density)
+        val rowDTopPx = ROW_D_TOP_DP * density
         val lowerRowHeightPx = LOWER_ROW_HEIGHT_DP * density
         val lowerRowStepPx = LOWER_ROW_STEP_DP * density
-        val lower4RowsBottomPx = rowDTopPx + (4 * lowerRowStepPx)
+        val lower4RowsBottomPx = LOWER_ZONE_BOTTOM_DP * density
 
         val pipItems = overlayItems.filter { it.type == LayerType.VIDEO || it.type == LayerType.IMAGE }
         val audioItems = overlayItems.filter { it.type == LayerType.AUDIO }
@@ -447,6 +469,15 @@ object TimelineHitTester {
         val soundBarBottomPx = soundBarTopPx + (ROW_E_SOUND_BAR_HEIGHT_DP * density)
         val rowEBottomPx = soundBarBottomPx
 
+        val canvasWidthPx = halfWidthPx * 2f
+
+        // -----------------------------------------------------------------------------------------
+        // PRIORITY -2: Append Media Pink "+" Button (Permanently fixed at right edge of screen)
+        // -----------------------------------------------------------------------------------------
+        if (hitTestAddClipButton(tapX, tapY, canvasWidthPx, density, rowCTopPx, mainTrackHeightPx)) {
+            return TimelineSelection.AddClipClicked
+        }
+
         // -----------------------------------------------------------------------------------------
         // PRIORITY -1: Track Audio Mute/Unmute Button (Anchored left of clip 0 in Row C)
         // -----------------------------------------------------------------------------------------
@@ -459,13 +490,6 @@ object TimelineHitTester {
         // -----------------------------------------------------------------------------------------
         if (hitTestCoverButton(tapX, tapY, playheadUs, halfWidthPx, density, zoomState, rowCTopPx, mainTrackHeightPx)) {
             return TimelineSelection.CoverClicked
-        }
-
-        // -----------------------------------------------------------------------------------------
-        // PRIORITY -0.2: Append Media Pink "+" Button (Anchored right of total duration in Row C)
-        // -----------------------------------------------------------------------------------------
-        if (hitTestAddClipButton(tapX, tapY, totalUs, playheadUs, halfWidthPx, density, zoomState, rowCTopPx, mainTrackHeightPx)) {
-            return TimelineSelection.AddClipClicked
         }
 
         // -----------------------------------------------------------------------------------------
@@ -610,7 +634,7 @@ object TimelineHitTester {
             }
         } else if (isAudioExpanded) {
             val audioRowsTopPx = rowDTopPx
-            val audio4RowsBottomPx = audioRowsTopPx + (4 * lowerRowStepPx)
+            val audio4RowsBottomPx = lower4RowsBottomPx
             if (tapY in audioRowsTopPx..audio4RowsBottomPx) {
                 val relativeY = tapY - audioRowsTopPx
                 val laneIndex = (relativeY / lowerRowStepPx).toInt().coerceIn(0, 3)

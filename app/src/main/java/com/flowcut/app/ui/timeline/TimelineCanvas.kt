@@ -11,6 +11,7 @@ import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -28,12 +29,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -57,7 +60,9 @@ import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.LayerTrackGroup
 import com.flowcut.app.engine.LayerType
+import com.flowcut.app.engine.trackGroup
 import com.flowcut.app.engine.OverlayItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -333,6 +338,8 @@ fun TimelineCanvas(
     onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> },
     onCommitOverlayTrim: (itemId: String, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _ -> },
     onLiveOverlayTrim: (itemId: String, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _ -> },
+    onCommitOverlayMove: (itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _, _ -> },
+    onLiveOverlayMove: (itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _, _ -> },
     onTrimPreview: (trimPreviewTimeUs: Long) -> Unit = {},
     getClipNaturalDurationUs: (clipIndex: Int) -> Long = { index ->
         val c = holder.current.project.clips.getOrNull(index)
@@ -341,11 +348,13 @@ fun TimelineCanvas(
     isMainTrackMuted: Boolean = false,
     onToggleTrackMute: () -> Unit = {},
     onToast: (String) -> Unit = {},
+    customCoverBitmap: ImageBitmap? = null,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current.density
     val textMeasurer = rememberTextMeasurer(cacheSize = 200)
     val coroutineScope = rememberCoroutineScope()
+    val hapticFeedback = LocalHapticFeedback.current
 
     val currentSelection by rememberUpdatedState(selection)
     val currentFocusMode by rememberUpdatedState(focusMode)
@@ -355,28 +364,48 @@ fun TimelineCanvas(
     val currentOnCommitTrim by rememberUpdatedState(onCommitTrim)
     val currentOnCommitOverlayTrim by rememberUpdatedState(onCommitOverlayTrim)
     val currentOnLiveOverlayTrim by rememberUpdatedState(onLiveOverlayTrim)
+    val currentOnCommitOverlayMove by rememberUpdatedState(onCommitOverlayMove)
+    val currentOnLiveOverlayMove by rememberUpdatedState(onLiveOverlayMove)
     val currentOnTrimPreview by rememberUpdatedState(onTrimPreview)
     val currentGetClipNaturalDurationUs by rememberUpdatedState(getClipNaturalDurationUs)
     val currentOnWakeFrameDriver by rememberUpdatedState(onWakeFrameDriver)
     val currentIsMainTrackMuted by rememberUpdatedState(isMainTrackMuted)
     val currentOnToggleTrackMute by rememberUpdatedState(onToggleTrackMute)
     val currentOnToast by rememberUpdatedState(onToast)
+    val currentCustomCoverBitmap by rememberUpdatedState(customCoverBitmap)
 
     val clipNaturalDurationCache = remember { mutableMapOf<String, Long>() }
+    val draggedOverlayId = remember { mutableStateOf<String?>(null) }
+    val draggedGlowStroke = remember(density) { Stroke(width = 2.5f * density) }
 
     // Pre-allocated styling constants (Rule R10)
-    val rulerHeightPx = remember(density) { TimelineHitTester.RULER_HEIGHT_DP * density }
+    val rulerHeightPx = remember(density) { TimelineHitTester.RULER_TOP_HEIGHT_DP * density }
     val rowAPinsHeightPx = remember(density) { TimelineHitTester.ROW_A_PINS_HEIGHT_DP * density }
+    val rowATopPx = remember(density) { TimelineHitTester.ROW_A_TOP_DP * density }
+    val rowABottomClosedPx = remember(density) { TimelineHitTester.ROW_A_BOTTOM_CLOSED_DP * density }
+    val rowABottomOpenPx = remember(density) { TimelineHitTester.ROW_A_BOTTOM_OPEN_DP * density }
+    val pinHeightClosedPx = remember(density) { TimelineHitTester.PIN_HEIGHT_CLOSED_DP * density }
+    val pinHeightOpenPx = remember(density) { TimelineHitTester.PIN_HEIGHT_OPEN_DP * density }
+
+    val rowBTopPx = remember(density) { TimelineHitTester.ROW_B_TOP_DP * density }
     val rowBBarHeightPx = remember(density) { TimelineHitTester.ROW_B_BAR_HEIGHT_DP * density }
+    val rowBBottomPx = remember(density) { TimelineHitTester.ROW_B_BOTTOM_DP * density }
+
+    val rowCTopPx = remember(density) { TimelineHitTester.ROW_C_TOP_DP * density }
     val mainTrackHeightPx = remember(density) { TimelineHitTester.MAIN_TRACK_HEIGHT_DP * density }
+    val rowCBottomPx = remember(density) { TimelineHitTester.ROW_C_BOTTOM_DP * density }
+
+    val rowDTopPx = remember(density) { TimelineHitTester.ROW_D_TOP_DP * density }
+    val lowerRowHeightPx = remember(density) { TimelineHitTester.LOWER_ROW_HEIGHT_DP * density }
+    val lowerRowStepPx = remember(density) { TimelineHitTester.LOWER_ROW_STEP_DP * density }
+    val lower4RowsBottomPx = remember(density) { TimelineHitTester.LOWER_ZONE_BOTTOM_DP * density }
     val pipCollapsedLineHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_COLLAPSED_LINE_HEIGHT_DP * density }
-    val pipExpandedLaneHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_EXPANDED_LANE_HEIGHT_DP * density }
-    val pipExpandedLaneStepPx = remember(density) { TimelineHitTester.ROW_D_PIP_EXPANDED_LANE_STEP_DP * density }
+    val pipExpandedLaneHeightPx = lowerRowHeightPx
+    val pipExpandedLaneStepPx = lowerRowStepPx
     val pipExpandedTotalHeightPx = remember(density) { TimelineHitTester.ROW_D_PIP_EXPANDED_TOTAL_HEIGHT_DP * density }
     val soundBarHeightPx = remember(density) { TimelineHitTester.ROW_E_SOUND_BAR_HEIGHT_DP * density }
 
     val pinWidthPx = remember(density) { TimelineHitTester.PIN_WIDTH_DP * density }
-    val pinHeightPx = remember(density) { TimelineHitTester.PIN_HEIGHT_DP * density }
     val pinCornerRadiusPx = remember(density) { 3.5f * density }
     val pinUnderlineStrokePx = remember(density) { 2.5f * density }
 
@@ -453,10 +482,11 @@ fun TimelineCanvas(
 
     // Track Mute/Unmute constants
     val muteBtnBorderStroke = remember(density) { Stroke(width = 1f * density) }
-    val speakerWaveStroke = remember(density) { Stroke(width = 1.5f * density, cap = StrokeCap.Round) }
+    val speakerWaveStroke = remember(density) { Stroke(width = 1.6f * density, cap = StrokeCap.Round) }
+    val muteSlashStroke = remember(density) { Stroke(width = 2.0f * density, cap = StrokeCap.Round) }
     val muteCrossColor = remember { Color(0xFFFF453A) }
     val speakerMutedColor = remember { Color(0xFF8E8E93) }
-    val muteBtnCardBg = remember { Color(0xFF1E1E24) }
+    val muteBtnCardBg = remember { Color(0xFF1C1D24) }
     val muteBtnBorderColor = remember { Color(0x33FFFFFF) }
 
     // Reusable paths (Rule R10: zero allocation in onDraw)
@@ -470,6 +500,7 @@ fun TimelineCanvas(
     val speakerConePath = remember { Path() }
     val speakerWave1Path = remember { Path() }
     val speakerWave2Path = remember { Path() }
+    val speakerSlashPath = remember { Path() }
 
     val pinPath = remember { Path() }
     val pinOutlinePath = remember { Path() }
@@ -487,8 +518,11 @@ fun TimelineCanvas(
 
     val coverCardPath = remember { Path() }
     val coverPencilPath = remember { Path() }
+    val coverLandscapePath = remember { Path() }
     val addBtnPath = remember { Path() }
     val addPlusPath = remember { Path() }
+    val addPlusStroke = remember(density) { Stroke(width = 2.2f * density, cap = StrokeCap.Round) }
+    val addHaloCorner = remember(density) { CornerRadius(9f * density, 9f * density) }
 
     val pipThinLinePath = remember { Path() }
     val pipLaneCardPath = remember { Path() }
@@ -595,10 +629,7 @@ fun TimelineCanvas(
                     val halfWidthPxOnDown = size.width / 2f
 
                     val isRowBOpenOnDown = focus is TimelineFocusState.S3_STICKER_ITEM || focus is TimelineFocusState.S4_TEXT_ITEM
-                    val rowBHeightDpOnDown = if (isRowBOpenOnDown) TimelineHitTester.ROW_B_BAR_HEIGHT_DP else 0f
-                    val rowBTopDpOnDown = TimelineHitTester.RULER_HEIGHT_DP + TimelineHitTester.ROW_A_PINS_HEIGHT_DP + TimelineHitTester.ROW_GAP_DP
-                    val rowBBottomDpOnDown = rowBTopDpOnDown + rowBHeightDpOnDown
-                    val rowCTopDpOnDown = if (isRowBOpenOnDown) rowBBottomDpOnDown + TimelineHitTester.ROW_GAP_DP else rowBTopDpOnDown
+                    val rowCTopDpOnDown = TimelineHitTester.ROW_C_TOP_DP
 
                     val trimHandleHit = if (selectedClipIndex in 0 until snapshotOnDown.main.n) {
                         TimelineHitTester.hitTestTrimHandle(
@@ -638,6 +669,62 @@ fun TimelineCanvas(
 
                     val isOverlayTrimCandidate = overlayTrimHit != TimelineHitTester.OverlayTrimEdge.NONE
                     val isOverlayLeftHandle = overlayTrimHit == TimelineHitTester.OverlayTrimEdge.LEFT
+
+                    // Mode A: Direct Drag candidate on Row A pins
+                    val rowATopPxOnDown = rowATopPx
+                    val rowABottomPxOnDown = if (isRowBOpenOnDown) rowABottomOpenPx else rowABottomClosedPx
+                    val pinHitOnDown = if (!isTrimCandidate && !isOverlayTrimCandidate) {
+                        TimelineHitTester.hitTestRowAPins(
+                            tapX = down.position.x,
+                            tapY = down.position.y,
+                            overlayItems = currentOverlayItems,
+                            playheadUs = playhead.timeUs,
+                            halfWidthPx = halfWidthPxOnDown,
+                            density = density,
+                            zoomState = zoomState,
+                            rowATopPx = rowATopPxOnDown,
+                            rowABottomPx = rowABottomPxOnDown
+                        )
+                    } else null
+
+                    val isPinCandidate = pinHitOnDown != null
+                    val curPinItem = when (pinHitOnDown) {
+                        is TimelineSelection.OverlaySelected -> currentOverlayItems.firstOrNull { it.id == pinHitOnDown.itemId }
+                        is TimelineSelection.OverlappingPinsClicked -> {
+                            val inCluster = currentOverlayItems.firstOrNull { it.id == selectedOverlayId && it.id in pinHitOnDown.itemIds }
+                            inCluster ?: currentOverlayItems.firstOrNull { it.id == pinHitOnDown.itemIds.firstOrNull() }
+                        }
+                        else -> null
+                    }
+                    val initialPinStartUs = curPinItem?.startUs ?: 0L
+                    val initialPinEndUs = curPinItem?.endUs ?: 0L
+                    val pinDurationUs = curPinItem?.durationUs ?: 0L
+                    var currentPinStartUs = initialPinStartUs
+                    var currentPinEndUs = initialPinEndUs
+                    var isPinDragging = false
+
+                    // Mode B: Long-Press Drag-and-Drop candidate on PIP / Audio bars
+                    val isPipGroup = focus is TimelineFocusState.S1_PIP_GROUP || focus is TimelineFocusState.S2_PIP_ITEM
+                    val isAudioGroup = focus is TimelineFocusState.S5_AUDIO_GROUP || focus is TimelineFocusState.S6_AUDIO_ITEM
+                    val barCandidateItem: OverlayItem? = if (!isTrimCandidate && !isOverlayTrimCandidate && !isPinCandidate &&
+                        (isPipGroup || isAudioGroup) && down.position.y in rowDTopPx..lower4RowsBottomPx) {
+                        val lane = ((down.position.y - rowDTopPx) / lowerRowStepPx).toInt().coerceIn(0, 3)
+                        val downTimeUs = zoomState.xToTimeUs(down.position.x, playhead.timeUs, halfWidthPxOnDown, density)
+                        val groupType = if (isPipGroup) LayerTrackGroup.PIP else LayerTrackGroup.AUDIO
+                        currentOverlayItems.firstOrNull {
+                            it.trackGroup() == groupType && it.laneIndex.coerceIn(0, 3) == lane && downTimeUs in it.startUs..it.endUs
+                        }
+                    } else null
+
+                    val isBarCandidate = barCandidateItem != null
+                    val initialBarStartUs = barCandidateItem?.startUs ?: 0L
+                    val initialBarEndUs = barCandidateItem?.endUs ?: 0L
+                    val initialBarLane = barCandidateItem?.laneIndex?.coerceIn(0, 3) ?: 0
+                    val barDurationUs = barCandidateItem?.durationUs ?: 0L
+                    var currentBarStartUs = initialBarStartUs
+                    var currentBarEndUs = initialBarEndUs
+                    var currentBarLane = initialBarLane
+                    var isBarDragging = false
 
                     if (wasMovingOnDown) {
                         if (isTrimCandidate || isOverlayTrimCandidate) {
@@ -808,7 +895,19 @@ fun TimelineCanvas(
                         currentOnWakeFrameDriver()
                     }
 
-                    val longPressJob = if (!wasMovingOnDown && !isTrimCandidate && !isOverlayTrimCandidate) {
+                    val longPressJob = if (barCandidateItem != null) {
+                        coroutineScope.launch {
+                            delay(250L) // 250ms press hold for PIP / Audio bar drag
+                            if (!isDragging && !isZooming && !wasMovingOnDown) {
+                                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                isBarDragging = true
+                                wasLongPressed = true
+                                draggedOverlayId.value = barCandidateItem.id
+                                currentOnSelect(TimelineSelection.OverlaySelected(barCandidateItem.id))
+                                currentOnWakeFrameDriver()
+                            }
+                        }
+                    } else if (!wasMovingOnDown && !isTrimCandidate && !isOverlayTrimCandidate && !isPinCandidate) {
                         coroutineScope.launch {
                             delay(viewConfiguration.longPressTimeoutMillis)
                             if (!isDragging && !isZooming && !wasMovingOnDown) {
@@ -998,6 +1097,169 @@ fun TimelineCanvas(
                                         }
                                     }
                                     change.consume()
+                                } else if (isPinCandidate && curPinItem != null) {
+                                    val totalDxPx = change.position.x - startTouchX
+                                    val dragDist = abs(totalDxPx)
+                                    if (!isPinDragging && dragDist > dragSlop) {
+                                        isPinDragging = true
+                                        longPressJob?.cancel()
+                                        currentOnSelect(TimelineSelection.OverlaySelected(curPinItem.id))
+                                    }
+                                    if (isPinDragging) {
+                                        currentFingerX = change.position.x
+                                        if (pxPerUsAtStart > 0.0) {
+                                            val dragDeltaUs = (totalDxPx / pxPerUsAtStart).roundToLong() + accumulatedAutoScrollUs
+                                            val totalTimelineUs = msToUs(holder.current.totalMs)
+                                            val maxStartUs = (totalTimelineUs - pinDurationUs).coerceAtLeast(0L)
+                                            val newStartUs = (initialPinStartUs + dragDeltaUs).coerceIn(0L, maxStartUs)
+                                            val newEndUs = newStartUs + pinDurationUs
+                                            if (newStartUs != currentPinStartUs) {
+                                                currentPinStartUs = newStartUs
+                                                currentPinEndUs = newEndUs
+                                                currentOnLiveOverlayMove(curPinItem.id, 0, newStartUs, newEndUs)
+                                                currentOnWakeFrameDriver()
+                                            }
+                                        }
+
+                                        val canvasW = size.width.toFloat()
+                                        val inLeftZone = currentFingerX < edgeZonePx
+                                        val inRightZone = currentFingerX > canvasW - edgeZonePx
+
+                                        if ((inLeftZone || inRightZone) && autoScrollJob == null) {
+                                            autoScrollJob = coroutineScope.launch {
+                                                var lastNanos = System.nanoTime()
+                                                while (isActive) {
+                                                    delay(16L)
+                                                    val nowNanos = System.nanoTime()
+                                                    val dtSec = ((nowNanos - lastNanos) / 1_000_000_000.0).coerceIn(0.001, 0.050)
+                                                    lastNanos = nowNanos
+
+                                                    val w = size.width.toFloat()
+                                                    val fX = currentFingerX
+                                                    val speedFactor = when {
+                                                        fX < edgeZonePx -> -((edgeZonePx - fX) / edgeZonePx).coerceIn(0f, 1f)
+                                                        fX > w - edgeZonePx -> ((fX - (w - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1f)
+                                                        else -> 0f
+                                                    }
+
+                                                    if (speedFactor == 0f) break
+
+                                                    val deltaPx = speedFactor * maxScrollSpeedPxPerSec * dtSec
+                                                    if (pxPerUsAtStart > 0.0) {
+                                                        val rawDeltaUs = (deltaPx / pxPerUsAtStart) + scrollRemainderUs
+                                                        val deltaUs = rawDeltaUs.roundToLong()
+                                                        scrollRemainderUs = rawDeltaUs - deltaUs
+
+                                                        if (deltaUs != 0L) {
+                                                            accumulatedAutoScrollUs += deltaUs
+                                                            val totalDx = currentFingerX - startTouchX
+                                                            val dragDeltaUs = (totalDx / pxPerUsAtStart).roundToLong() + accumulatedAutoScrollUs
+                                                            val totalTimelineUs = msToUs(holder.current.totalMs)
+                                                            val maxStartUs = (totalTimelineUs - pinDurationUs).coerceAtLeast(0L)
+                                                            val nStartUs = (initialPinStartUs + dragDeltaUs).coerceIn(0L, maxStartUs)
+                                                            val nEndUs = nStartUs + pinDurationUs
+                                                            if (nStartUs != currentPinStartUs) {
+                                                                currentPinStartUs = nStartUs
+                                                                currentPinEndUs = nEndUs
+                                                                currentOnLiveOverlayMove(curPinItem.id, 0, nStartUs, nEndUs)
+                                                                currentOnWakeFrameDriver()
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                autoScrollJob = null
+                                            }
+                                        } else if (!inLeftZone && !inRightZone) {
+                                            autoScrollJob?.cancel()
+                                            autoScrollJob = null
+                                        }
+                                    }
+                                    change.consume()
+                                } else if (isBarDragging && barCandidateItem != null) {
+                                    longPressJob?.cancel()
+                                    currentFingerX = change.position.x
+                                    val totalDxPx = change.position.x - startTouchX
+                                    if (pxPerUsAtStart > 0.0) {
+                                        val dragDeltaUs = (totalDxPx / pxPerUsAtStart).roundToLong() + accumulatedAutoScrollUs
+                                        val desiredStartUs = initialBarStartUs + dragDeltaUs
+                                        val targetLane = ((change.position.y - rowDTopPx) / lowerRowStepPx).toInt().coerceIn(0, 3)
+                                        val totalTimelineUs = msToUs(holder.current.totalMs)
+                                        val validPos = com.flowcut.app.engine.findValidDropPositionOnRows(
+                                            items = currentOverlayItems,
+                                            itemId = barCandidateItem.id,
+                                            targetLaneIndex = targetLane,
+                                            desiredStartUs = desiredStartUs,
+                                            totalProjectDurationUs = totalTimelineUs
+                                        )
+                                        if (validPos != null && (validPos.startUs != currentBarStartUs || validPos.laneIndex != currentBarLane)) {
+                                            currentBarStartUs = validPos.startUs
+                                            currentBarEndUs = validPos.endUs
+                                            currentBarLane = validPos.laneIndex
+                                            currentOnLiveOverlayMove(barCandidateItem.id, validPos.laneIndex, validPos.startUs, validPos.endUs)
+                                            currentOnWakeFrameDriver()
+                                        }
+                                    }
+
+                                    val canvasW = size.width.toFloat()
+                                    val inLeftZone = currentFingerX < edgeZonePx
+                                    val inRightZone = currentFingerX > canvasW - edgeZonePx
+
+                                    if ((inLeftZone || inRightZone) && autoScrollJob == null) {
+                                        autoScrollJob = coroutineScope.launch {
+                                            var lastNanos = System.nanoTime()
+                                            while (isActive) {
+                                                delay(16L)
+                                                val nowNanos = System.nanoTime()
+                                                val dtSec = ((nowNanos - lastNanos) / 1_000_000_000.0).coerceIn(0.001, 0.050)
+                                                lastNanos = nowNanos
+
+                                                val w = size.width.toFloat()
+                                                val fX = currentFingerX
+                                                val speedFactor = when {
+                                                    fX < edgeZonePx -> -((edgeZonePx - fX) / edgeZonePx).coerceIn(0f, 1f)
+                                                    fX > w - edgeZonePx -> ((fX - (w - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1f)
+                                                    else -> 0f
+                                                }
+
+                                                if (speedFactor == 0f) break
+
+                                                val deltaPx = speedFactor * maxScrollSpeedPxPerSec * dtSec
+                                                if (pxPerUsAtStart > 0.0) {
+                                                    val rawDeltaUs = (deltaPx / pxPerUsAtStart) + scrollRemainderUs
+                                                    val deltaUs = rawDeltaUs.roundToLong()
+                                                    scrollRemainderUs = rawDeltaUs - deltaUs
+
+                                                    if (deltaUs != 0L) {
+                                                        accumulatedAutoScrollUs += deltaUs
+                                                        val totalDx = currentFingerX - startTouchX
+                                                        val dragDeltaUs = (totalDx / pxPerUsAtStart).roundToLong() + accumulatedAutoScrollUs
+                                                        val desiredStart = initialBarStartUs + dragDeltaUs
+                                                        val targetL = ((change.position.y - rowDTopPx) / lowerRowStepPx).toInt().coerceIn(0, 3)
+                                                        val totalTimelineUs = msToUs(holder.current.totalMs)
+                                                        val validPos = com.flowcut.app.engine.findValidDropPositionOnRows(
+                                                            items = currentOverlayItems,
+                                                            itemId = barCandidateItem.id,
+                                                            targetLaneIndex = targetL,
+                                                            desiredStartUs = desiredStart,
+                                                            totalProjectDurationUs = totalTimelineUs
+                                                        )
+                                                        if (validPos != null && (validPos.startUs != currentBarStartUs || validPos.laneIndex != currentBarLane)) {
+                                                            currentBarStartUs = validPos.startUs
+                                                            currentBarEndUs = validPos.endUs
+                                                            currentBarLane = validPos.laneIndex
+                                                            currentOnLiveOverlayMove(barCandidateItem.id, validPos.laneIndex, validPos.startUs, validPos.endUs)
+                                                            currentOnWakeFrameDriver()
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            autoScrollJob = null
+                                        }
+                                    } else if (!inLeftZone && !inRightZone) {
+                                        autoScrollJob?.cancel()
+                                        autoScrollJob = null
+                                    }
+                                    change.consume()
                                 } else {
                                     val totalDx = abs(change.position.x - startPos.x)
                                     val totalDy = abs(change.position.y - startPos.y)
@@ -1037,9 +1299,16 @@ fun TimelineCanvas(
                         longPressJob?.cancel()
                         autoScrollJob?.cancel()
                         activeTrimPlayheadUs.longValue = Long.MIN_VALUE
+                        draggedOverlayId.value = null
                     }
 
-                    if (isTrimCandidate && isTrimming) {
+                    if (isPinCandidate && isPinDragging && curPinItem != null) {
+                        currentOnCommitOverlayMove(curPinItem.id, 0, currentPinStartUs, currentPinEndUs)
+                        currentOnWakeFrameDriver()
+                    } else if (isBarDragging && barCandidateItem != null) {
+                        currentOnCommitOverlayMove(barCandidateItem.id, currentBarLane, currentBarStartUs, currentBarEndUs)
+                        currentOnWakeFrameDriver()
+                    } else if (isTrimCandidate && isTrimming) {
                         val finalDurMs = usToMs(currentOutUs - currentInUs)
                         currentOnCommitTrim(selectedClipIndex, currentInUs, currentOutUs, finalDurMs)
                         currentOnWakeFrameDriver()
@@ -1052,7 +1321,7 @@ fun TimelineCanvas(
                         val velocityUsPerSec = if (pxPerUsAtEnd > 0.0) -velocityPxPerSec / pxPerUsAtEnd else 0.0
                         controller.endScrub(velocityUsPerSec, pxPerUsAtEnd)
                         currentOnWakeFrameDriver()
-                    } else if (!wasLongPressed && !isZooming && !isTrimming) {
+                    } else if (!wasLongPressed && !isZooming && !isTrimming && !isPinDragging && !isBarDragging) {
                         val halfWidthPx = size.width / 2f
                         val hit = TimelineHitTester.hitTest(
                             tapX = startPos.x,
@@ -1114,19 +1383,19 @@ fun TimelineCanvas(
         }
 
         // Constant vertical layout coordinates
-        val rowATop = rulerHeightPx
-        val rowABottom = rowATop + rowAPinsHeightPx
+        val rowATop = rowATopPx
+        val rowABottom = if (isRowBOpen) rowABottomOpenPx else rowABottomClosedPx
+        val pinHeight = if (isRowBOpen) pinHeightOpenPx else pinHeightClosedPx
 
-        val rowBTop = rowABottom + (TimelineHitTester.ROW_GAP_DP * density)
-        val rowBHeight = if (isRowBOpen) rowBBarHeightPx else 0f
-        val rowBBottom = rowBTop + rowBHeight
+        val rowBTop = rowBTopPx
+        val rowBBottom = rowBBottomPx
 
-        val rowCTop = if (isRowBOpen) rowBBottom + (TimelineHitTester.ROW_GAP_DP * density) else rowBTop
-        val rowCBottom = rowCTop + mainTrackHeightPx
+        val rowCTop = rowCTopPx
+        val rowCBottom = rowCBottomPx
 
-        val rowDTop = rowCBottom + (TimelineHitTester.ROW_D_TOP_MARGIN_DP * density)
-        val lowerRowHeightPx = TimelineHitTester.LOWER_ROW_HEIGHT_DP * density
-        val lowerRowStepPx = TimelineHitTester.LOWER_ROW_STEP_DP * density
+        val rowDTop = rowDTopPx
+        val lowerRowHeightPx = lowerRowHeightPx
+        val lowerRowStepPx = lowerRowStepPx
 
         val thinLinesBottomPx = if (activePipLaneCount > 0) {
             rowDTop + (((activePipLaneCount - 1) * 7f + 3.5f) * density)
@@ -1164,7 +1433,7 @@ fun TimelineCanvas(
         val leftSec = java.util.concurrent.TimeUnit.MILLISECONDS.toSeconds(leftMs)
         val rightSec = java.util.concurrent.TimeUnit.MILLISECONDS.toSeconds(rightMs) + 1L
 
-        val dotY = rulerHeightPx - 3f * density
+        val dotY = rulerHeightPx - 2.5f * density
         val dotRadius = 1.5f * density
         val subDotRadius = 1.0f * density
 
@@ -1272,7 +1541,7 @@ fun TimelineCanvas(
                         anchorX = startX + (3.5f * density),
                         top = pinTopY - (2.5f * density),
                         width = pinWidthPx,
-                        height = pinHeightPx,
+                        height = pinHeight,
                         cornerRadius = pinCornerRadiusPx
                     )
                     drawPath(path = stackedPinPath, color = Color(0x991E1E24))
@@ -1284,17 +1553,19 @@ fun TimelineCanvas(
                     anchorX = startX,
                     top = pinTopY,
                     width = pinWidthPx,
-                    height = pinHeightPx,
+                    height = pinHeight,
                     cornerRadius = pinCornerRadiusPx
                 )
 
                 // Fill pin body
                 drawPath(path = pinPath, color = pinColor)
 
+                val pinCenterY = pinTopY + (pinHeight * 0.68f) / 2f
+
                 // Pin inner icon: crisp white "T" for TEXT, smiley for STICKER
                 if (item.type == LayerType.TEXT) {
-                    val tTop = pinTopY + (5f * density)
-                    val tStemBottom = pinTopY + (14f * density)
+                    val tTop = pinCenterY - (4.5f * density)
+                    val tStemBottom = pinCenterY + (4.5f * density)
                     val tHalfBar = 4.5f * density
                     pinTPath.reset()
                     pinTPath.moveTo(startX - tHalfBar, tTop)
@@ -1308,19 +1579,19 @@ fun TimelineCanvas(
                         // Picture icon: small rounded square
                         drawRect(
                             color = whiteColor,
-                            topLeft = Offset(startX - (4.5f * density), pinTopY + (5f * density)),
+                            topLeft = Offset(startX - (4.5f * density), pinCenterY - (4f * density)),
                             size = Size(9f * density, 8f * density),
                             style = Stroke(width = 1.4f * density)
                         )
                     } else {
                         // Smiley eyes and curved smile
-                        val eyeY = pinTopY + (7f * density)
+                        val eyeY = pinCenterY - (2.5f * density)
                         drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(startX - (3.2f * density), eyeY))
                         drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(startX + (3.2f * density), eyeY))
 
                         pinSmilePath.reset()
-                        pinSmilePath.moveTo(startX - (4f * density), pinTopY + (11f * density))
-                        pinSmilePath.quadraticTo(startX, pinTopY + (13.5f * density), startX + (4f * density), pinTopY + (11f * density))
+                        pinSmilePath.moveTo(startX - (4f * density), pinCenterY + (1.5f * density))
+                        pinSmilePath.quadraticTo(startX, pinCenterY + (4f * density), startX + (4f * density), pinCenterY + (1.5f * density))
                         drawPath(path = pinSmilePath, color = whiteColor, style = Stroke(width = 1.4f * density, cap = StrokeCap.Round))
                     }
                 }
@@ -1332,13 +1603,13 @@ fun TimelineCanvas(
                         anchorX = startX,
                         top = pinTopY,
                         width = pinWidthPx,
-                        height = pinHeightPx,
+                        height = pinHeight,
                         cornerRadius = pinCornerRadiusPx
                     )
                     drawPath(path = pinOutlinePath, color = whiteColor, style = whiteSelectionStroke)
 
                     // Vertical white connector tick pointing down into Row B
-                    val pinTipY = pinTopY + pinHeightPx
+                    val pinTipY = pinTopY + pinHeight
                     connectorTickPath.reset()
                     connectorTickPath.moveTo(startX, pinTipY)
                     connectorTickPath.lineTo(startX, rowBTop + (2f * density))
@@ -1479,16 +1750,16 @@ fun TimelineCanvas(
         val mainClipHeight = mainClipBottom - mainClipTop
         val n = snapshot.main.n
 
-        // Left of 0:00: Cover Box and Track Audio Mute
+        // Left of 0:00: Cover Box and Track Audio Mute (Requirement 2: >= 22.dp gap from clip 0)
         val clip0LeftX = zoomState.timeUsToX(0L, offsetPx, halfWidthInt, pxPerUs)
         val coverW = TimelineHitTester.COVER_BOX_WIDTH_DP * density
         val coverH = TimelineHitTester.COVER_BOX_HEIGHT_DP * density
-        val coverRight = clip0LeftX - (10f * density)
+        val coverRight = clip0LeftX - (TimelineHitTester.COVER_GAP_TO_CLIP0_DP * density)
         val coverLeft = coverRight - coverW
         val coverTop = rowCTop + (mainTrackHeightPx - coverH) / 2f
         val coverBottom = coverTop + coverH
 
-        if (coverRight >= -50f && coverLeft <= size.width + 50f) {
+        if (coverRight >= -100f && coverLeft <= size.width + 100f) {
             // Draw Cover card
             buildClipCornerPath(
                 path = coverCardPath,
@@ -1498,91 +1769,158 @@ fun TimelineCanvas(
                 bottom = coverBottom,
                 roundLeft = true,
                 roundRight = true,
-                radius = 5f * density
-            )
-            drawPath(path = coverCardPath, color = colorCoverCardBg)
-            drawPath(path = coverCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
-
-            // Pencil/image icon at top of cover card
-            val pencilCenterX = (coverLeft + coverRight) / 2f
-            val pencilTopY = coverTop + (8f * density)
-            coverPencilPath.reset()
-            coverPencilPath.moveTo(pencilCenterX - (4f * density), pencilTopY + (8f * density))
-            coverPencilPath.lineTo(pencilCenterX + (4f * density), pencilTopY)
-            coverPencilPath.lineTo(pencilCenterX + (6f * density), pencilTopY + (2f * density))
-            coverPencilPath.lineTo(pencilCenterX - (2f * density), pencilTopY + (10f * density))
-            coverPencilPath.close()
-            drawPath(path = coverPencilPath, color = Color(0xAAFFFFFF), style = unselectedStroke)
-
-            // "Cover" text label
-            drawTextSafe(
-                textMeasurer = textMeasurer,
-                text = "Cover",
-                x = coverLeft + (5f * density),
-                y = coverBottom - (15f * density),
-                style = coverLabelStyle
+                radius = 6f * density
             )
 
-            // Track Audio Mute Button (placed to the left of Cover card)
-            val muteBtnCenterX = coverLeft - (20f * density)
-            val muteBtnCenterY = rowCTop + (mainTrackHeightPx / 2f)
-            val muteBtnHalfW = 14f * density
-            val muteBtnHalfH = 17f * density
+            val customCover = currentCustomCoverBitmap
+            if (customCover != null) {
+                clipPath(coverCardPath) {
+                    drawImage(
+                        image = customCover,
+                        dstOffset = IntOffset(coverLeft.toInt(), coverTop.toInt()),
+                        dstSize = IntSize(coverW.toInt(), coverH.toInt())
+                    )
+                }
+                drawPath(path = coverCardPath, color = Color(0x44FFFFFF), style = unselectedStroke)
+
+                // Translucent bottom badge for pencil and label
+                val badgeH = 14f * density
+                val badgeTop = coverBottom - badgeH
+                drawRect(
+                    color = Color(0xD0121216),
+                    topLeft = Offset(coverLeft, badgeTop),
+                    size = Size(coverW, badgeH)
+                )
+
+                // Pencil icon inside badge
+                val pX = coverLeft + (4f * density)
+                val pY = badgeTop + (badgeH / 2f)
+                coverPencilPath.reset()
+                coverPencilPath.moveTo(pX, pY + (3f * density))
+                coverPencilPath.lineTo(pX + (4f * density), pY - (2f * density))
+                coverPencilPath.lineTo(pX + (6f * density), pY)
+                coverPencilPath.lineTo(pX + (2f * density), pY + (5f * density))
+                coverPencilPath.close()
+                drawPath(path = coverPencilPath, color = Color.White, style = Stroke(width = 1f * density))
+
+                drawTextSafe(
+                    textMeasurer = textMeasurer,
+                    text = "Cover",
+                    x = pX + (8f * density),
+                    y = badgeTop + (1.5f * density),
+                    style = coverLabelStyle
+                )
+            } else {
+                drawPath(path = coverCardPath, color = colorCoverCardBg)
+                drawPath(path = coverCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
+
+                // Vector landscape icon: Sun + Mountains
+                drawCircle(
+                    color = Color(0xCCFFFFFF),
+                    radius = 2.2f * density,
+                    center = Offset(coverLeft + (12f * density), coverTop + (12f * density))
+                )
+
+                coverLandscapePath.reset()
+                coverLandscapePath.moveTo(coverLeft + (7f * density), coverTop + (24f * density))
+                coverLandscapePath.lineTo(coverLeft + (15f * density), coverTop + (15f * density))
+                coverLandscapePath.lineTo(coverLeft + (21f * density), coverTop + (21f * density))
+                coverLandscapePath.lineTo(coverLeft + (26f * density), coverTop + (16f * density))
+                coverLandscapePath.lineTo(coverLeft + (31f * density), coverTop + (24f * density))
+                coverLandscapePath.close()
+                drawPath(path = coverLandscapePath, color = Color(0x99FFFFFF))
+
+                // Vector pencil icon at top right
+                val pX = coverRight - (9f * density)
+                val pY = coverTop + (8f * density)
+                coverPencilPath.reset()
+                coverPencilPath.moveTo(pX - (3f * density), pY + (3f * density))
+                coverPencilPath.lineTo(pX + (3f * density), pY - (3f * density))
+                coverPencilPath.lineTo(pX + (5f * density), pY - (1f * density))
+                coverPencilPath.lineTo(pX - (1f * density), pY + (5f * density))
+                coverPencilPath.close()
+                drawPath(path = coverPencilPath, color = Color(0xEEFFFFFF), style = Stroke(width = 1.2f * density))
+
+                // "Cover" text label
+                drawTextSafe(
+                    textMeasurer = textMeasurer,
+                    text = "Cover",
+                    x = coverLeft + (7f * density),
+                    y = coverBottom - (14f * density),
+                    style = coverLabelStyle
+                )
+            }
+
+            // Track Audio Mute Button (placed to the left of Cover card with 10.dp gap)
+            val muteBtnW = TimelineHitTester.MUTE_BTN_SIZE_DP * density
+            val muteBtnH = TimelineHitTester.MUTE_BTN_SIZE_DP * density
+            val muteBtnRight = coverLeft - (10f * density)
+            val muteBtnLeft = muteBtnRight - muteBtnW
+            val muteBtnTop = rowCTop + (mainTrackHeightPx - muteBtnH) / 2f
+            val muteBtnBottom = muteBtnTop + muteBtnH
+            val muteBtnCenterX = (muteBtnLeft + muteBtnRight) / 2f
+            val muteBtnCenterY = (muteBtnTop + muteBtnBottom) / 2f
             val isMuted = currentIsMainTrackMuted
 
             buildClipCornerPath(
                 path = muteBtnCardPath,
-                left = muteBtnCenterX - muteBtnHalfW,
-                top = muteBtnCenterY - muteBtnHalfH,
-                right = muteBtnCenterX + muteBtnHalfW,
-                bottom = muteBtnCenterY + muteBtnHalfH,
+                left = muteBtnLeft,
+                top = muteBtnTop,
+                right = muteBtnRight,
+                bottom = muteBtnBottom,
                 roundLeft = true,
                 roundRight = true,
-                radius = 5f * density
+                radius = 6f * density
             )
             drawPath(path = muteBtnCardPath, color = muteBtnCardBg)
             drawPath(
                 path = muteBtnCardPath,
-                color = if (isMuted) Color(0x55FF453A) else muteBtnBorderColor,
+                color = if (isMuted) Color(0x66FF453A) else muteBtnBorderColor,
                 style = muteBtnBorderStroke
             )
 
-            // Speaker cone
+            // Crisp Vector Speaker Cone
+            val coneLeft = muteBtnCenterX - (7f * density)
+            val coneRectRight = muteBtnCenterX - (3.5f * density)
+            val coneFlareRight = muteBtnCenterX + (0.5f * density)
             speakerConePath.reset()
-            speakerConePath.moveTo(muteBtnCenterX - (7.5f * density), muteBtnCenterY - (3f * density))
-            speakerConePath.lineTo(muteBtnCenterX - (4.5f * density), muteBtnCenterY - (3f * density))
-            speakerConePath.lineTo(muteBtnCenterX - (1.5f * density), muteBtnCenterY - (6f * density))
-            speakerConePath.lineTo(muteBtnCenterX - (1.5f * density), muteBtnCenterY + (6f * density))
-            speakerConePath.lineTo(muteBtnCenterX - (4.5f * density), muteBtnCenterY + (3f * density))
-            speakerConePath.lineTo(muteBtnCenterX - (7.5f * density), muteBtnCenterY + (3f * density))
+            speakerConePath.moveTo(coneLeft, muteBtnCenterY - (3.5f * density))
+            speakerConePath.lineTo(coneRectRight, muteBtnCenterY - (3.5f * density))
+            speakerConePath.lineTo(coneFlareRight, muteBtnCenterY - (6.5f * density))
+            speakerConePath.lineTo(coneFlareRight, muteBtnCenterY + (6.5f * density))
+            speakerConePath.lineTo(coneRectRight, muteBtnCenterY + (3.5f * density))
+            speakerConePath.lineTo(coneLeft, muteBtnCenterY + (3.5f * density))
             speakerConePath.close()
             drawPath(speakerConePath, color = if (isMuted) speakerMutedColor else whiteColor)
 
             if (!isMuted) {
+                // Wave 1
                 speakerWave1Path.reset()
-                speakerWave1Path.moveTo(muteBtnCenterX + (2f * density), muteBtnCenterY - (3.5f * density))
+                speakerWave1Path.moveTo(muteBtnCenterX + (3.5f * density), muteBtnCenterY - (4f * density))
                 speakerWave1Path.quadraticTo(
-                    muteBtnCenterX + (5f * density),
+                    muteBtnCenterX + (6.5f * density),
                     muteBtnCenterY,
-                    muteBtnCenterX + (2f * density),
-                    muteBtnCenterY + (3.5f * density)
+                    muteBtnCenterX + (3.5f * density),
+                    muteBtnCenterY + (4f * density)
                 )
                 drawPath(speakerWave1Path, color = whiteColor, style = speakerWaveStroke)
+
+                // Wave 2
+                speakerWave2Path.reset()
+                speakerWave2Path.moveTo(muteBtnCenterX + (6.5f * density), muteBtnCenterY - (7f * density))
+                speakerWave2Path.quadraticTo(
+                    muteBtnCenterX + (10.5f * density),
+                    muteBtnCenterY,
+                    muteBtnCenterX + (6.5f * density),
+                    muteBtnCenterY + (7f * density)
+                )
+                drawPath(speakerWave2Path, color = whiteColor, style = speakerWaveStroke)
             } else {
-                drawLine(
-                    color = muteCrossColor,
-                    start = Offset(muteBtnCenterX + (2.5f * density), muteBtnCenterY - (4f * density)),
-                    end = Offset(muteBtnCenterX + (7.5f * density), muteBtnCenterY + (4f * density)),
-                    strokeWidth = 1.8f * density,
-                    cap = StrokeCap.Round
-                )
-                drawLine(
-                    color = muteCrossColor,
-                    start = Offset(muteBtnCenterX + (7.5f * density), muteBtnCenterY - (4f * density)),
-                    end = Offset(muteBtnCenterX + (2.5f * density), muteBtnCenterY + (4f * density)),
-                    strokeWidth = 1.8f * density,
-                    cap = StrokeCap.Round
-                )
+                // Red diagonal slash across speaker
+                speakerSlashPath.reset()
+                speakerSlashPath.moveTo(muteBtnCenterX - (6.5f * density), muteBtnCenterY + (7.5f * density))
+                speakerSlashPath.lineTo(muteBtnCenterX + (8.5f * density), muteBtnCenterY - (7.5f * density))
+                drawPath(speakerSlashPath, color = muteCrossColor, style = muteSlashStroke)
             }
         }
 
@@ -1808,39 +2146,6 @@ fun TimelineCanvas(
                     drawPath(path = rightChevronPath, color = chevronColor, style = chevronStroke)
                 }
             }
-
-            // Right end of Main Track: Pink/Red "+" Button anchored to append media clips
-            val totalUs = msToUs(snapshot.totalMs)
-            val lastClipRightX = zoomState.timeUsToX(totalUs, offsetPx, halfWidthInt, pxPerUs)
-            val addBtnLeft = lastClipRightX + (10f * density)
-            val addBtnW = TimelineHitTester.ADD_BTN_WIDTH_DP * density
-            val addBtnH = TimelineHitTester.ADD_BTN_HEIGHT_DP * density
-            val addBtnTop = rowCTop + (mainTrackHeightPx - addBtnH) / 2f
-            val addBtnBottom = addBtnTop + addBtnH
-
-            if (addBtnLeft + addBtnW >= -50f && addBtnLeft <= size.width + 50f) {
-                buildClipCornerPath(
-                    path = addBtnPath,
-                    left = addBtnLeft,
-                    top = addBtnTop,
-                    right = addBtnLeft + addBtnW,
-                    bottom = addBtnBottom,
-                    roundLeft = true,
-                    roundRight = true,
-                    radius = 6f * density
-                )
-                drawPath(path = addBtnPath, color = colorPinkAddBtn)
-
-                val plusCenterX = addBtnLeft + (addBtnW / 2f)
-                val plusCenterY = (addBtnTop + addBtnBottom) / 2f
-                val plusHalfSize = 6f * density
-                addPlusPath.reset()
-                addPlusPath.moveTo(plusCenterX - plusHalfSize, plusCenterY)
-                addPlusPath.lineTo(plusCenterX + plusHalfSize, plusCenterY)
-                addPlusPath.moveTo(plusCenterX, plusCenterY - plusHalfSize)
-                addPlusPath.lineTo(plusCenterX, plusCenterY + plusHalfSize)
-                drawPath(path = addPlusPath, color = whiteColor, style = Stroke(width = 2f * density, cap = StrokeCap.Round))
-            }
         }
 
         // =========================================================================================
@@ -1871,6 +2176,17 @@ fun TimelineCanvas(
                         selPipItem = item
                         selPipSX = sX
                         selPipEX = eX
+                    }
+
+                    val draggedId = draggedOverlayId.value
+                    if (item.id == draggedId) {
+                        drawRoundRect(
+                            color = Color.White,
+                            topLeft = Offset(sX - 1.5f * density, laneTop - 1.5f * density),
+                            size = Size(itemW + 3f * density, (laneBottom - laneTop) + 3f * density),
+                            cornerRadius = CornerRadius(4.5f * density, 4.5f * density),
+                            style = draggedGlowStroke
+                        )
                     }
 
                     buildClipCornerPath(
@@ -2064,6 +2380,17 @@ fun TimelineCanvas(
                         selAudioItem = item
                         selAudioSX = sX
                         selAudioEX = eX
+                    }
+
+                    val draggedId = draggedOverlayId.value
+                    if (item.id == draggedId) {
+                        drawRoundRect(
+                            color = Color.White,
+                            topLeft = Offset(sX - 1.5f * density, laneTop - 1.5f * density),
+                            size = Size(itemW + 3f * density, (laneBottom - laneTop) + 3f * density),
+                            cornerRadius = CornerRadius(4.5f * density, 4.5f * density),
+                            style = draggedGlowStroke
+                        )
                     }
 
                     buildClipCornerPath(
@@ -2360,6 +2687,45 @@ fun TimelineCanvas(
                 }
             }
         }
+
+        // Fixed Screen-Right Pink "+" Add Clip Button (Overlay pass so scrolling clips pass underneath)
+        val addBtnW = TimelineHitTester.ADD_BTN_WIDTH_DP * density
+        val addBtnH = TimelineHitTester.ADD_BTN_HEIGHT_DP * density
+        val addBtnRight = size.width - (12f * density)
+        val addBtnLeft = addBtnRight - addBtnW
+        val addBtnTop = rowCTop + (mainTrackHeightPx - addBtnH) / 2f
+        val addBtnBottom = addBtnTop + addBtnH
+
+        // Subtle dark backing halo/scrim
+        val haloPad = 3f * density
+        drawRoundRect(
+            color = Color(0xE6101014),
+            topLeft = Offset(addBtnLeft - haloPad, addBtnTop - haloPad),
+            size = Size(addBtnW + 2f * haloPad, addBtnH + 2f * haloPad),
+            cornerRadius = addHaloCorner
+        )
+
+        buildClipCornerPath(
+            path = addBtnPath,
+            left = addBtnLeft,
+            top = addBtnTop,
+            right = addBtnRight,
+            bottom = addBtnBottom,
+            roundLeft = true,
+            roundRight = true,
+            radius = 7f * density
+        )
+        drawPath(path = addBtnPath, color = colorPinkAddBtn)
+
+        val plusCenterX = (addBtnLeft + addBtnRight) / 2f
+        val plusCenterY = (addBtnTop + addBtnBottom) / 2f
+        val plusHalfSize = 6.5f * density
+        addPlusPath.reset()
+        addPlusPath.moveTo(plusCenterX - plusHalfSize, plusCenterY)
+        addPlusPath.lineTo(plusCenterX + plusHalfSize, plusCenterY)
+        addPlusPath.moveTo(plusCenterX, plusCenterY - plusHalfSize)
+        addPlusPath.lineTo(plusCenterX, plusCenterY + plusHalfSize)
+        drawPath(path = addPlusPath, color = whiteColor, style = addPlusStroke)
 
         // Center Fixed Playhead Line (Rule R2: Always at size.width / 2)
         drawLine(

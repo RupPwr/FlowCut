@@ -19,6 +19,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -36,12 +37,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -68,13 +74,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.StrokeCap
 import kotlin.math.roundToInt
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -84,9 +95,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.flowcut.app.ALL_FEATURES
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.flowcut.app.audio.AudioEngine
 import com.flowcut.app.audio.AudioFeature
 import com.flowcut.app.audio.ClipAudioContributor
@@ -732,6 +745,27 @@ fun EditorScreen(
         }
     }
 
+    val density = LocalDensity.current.density
+    var showCoverDialog by remember { mutableStateOf(false) }
+    var customCoverBitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var playPauseBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+
+    val galleryCoverPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri ->
+            if (uri != null) {
+                val cachePath = copyUriToCacheFile(context, uri, "cover_img_")
+                if (cachePath != null) {
+                    resolvedViewModel?.setCoverFromGalleryImage(cachePath)
+                    resolvedViewModel?.showToast("Cover updated")
+                } else {
+                    resolvedViewModel?.setCoverFromGalleryImage(uri.toString())
+                }
+                showCoverDialog = false
+            }
+        }
+    )
+
     val resolveTextOverlayOrToast: () -> com.flowcut.app.engine.OverlayItem? = {
         val playheadUs = playbackController.playhead.timeUs
         val item = resolvedViewModel?.getOrResolveTextOverlayAt(playheadUs)
@@ -866,6 +900,80 @@ fun EditorScreen(
             previewRenderer.requestRender()
         }
     }
+
+    val coverPath = vmUiState?.customCoverPath
+    val coverTimeUs = vmUiState?.coverTimeUs ?: 0L
+    val clips: List<com.flowcut.app.model.Clip> = vmUiState?.project?.clips ?: emptyList()
+
+    LaunchedEffect(coverPath, coverTimeUs, clips) {
+        withContext(Dispatchers.IO) {
+            try {
+                if (!coverPath.isNullOrEmpty()) {
+                    val file = java.io.File(coverPath)
+                    if (file.exists()) {
+                        val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        android.graphics.BitmapFactory.decodeFile(coverPath, opts)
+                        var sample = 1
+                        while (opts.outWidth / (sample * 2) >= 80 && opts.outHeight / (sample * 2) >= 80) {
+                            sample *= 2
+                        }
+                        val decodeOpts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                        val bmp = android.graphics.BitmapFactory.decodeFile(coverPath, decodeOpts)
+                        if (bmp != null) {
+                            customCoverBitmap = bmp.asImageBitmap()
+                        }
+                    }
+                } else if (clips.isNotEmpty()) {
+                    val snapshot = snapshotHolder.current
+                    val n = snapshot.main.n
+                    var targetClip = clips.first()
+                    var clipStartUs = 0L
+                    var found = false
+                    for (k in 0 until n) {
+                        val kStartUs = msToUs(snapshot.main.startMs[k])
+                        val kEndUs = msToUs(snapshot.main.endMs[k])
+                        if (coverTimeUs in kStartUs..kEndUs) {
+                            targetClip = clips.getOrNull(k) ?: clips.first()
+                            clipStartUs = kStartUs
+                            found = true
+                            break
+                        }
+                    }
+                    if (!found && clips.isNotEmpty()) {
+                        targetClip = clips.first()
+                        clipStartUs = 0L
+                    }
+
+                    val retriever = android.media.MediaMetadataRetriever()
+                    try {
+                        val file = java.io.File(targetClip.path)
+                        if (file.exists()) {
+                            retriever.setDataSource(targetClip.path)
+                            val tm = resolvedViewModel?.clipTimeMaps?.get(targetClip.id)
+                            val inUs = tm?.inUs ?: 0L
+                            val speedFactor = if (tm != null && tm.speedDen > 0) tm.speedNum.toDouble() / tm.speedDen.toDouble() else 1.0
+                            val frameOffsetUs = (coverTimeUs - clipStartUs).coerceAtLeast(0L)
+                            val sourceTimeUs = inUs + (frameOffsetUs * speedFactor).toLong()
+                            val raw = retriever.getFrameAtTime(sourceTimeUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            if (raw != null) {
+                                val scaled = android.graphics.Bitmap.createScaledBitmap(raw, 76, 84, true)
+                                if (scaled != raw) raw.recycle()
+                                customCoverBitmap = scaled.asImageBitmap()
+                            }
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        try { retriever.release() } catch (_: Exception) {}
+                    }
+                } else {
+                    customCoverBitmap = null
+                }
+            } catch (_: Exception) {
+                customCoverBitmap = null
+            }
+        }
+    }
+
     var showApplyToAll by remember { mutableStateOf(false) }
     var applyToAllJob by remember { mutableStateOf<Job?>(null) }
 
@@ -891,6 +999,18 @@ fun EditorScreen(
         modifier = modifier
             .fillMaxSize()
             .background(colors.surface0)
+            .pointerInput(playbackController) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        if (!playPauseBoundsInRoot.contains(down.position)) {
+                            playbackController.pause()
+                            frameDriver.wake()
+                            onPlaybackStateChange(false)
+                        }
+                    }
+                }
+            }
     ) {
         Column(
             modifier = Modifier
@@ -904,17 +1024,71 @@ fun EditorScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp)
             ) {
-                // 1. Top bar: 48 dp
-                TopBar(
-                    onBackClick = onBackClick,
-                    onExportClick = {
-                        if (!hasClips) {
-                            Toast.makeText(context, "Add clips first", Toast.LENGTH_SHORT).show()
-                        } else {
-                            onExportButtonClick()
-                        }
+                // 1. Top bar: 48 dp (Left: [←  My reel 01], Right: [9:16] [Export])
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = onBackClick,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = colors.textPrimary
+                        )
                     }
-                )
+                    Text(
+                        text = "My reel 01",
+                        color = colors.textPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xFF24242A), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = "9:16",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(
+                        onClick = {
+                            if (!hasClips) {
+                                Toast.makeText(context, "Add clips first", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onExportButtonClick()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = colors.accent,
+                            contentColor = colors.onAccent
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text(
+                            text = "Export",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -933,8 +1107,25 @@ fun EditorScreen(
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // On-Preview Tap Detector to select any PIP/Text/Sticker quad when nothing selected
-                    if (hasClips && selectedClipIndex == null && vmUiState?.selectedOverlayId == null) {
+                    // Cover up floating 9:16 badge in PreviewBox
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                            .size(width = 54.dp, height = 32.dp)
+                            .background(colors.surface1)
+                    )
+
+                    val activeOverlayId = vmUiState?.selectedOverlayId
+                    val activeOverlay = if (activeOverlayId != null) resolvedViewModel?.getOverlayItem(activeOverlayId) else null
+                    val isSelectedOverlayActiveAtPlayhead = run {
+                        val tick = frameTick.longValue
+                        val playheadUs = playbackController.playhead.timeUs
+                        activeOverlay != null && playheadUs >= activeOverlay.startUs && playheadUs <= activeOverlay.endUs
+                    }
+
+                    // On-Preview Tap Detector to select any PIP/Text/Sticker quad when nothing selected or selected overlay is outside its active time range
+                    if (hasClips && selectedClipIndex == null && (vmUiState?.selectedOverlayId == null || !isSelectedOverlayActiveAtPlayhead)) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -1341,11 +1532,9 @@ fun EditorScreen(
                         }
                     }
 
-                    // On-Preview Free Transform Gestures overlay when an Overlay Item is selected
-                    if (hasClips && selectedClipIndex == null && vmUiState?.selectedOverlayId != null) {
-                        val activeOverlayId = vmUiState.selectedOverlayId
-                        val activeOverlay = resolvedViewModel?.getOverlayItem(activeOverlayId)
-                        if (activeOverlay != null && activeOverlay.type != com.flowcut.app.engine.LayerType.FILTER) {
+                    // On-Preview Free Transform Gestures overlay when an Overlay Item is selected and active at current playhead
+                    if (hasClips && selectedClipIndex == null && isSelectedOverlayActiveAtPlayhead && activeOverlay != null && activeOverlay.type != com.flowcut.app.engine.LayerType.FILTER && activeOverlayId != null) {
+                        if (true) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -2161,6 +2350,16 @@ fun EditorScreen(
 
                 // 3. Playback row: 40 dp
                 PlaybackRow(
+                    modifier = Modifier.onGloballyPositioned { coords ->
+                        val rowBounds = coords.boundsInRoot()
+                        val btnWidth = 48f * density
+                        playPauseBoundsInRoot = androidx.compose.ui.geometry.Rect(
+                            left = rowBounds.right - btnWidth,
+                            top = rowBounds.top - (6f * density),
+                            right = rowBounds.right + (6f * density),
+                            bottom = rowBounds.bottom + (6f * density)
+                        )
+                    },
                     canUndo = canUndo,
                     canRedo = canRedo,
                     onUndoClick = {
@@ -2242,6 +2441,7 @@ fun EditorScreen(
                             selection = selection,
                             focusMode = currentFocus,
                             overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
+                            customCoverBitmap = customCoverBitmap,
                             onSelect = { sel ->
                                 when (sel) {
                                     is TimelineSelection.ClipSelected -> onSelectClip(sel.index)
@@ -2257,7 +2457,7 @@ fun EditorScreen(
                                         resolvedViewModel?.setFocusMode(TimelineFocusState.S1_PIP_GROUP)
                                     }
                                     TimelineSelection.CoverClicked -> {
-                                        resolvedViewModel?.showToast("Cover selected")
+                                        showCoverDialog = true
                                     }
                                     TimelineSelection.AddClipClicked -> {
                                         onAddClipsClick()
@@ -2303,6 +2503,16 @@ fun EditorScreen(
                             },
                             onLiveOverlayTrim = { id, startUs, endUs ->
                                 resolvedViewModel?.liveOverlayTrim(id, startUs, endUs)
+                                previewRenderer.requestRender()
+                                frameDriver.wake()
+                            },
+                            onCommitOverlayMove = { id, laneIndex, startUs, endUs ->
+                                resolvedViewModel?.commitOverlayMove(id, laneIndex, startUs, endUs)
+                                previewRenderer.requestRender()
+                                frameDriver.wake()
+                            },
+                            onLiveOverlayMove = { id, laneIndex, startUs, endUs ->
+                                resolvedViewModel?.liveOverlayMove(id, laneIndex, startUs, endUs)
                                 previewRenderer.requestRender()
                                 frameDriver.wake()
                             },
@@ -3617,6 +3827,164 @@ fun EditorScreen(
                 },
                 onDismiss = { isAudioSpeedSheetVisible = false }
             )
+        }
+
+        if (showCoverDialog) {
+            CoverSelectionSheet(
+                onSelectCurrentFrame = {
+                    val playheadUs = playbackController.playhead.timeUs
+                    resolvedViewModel?.setCoverFromTimelineFrame(playheadUs)
+                    resolvedViewModel?.showToast("Cover set from current frame")
+                    showCoverDialog = false
+                },
+                onChooseGallery = {
+                    try {
+                        galleryCoverPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onDismiss = { showCoverDialog = false },
+                currentPlayheadTimeFormatted = formatTimeMs(usToMs(playbackController.playhead.timeUs))
+            )
+        }
+    }
+}
+
+@Composable
+private fun CoverSelectionSheet(
+    onSelectCurrentFrame: () -> Unit,
+    onChooseGallery: () -> Unit,
+    onDismiss: () -> Unit,
+    currentPlayheadTimeFormatted: String
+) {
+    val colors = FlowCutTheme.colors
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) { onDismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {},
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface0,
+            tonalElevation = 8.dp,
+            shadowElevation = 16.dp,
+            border = BorderStroke(0.5.dp, colors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Select Cover",
+                        color = colors.textPrimary,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = colors.textSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Option 1: Use Current Frame
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surface1, RoundedCornerShape(10.dp))
+                        .clickable { onSelectCurrentFrame() }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VideoFile,
+                        contentDescription = null,
+                        tint = colors.accent,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(
+                            text = "Use Current Frame",
+                            color = colors.textPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Set cover to timeline video frame at $currentPlayheadTimeFormatted",
+                            color = colors.textSecondary,
+                            fontSize = 11.5.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Option 2: Choose from Gallery
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surface1, RoundedCornerShape(10.dp))
+                        .clickable { onChooseGallery() }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Image,
+                        contentDescription = null,
+                        tint = colors.accent,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(
+                            text = "Choose from Gallery",
+                            color = colors.textPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Pick a custom photo or thumbnail from your device",
+                            color = colors.textSecondary,
+                            fontSize = 11.5.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+            }
         }
     }
 }
