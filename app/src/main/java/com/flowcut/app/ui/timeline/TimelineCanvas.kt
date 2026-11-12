@@ -5,6 +5,10 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableLongState
@@ -20,6 +24,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -29,6 +34,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -40,6 +46,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
@@ -183,30 +190,61 @@ private fun buildClipCornerPath(
 
 /**
  * Builds a pentagonal/shield pin marker in-place pointing downward (Rule R10).
+ * Total height = bodyHeight (26.dp) + tipHeight (5.dp) = 31.dp
  */
 private fun buildPinPath(
     path: Path,
     anchorX: Float,
     top: Float,
     width: Float,
-    height: Float,
+    bodyHeight: Float,
+    tipHeight: Float,
     cornerRadius: Float
 ) {
     path.reset()
     val halfW = width / 2f
     val left = anchorX - halfW
     val right = anchorX + halfW
-    val bodyBottom = top + height * 0.68f
-    val tipY = top + height
+    val bodyBottom = top + bodyHeight
+    val tipY = bodyBottom + tipHeight
 
-    path.moveTo(left + cornerRadius, top)
-    path.lineTo(right - cornerRadius, top)
-    path.quadraticTo(right, top, right, top + cornerRadius)
+    val r = cornerRadius.coerceAtMost(halfW)
+    path.moveTo(left + r, top)
+    path.lineTo(right - r, top)
+    path.quadraticTo(right, top, right, top + r)
     path.lineTo(right, bodyBottom)
     path.lineTo(anchorX, tipY) // downward pointer tip
     path.lineTo(left, bodyBottom)
-    path.lineTo(left, top + cornerRadius)
-    path.quadraticTo(left, top, left + cornerRadius, top)
+    path.lineTo(left, top + r)
+    path.quadraticTo(left, top, left + r, top)
+    path.close()
+}
+
+/**
+ * Builds a rounded top cap for stacked multi-pins peeking vertically above the front pin (Rule R10).
+ */
+private fun buildStackedCapPath(
+    path: Path,
+    anchorX: Float,
+    top: Float,
+    height: Float,
+    width: Float,
+    cornerRadius: Float
+) {
+    path.reset()
+    val halfW = width / 2f
+    val left = anchorX - halfW
+    val right = anchorX + halfW
+    val bottom = top + height
+    val r = cornerRadius.coerceAtMost(halfW)
+
+    path.moveTo(left + r, top)
+    path.lineTo(right - r, top)
+    path.quadraticTo(right, top, right, top + r)
+    path.lineTo(right, bottom)
+    path.lineTo(left, bottom)
+    path.lineTo(left, top + r)
+    path.quadraticTo(left, top, left + r, top)
     path.close()
 }
 
@@ -271,14 +309,15 @@ private object PipThumbnailCache {
 }
 
 /**
- * Safely renders text on Canvas with softWrap = false and maxLines = 1 to prevent right-edge wrapping (Bug 5).
+ * Safely renders text on Canvas with softWrap and maxLines support (Bug 5).
  */
 private fun DrawScope.drawTextSafe(
     textMeasurer: TextMeasurer,
     text: String,
     x: Float,
     y: Float,
-    style: TextStyle
+    style: TextStyle,
+    maxLines: Int = 1
 ) {
     if (size.width <= 4f || size.height <= 4f) return
     if (x >= size.width - 4f || y >= size.height - 4f) return
@@ -288,8 +327,8 @@ private fun DrawScope.drawTextSafe(
         text = text,
         style = style,
         constraints = Constraints(maxWidth = 1000),
-        softWrap = false,
-        maxLines = 1
+        softWrap = (maxLines > 1),
+        maxLines = maxLines
     )
     if (x < 0f || y < 0f) {
         val shiftX = if (x < 0f) x else 0f
@@ -406,8 +445,14 @@ fun TimelineCanvas(
     val soundBarHeightPx = remember(density) { TimelineHitTester.ROW_E_SOUND_BAR_HEIGHT_DP * density }
 
     val pinWidthPx = remember(density) { TimelineHitTester.PIN_WIDTH_DP * density }
-    val pinCornerRadiusPx = remember(density) { 3.5f * density }
-    val pinUnderlineStrokePx = remember(density) { 2.5f * density }
+    val pinBodyHeightPx = remember(density) { 26f * density }
+    val pinTipHeightPx = remember(density) { 5f * density }
+    val pinHeightPx = remember(density) { TimelineHitTester.PIN_HEIGHT_DP * density }
+    val pinCornerRadiusPx = remember(density) { 4f * density }
+    val pinUnderlineStrokePx = remember(density) { 2f * density }
+    val whitePinSelectionStroke = remember(density) { Stroke(width = 1.5f * density) }
+    val connectorTickStroke = remember(density) { Stroke(width = 1.5f * density, cap = StrokeCap.Round) }
+    val stackedCapStroke = remember(density) { Stroke(width = 1f * density) }
 
     val cornerRadiusPx = remember(density) { 6.dp.value * density }
     val selectionStroke = remember(density) { Stroke(width = 2.5f * density) }
@@ -427,7 +472,7 @@ fun TimelineCanvas(
     val chevronStroke = remember(density) { Stroke(width = 2f * density, cap = StrokeCap.Round) }
     val handleCornerRadiusPx = remember(density) { 4f * density }
     val handleWidthPx = remember(density) { 15f * density }
-    val handleHeightPx = remember(density) { 38f * density }
+    val handleHeightPx = remember(density) { TimelineHitTester.TRIM_HANDLE_HEIGHT_DP * density }
     val chevronHalfWPx = remember(density) { 2.5f * density }
     val chevronHalfHPx = remember(density) { 5.5f * density }
 
@@ -470,7 +515,9 @@ fun TimelineCanvas(
     val timeTextStyle = remember { TextStyle(fontSize = 9.sp, color = Color(0xFF8E8E93)) }
     val clipLabelStyle = remember { TextStyle(fontSize = 9.sp, color = Color(0x99FFFFFF)) }
     val durationBadgeStyle = remember { TextStyle(fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold) }
-    val rowBTextStyle = remember { TextStyle(fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold) }
+    val rowBTextStyle = remember { TextStyle(fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.SemiBold) }
+    val rowBBadgeColor = remember { Color(0xCC3E2723) }
+    val rowBChevronStroke = remember(density) { Stroke(width = 1.4f * density, cap = StrokeCap.Round) }
     val coverLabelStyle = remember { TextStyle(fontSize = 8.5.sp, color = Color(0xCCFFFFFF), fontWeight = FontWeight.Medium) }
     val soundLabelStyle = remember { TextStyle(fontSize = 11.sp, color = Color(0xAAFFFFFF), fontWeight = FontWeight.Medium) }
     val pipVolStyle = remember { TextStyle(fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold) }
@@ -480,12 +527,26 @@ fun TimelineCanvas(
     val clipTitleCache = remember { ClipTitleCache(maxClips = 100) }
     val durationBadgeCache = remember { DurationBadgeCache(maxEntries = 300) }
 
+    // Official Google Material Icons (Rule R10 pre-allocation)
+    val volumeUpPainter = rememberVectorPainter(Icons.AutoMirrored.Filled.VolumeUp)
+    val volumeOffPainter = rememberVectorPainter(Icons.AutoMirrored.Filled.VolumeOff)
+    val editPencilPainter = rememberVectorPainter(Icons.Default.Edit)
+    val whiteColorFilter = remember { ColorFilter.tint(Color.White) }
+    val mutedColorFilter = remember { ColorFilter.tint(Color(0xFF8E8E93)) }
+    val muteIconSize = remember(density) { Size(14f * density, 14f * density) }
+    val editPencilIconSize = remember(density) { Size(9f * density, 9f * density) }
+    val muteLabelStyle = remember {
+        TextStyle(
+            fontSize = 6.5.sp,
+            color = Color(0xCCFFFFFF),
+            fontWeight = FontWeight.Normal,
+            lineHeight = 7.5.sp,
+            textAlign = TextAlign.Center
+        )
+    }
+
     // Track Mute/Unmute constants
     val muteBtnBorderStroke = remember(density) { Stroke(width = 1f * density) }
-    val speakerWaveStroke = remember(density) { Stroke(width = 1.6f * density, cap = StrokeCap.Round) }
-    val muteSlashStroke = remember(density) { Stroke(width = 2.0f * density, cap = StrokeCap.Round) }
-    val muteCrossColor = remember { Color(0xFFFF453A) }
-    val speakerMutedColor = remember { Color(0xFF8E8E93) }
     val muteBtnCardBg = remember { Color(0xFF1C1D24) }
     val muteBtnBorderColor = remember { Color(0x33FFFFFF) }
 
@@ -497,32 +558,27 @@ fun TimelineCanvas(
     val leftChevronPath = remember { Path() }
     val rightChevronPath = remember { Path() }
     val muteBtnCardPath = remember { Path() }
-    val speakerConePath = remember { Path() }
-    val speakerWave1Path = remember { Path() }
-    val speakerWave2Path = remember { Path() }
-    val speakerSlashPath = remember { Path() }
 
     val pinPath = remember { Path() }
     val pinOutlinePath = remember { Path() }
-    val stackedPinPath = remember { Path() }
-    val stackedPinStroke = remember(density) { Stroke(width = 1.2f * density) }
+    val stackedCapPath = remember { Path() }
     val connectorTickPath = remember { Path() }
     val pinSmilePath = remember { Path() }
     val pinTPath = remember { Path() }
 
     val rowBBarPath = remember { Path() }
-    val rowBSelectionPath = remember { Path() }
-    val rowBLeftHandlePath = remember { Path() }
-    val rowBRightHandlePath = remember { Path() }
+    val rowBLeftChevronPath = remember { Path() }
+    val rowBRightChevronPath = remember { Path() }
     val rowBBadgePath = remember { Path() }
 
     val coverCardPath = remember { Path() }
-    val coverPencilPath = remember { Path() }
     val coverLandscapePath = remember { Path() }
     val addBtnPath = remember { Path() }
     val addPlusPath = remember { Path() }
+    val addBtnBorderStroke = remember(density) { Stroke(width = 0.8f * density) }
+    val addBtnRadiusPx = remember(density) { 6f * density }
     val addPlusStroke = remember(density) { Stroke(width = 2.2f * density, cap = StrokeCap.Round) }
-    val addHaloCorner = remember(density) { CornerRadius(9f * density, 9f * density) }
+    val addHaloCorner = remember(density) { CornerRadius(8f * density, 8f * density) }
 
     val pipThinLinePath = remember { Path() }
     val pipLaneCardPath = remember { Path() }
@@ -1489,7 +1545,7 @@ fun TimelineCanvas(
         // =========================================================================================
         // ROW A: Top Pins Row for Text & Stickers
         // =========================================================================================
-        val conflictDistPx = 0.30f * pinWidthPx
+        val stackDistPx = 6f * density
 
         for (idx in overlayItems.indices) {
             val item = overlayItems[idx]
@@ -1505,7 +1561,7 @@ fun TimelineCanvas(
                 else -> colorStickerTeal
             }
 
-            // Duration underline along bottom of Row A
+            // Duration underline along bottom of Row A (Unselected: solid fill with no white border)
             if (endX > startX && endX >= -50f && startX <= size.width + 50f) {
                 drawLine(
                     color = pinColor,
@@ -1516,36 +1572,51 @@ fun TimelineCanvas(
                 )
             }
 
-            // Pin Marker: 24.dp wide x 26.dp tall with downward pointer tip anchored at startX
+            // Pin Marker: 22.dp wide x (26.dp body + 5.dp tip) = 31.dp shield/pentagon
             if (startX in -50f..size.width + 50f) {
-                val elevationY = if (isSelectedPin) -4f * density else 0f
+                val elevationY = if (isSelectedPin) -2f * density else 0f
                 val pinTopY = rowATop + (2f * density) + elevationY
 
-                // Check if this pin is in a >= 70% overlap conflict with any other pin
-                var hasOverlapConflict = false
+                // Stacked Multi-Pins at same timestamp: check cluster within 6.dp
+                var clusterSize = 1
+                var isFrontmost = true
                 for (otherIdx in overlayItems.indices) {
+                    if (otherIdx == idx) continue
                     val other = overlayItems[otherIdx]
-                    if (other.id != item.id && (other.type == LayerType.TEXT || other.type == LayerType.STICKER)) {
-                        val otherStartX = zoomState.timeUsToX(other.startUs, offsetPx, halfWidthInt, pxPerUs)
-                        if (abs(startX - otherStartX) <= conflictDistPx) {
-                            hasOverlapConflict = true
-                            break
+                    if (other.type != LayerType.TEXT && other.type != LayerType.STICKER) continue
+                    val otherStartX = zoomState.timeUsToX(other.startUs, offsetPx, halfWidthInt, pxPerUs)
+                    if (abs(startX - otherStartX) <= stackDistPx) {
+                        clusterSize++
+                        val otherIsSelected = (other.id == selectedOverlayId)
+                        if (otherIsSelected) {
+                            isFrontmost = false
+                        } else if (!isSelectedPin && otherIdx < idx) {
+                            isFrontmost = false
                         }
                     }
                 }
 
-                // If overlapping >= 70%, draw subtle multi-layer stacked outline behind the pin
-                if (hasOverlapConflict) {
-                    buildPinPath(
-                        path = stackedPinPath,
-                        anchorX = startX + (3.5f * density),
-                        top = pinTopY - (2.5f * density),
+                if (!isFrontmost) {
+                    // Representative pin draws the deck of caps; skip drawing duplicate pin body
+                    continue
+                }
+
+                // Draw up to 3 stacked rounded cap layers peeking vertically above the frontmost pin (3.5.dp step)
+                val extraLayers = minOf(clusterSize - 1, 3)
+                val stepUpPx = 3.5f * density
+                val capHeightPx = 5f * density
+                for (k in extraLayers downTo 1) {
+                    val capTop = pinTopY - (k * stepUpPx)
+                    buildStackedCapPath(
+                        path = stackedCapPath,
+                        anchorX = startX,
+                        top = capTop,
+                        height = capHeightPx,
                         width = pinWidthPx,
-                        height = pinHeight,
                         cornerRadius = pinCornerRadiusPx
                     )
-                    drawPath(path = stackedPinPath, color = Color(0x991E1E24))
-                    drawPath(path = stackedPinPath, color = Color(0xCCFFFFFF), style = stackedPinStroke)
+                    drawPath(path = stackedCapPath, color = pinColor)
+                    drawPath(path = stackedCapPath, color = Color(0x66000000), style = stackedCapStroke)
                 }
 
                 buildPinPath(
@@ -1553,14 +1624,15 @@ fun TimelineCanvas(
                     anchorX = startX,
                     top = pinTopY,
                     width = pinWidthPx,
-                    height = pinHeight,
+                    bodyHeight = pinBodyHeightPx,
+                    tipHeight = pinTipHeightPx,
                     cornerRadius = pinCornerRadiusPx
                 )
 
                 // Fill pin body
                 drawPath(path = pinPath, color = pinColor)
 
-                val pinCenterY = pinTopY + (pinHeight * 0.68f) / 2f
+                val pinCenterY = pinTopY + pinBodyHeightPx / 2f
 
                 // Pin inner icon: crisp white "T" for TEXT, smiley for STICKER
                 if (item.type == LayerType.TEXT) {
@@ -1574,9 +1646,7 @@ fun TimelineCanvas(
                     pinTPath.lineTo(startX, tStemBottom)
                     drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
                 } else {
-                    // Smiley or custom picture icon
                     if (item.mediaPath.isNotEmpty()) {
-                        // Picture icon: small rounded square
                         drawRect(
                             color = whiteColor,
                             topLeft = Offset(startX - (4.5f * density), pinCenterY - (4f * density)),
@@ -1584,7 +1654,6 @@ fun TimelineCanvas(
                             style = Stroke(width = 1.4f * density)
                         )
                     } else {
-                        // Smiley eyes and curved smile
                         val eyeY = pinCenterY - (2.5f * density)
                         drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(startX - (3.2f * density), eyeY))
                         drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(startX + (3.2f * density), eyeY))
@@ -1596,24 +1665,17 @@ fun TimelineCanvas(
                     }
                 }
 
-                // If selected: 2.dp crisp white outline and short vertical connector tick down to Row B
+                // If selected: 1.5.dp crisp white outline stroke and 3.dp vertical white connector tick pointing down toward Row B
                 if (isSelectedPin) {
-                    buildPinPath(
-                        path = pinOutlinePath,
-                        anchorX = startX,
-                        top = pinTopY,
-                        width = pinWidthPx,
-                        height = pinHeight,
-                        cornerRadius = pinCornerRadiusPx
-                    )
-                    drawPath(path = pinOutlinePath, color = whiteColor, style = whiteSelectionStroke)
+                    drawPath(path = pinPath, color = whiteColor, style = whitePinSelectionStroke)
 
-                    // Vertical white connector tick pointing down into Row B
-                    val pinTipY = pinTopY + pinHeight
+                    // 3.dp vertical white connector tick directly below bottom tip
+                    val pinTipY = pinTopY + pinBodyHeightPx + pinTipHeightPx
+                    val tickLengthPx = 3f * density
                     connectorTickPath.reset()
                     connectorTickPath.moveTo(startX, pinTipY)
-                    connectorTickPath.lineTo(startX, rowBTop + (2f * density))
-                    drawPath(path = connectorTickPath, color = whiteColor, style = whiteSelectionStroke)
+                    connectorTickPath.lineTo(startX, pinTipY + tickLengthPx)
+                    drawPath(path = connectorTickPath, color = whiteColor, style = connectorTickStroke)
                 }
             }
         }
@@ -1628,10 +1690,10 @@ fun TimelineCanvas(
                 val endX = zoomState.timeUsToX(selItem.endUs, offsetPx, halfWidthInt, pxPerUs)
                 val barW = endX - startX
 
-                if (barW > 0f && endX >= -handleWidthPx && startX <= size.width + handleWidthPx) {
-                    val barTop = rowBTop + (2f * density)
-                    val barBottom = rowBBottom - (2f * density)
-                    val barH = barBottom - barTop
+                if (barW > 0f && endX >= -50f && startX <= size.width + 50f) {
+                    val barH = 24f * density
+                    val barTop = rowBTop + (rowBBarHeightPx - barH) / 2f
+                    val barBottom = barTop + barH
                     val barR = 5f * density
 
                     val fillColor = if (focus is TimelineFocusState.S4_TEXT_ITEM) {
@@ -1642,6 +1704,7 @@ fun TimelineCanvas(
                         colorStickerTeal
                     }
 
+                    // 1. Solid Orange or Teal bar across [startX, endX] (NO white border around entire bar)
                     buildClipCornerPath(
                         path = rowBBarPath,
                         left = startX,
@@ -1654,90 +1717,81 @@ fun TimelineCanvas(
                     )
                     drawPath(path = rowBBarPath, color = fillColor)
 
-                    // Crisp white selection border around Row B bar
-                    drawPath(path = rowBBarPath, color = whiteColor, style = whiteSelectionStroke)
+                    // 2. Rounded < (left) and > (right) handle caps (12.dp wide) separated by 1.dp vertical white divider line
+                    val handleCapW = 12f * density
+                    val showHandleCaps = barW >= handleCapW * 2f
 
-                    // Text snippet / icon on the left
-                    val previewSnippet = if (selItem.text.isNotBlank()) selItem.text else if (focus is TimelineFocusState.S4_TEXT_ITEM) "Your Text" else "Sticker"
-                    drawTextSafe(
-                        textMeasurer = textMeasurer,
-                        text = previewSnippet,
-                        x = startX + (8f * density),
-                        y = barTop + (6f * density),
-                        style = rowBTextStyle
-                    )
-
-                    // Duration badge in top-right: e.g. "0:04.0"
-                    val durStr = durationBadgeCache.get(selItem.durationUs)
-                    val badgeW = 44f * density
-                    val badgeH = 16f * density
-                    val badgeLeft = endX - badgeW - (6f * density)
-                    val badgeTop = barTop + (barH - badgeH) / 2f
-                    if (badgeLeft > startX + (50f * density)) {
-                        buildClipCornerPath(
-                            path = rowBBadgePath,
-                            left = badgeLeft,
-                            top = badgeTop,
-                            right = badgeLeft + badgeW,
-                            bottom = badgeTop + badgeH,
-                            roundLeft = true,
-                            roundRight = true,
-                            radius = 3f * density
+                    if (showHandleCaps) {
+                        // Left divider line at startX + handleCapW
+                        val leftDivX = startX + handleCapW
+                        drawLine(
+                            color = Color(0xCCFFFFFF),
+                            start = Offset(leftDivX, barTop),
+                            end = Offset(leftDivX, barBottom),
+                            strokeWidth = 1f * density
                         )
-                        drawPath(path = rowBBadgePath, color = Color(0x99000000))
+
+                        // Right divider line at endX - handleCapW
+                        val rightDivX = endX - handleCapW
+                        drawLine(
+                            color = Color(0xCCFFFFFF),
+                            start = Offset(rightDivX, barTop),
+                            end = Offset(rightDivX, barBottom),
+                            strokeWidth = 1f * density
+                        )
+
+                        // Crisp white < chevron centered inside left handle cap
+                        val leftCenterX = startX + handleCapW / 2f
+                        val barCenterY = barTop + barH / 2f
+                        val chevHalfW = 2.2f * density
+                        val chevHalfH = 4.2f * density
+                        rowBLeftChevronPath.reset()
+                        rowBLeftChevronPath.moveTo(leftCenterX + chevHalfW, barCenterY - chevHalfH)
+                        rowBLeftChevronPath.lineTo(leftCenterX - chevHalfW, barCenterY)
+                        rowBLeftChevronPath.lineTo(leftCenterX + chevHalfW, barCenterY + chevHalfH)
+                        drawPath(path = rowBLeftChevronPath, color = whiteColor, style = rowBChevronStroke)
+
+                        // Crisp white > chevron centered inside right handle cap
+                        val rightCenterX = endX - handleCapW / 2f
+                        rowBRightChevronPath.reset()
+                        rowBRightChevronPath.moveTo(rightCenterX - chevHalfW, barCenterY - chevHalfH)
+                        rowBRightChevronPath.lineTo(rightCenterX + chevHalfW, barCenterY)
+                        rowBRightChevronPath.lineTo(rightCenterX - chevHalfW, barCenterY + chevHalfH)
+                        drawPath(path = rowBRightChevronPath, color = whiteColor, style = rowBChevronStroke)
+                    }
+
+                    // 3. Compact dark-brown/charcoal rounded pill (Color(0xCC3E2723), 3.dp radius) at top-right (endX - badgeWidth - 4.dp)
+                    val durStr = durationBadgeCache.get(selItem.durationUs)
+                    val badgeW = 38f * density
+                    val badgeH = 13f * density
+                    val badgeLeft = endX - badgeW - (4f * density)
+                    val badgeTop = barTop + (2f * density)
+                    if (badgeLeft > startX + (if (showHandleCaps) handleCapW + (8f * density) else (12f * density))) {
+                        drawRoundRect(
+                            color = rowBBadgeColor,
+                            topLeft = Offset(badgeLeft, badgeTop),
+                            size = Size(badgeW, badgeH),
+                            cornerRadius = CornerRadius(3f * density, 3f * density)
+                        )
                         drawTextSafe(
                             textMeasurer = textMeasurer,
                             text = durStr,
                             x = badgeLeft + (4f * density),
-                            y = badgeTop + (1.5f * density),
+                            y = badgeTop + (1f * density),
                             style = durationBadgeStyle
                         )
                     }
 
-                    // External < and > Chevron Trim Handles situated strictly OUTSIDE startX .. endX
-                    val r = minOf(handleCornerRadiusPx, handleWidthPx / 2f, barH / 2f)
-
-                    // Left Handle Tab (<)
-                    val leftHandleLeft = startX - handleWidthPx
-                    val leftHandleRight = startX
-                    rowBLeftHandlePath.reset()
-                    rowBLeftHandlePath.moveTo(leftHandleRight, barTop)
-                    rowBLeftHandlePath.lineTo(leftHandleLeft + r, barTop)
-                    rowBLeftHandlePath.quadraticTo(leftHandleLeft, barTop, leftHandleLeft, barTop + r)
-                    rowBLeftHandlePath.lineTo(leftHandleLeft, barBottom - r)
-                    rowBLeftHandlePath.quadraticTo(leftHandleLeft, barBottom, leftHandleLeft + r, barBottom)
-                    rowBLeftHandlePath.lineTo(leftHandleRight, barBottom)
-                    rowBLeftHandlePath.close()
-                    drawPath(path = rowBLeftHandlePath, color = whiteColor)
-
-                    // Right Handle Tab (>)
-                    val rightHandleLeft = endX
-                    val rightHandleRight = endX + handleWidthPx
-                    rowBRightHandlePath.reset()
-                    rowBRightHandlePath.moveTo(rightHandleLeft, barTop)
-                    rowBRightHandlePath.lineTo(rightHandleRight - r, barTop)
-                    rowBRightHandlePath.quadraticTo(rightHandleRight, barTop, rightHandleRight, barTop + r)
-                    rowBRightHandlePath.lineTo(rightHandleRight, barBottom - r)
-                    rowBRightHandlePath.quadraticTo(rightHandleRight, barBottom, rightHandleRight - r, barBottom)
-                    rowBRightHandlePath.lineTo(rightHandleLeft, barBottom)
-                    rowBRightHandlePath.close()
-                    drawPath(path = rowBRightHandlePath, color = whiteColor)
-
-                    // Dark < and > chevron icons
-                    val barCenterY = (barTop + barBottom) / 2f
-                    val leftCenterX = startX - (handleWidthPx / 2f)
-                    leftChevronPath.reset()
-                    leftChevronPath.moveTo(leftCenterX + chevronHalfWPx, barCenterY - chevronHalfHPx)
-                    leftChevronPath.lineTo(leftCenterX - chevronHalfWPx, barCenterY)
-                    leftChevronPath.lineTo(leftCenterX + chevronHalfWPx, barCenterY + chevronHalfHPx)
-                    drawPath(path = leftChevronPath, color = chevronColor, style = chevronStroke)
-
-                    val rightCenterX = endX + (handleWidthPx / 2f)
-                    rightChevronPath.reset()
-                    rightChevronPath.moveTo(rightCenterX - chevronHalfWPx, barCenterY - chevronHalfHPx)
-                    rightChevronPath.lineTo(rightCenterX + chevronHalfWPx, barCenterY)
-                    rightChevronPath.lineTo(rightCenterX - chevronHalfWPx, barCenterY + chevronHalfHPx)
-                    drawPath(path = rightChevronPath, color = chevronColor, style = chevronStroke)
+                    // 4. Text snippet at bottom-left (startX + 6.dp) in clean 10.sp white text
+                    val previewSnippet = if (selItem.text.isNotBlank()) selItem.text else if (focus is TimelineFocusState.S4_TEXT_ITEM) "Your Text" else "Sticker"
+                    val snippetX = if (showHandleCaps && barW >= 44f * density) startX + handleCapW + (4f * density) else startX + (6f * density)
+                    drawTextSafe(
+                        textMeasurer = textMeasurer,
+                        text = previewSnippet,
+                        x = snippetX,
+                        y = barBottom - (13f * density),
+                        style = rowBTextStyle
+                    )
                 }
             }
         }
@@ -1782,34 +1836,6 @@ fun TimelineCanvas(
                     )
                 }
                 drawPath(path = coverCardPath, color = Color(0x44FFFFFF), style = unselectedStroke)
-
-                // Translucent bottom badge for pencil and label
-                val badgeH = 14f * density
-                val badgeTop = coverBottom - badgeH
-                drawRect(
-                    color = Color(0xD0121216),
-                    topLeft = Offset(coverLeft, badgeTop),
-                    size = Size(coverW, badgeH)
-                )
-
-                // Pencil icon inside badge
-                val pX = coverLeft + (4f * density)
-                val pY = badgeTop + (badgeH / 2f)
-                coverPencilPath.reset()
-                coverPencilPath.moveTo(pX, pY + (3f * density))
-                coverPencilPath.lineTo(pX + (4f * density), pY - (2f * density))
-                coverPencilPath.lineTo(pX + (6f * density), pY)
-                coverPencilPath.lineTo(pX + (2f * density), pY + (5f * density))
-                coverPencilPath.close()
-                drawPath(path = coverPencilPath, color = Color.White, style = Stroke(width = 1f * density))
-
-                drawTextSafe(
-                    textMeasurer = textMeasurer,
-                    text = "Cover",
-                    x = pX + (8f * density),
-                    y = badgeTop + (1.5f * density),
-                    style = coverLabelStyle
-                )
             } else {
                 drawPath(path = coverCardPath, color = colorCoverCardBg)
                 drawPath(path = coverCardPath, color = Color(0x33FFFFFF), style = unselectedStroke)
@@ -1829,27 +1855,36 @@ fun TimelineCanvas(
                 coverLandscapePath.lineTo(coverLeft + (31f * density), coverTop + (24f * density))
                 coverLandscapePath.close()
                 drawPath(path = coverLandscapePath, color = Color(0x99FFFFFF))
-
-                // Vector pencil icon at top right
-                val pX = coverRight - (9f * density)
-                val pY = coverTop + (8f * density)
-                coverPencilPath.reset()
-                coverPencilPath.moveTo(pX - (3f * density), pY + (3f * density))
-                coverPencilPath.lineTo(pX + (3f * density), pY - (3f * density))
-                coverPencilPath.lineTo(pX + (5f * density), pY - (1f * density))
-                coverPencilPath.lineTo(pX - (1f * density), pY + (5f * density))
-                coverPencilPath.close()
-                drawPath(path = coverPencilPath, color = Color(0xEEFFFFFF), style = Stroke(width = 1.2f * density))
-
-                // "Cover" text label
-                drawTextSafe(
-                    textMeasurer = textMeasurer,
-                    text = "Cover",
-                    x = coverLeft + (7f * density),
-                    y = coverBottom - (14f * density),
-                    style = coverLabelStyle
-                )
             }
+
+            // Cover Edit Pencil Badge: rememberVectorPainter(Icons.Default.Edit) inside dark bottom-right corner badge of Cover box
+            val pencilBadgeW = 14f * density
+            val pencilBadgeH = 14f * density
+            val pencilBadgeLeft = coverRight - pencilBadgeW - (2f * density)
+            val pencilBadgeTop = coverBottom - pencilBadgeH - (2f * density)
+            drawRoundRect(
+                color = Color(0xCC121216),
+                topLeft = Offset(pencilBadgeLeft, pencilBadgeTop),
+                size = Size(pencilBadgeW, pencilBadgeH),
+                cornerRadius = CornerRadius(3f * density, 3f * density)
+            )
+
+            val pIconX = pencilBadgeLeft + (pencilBadgeW - editPencilIconSize.width) / 2f
+            val pIconY = pencilBadgeTop + (pencilBadgeH - editPencilIconSize.height) / 2f
+            translate(left = pIconX, top = pIconY) {
+                with(editPencilPainter) {
+                    draw(size = editPencilIconSize, colorFilter = whiteColorFilter)
+                }
+            }
+
+            // "Cover" text label at bottom-left
+            drawTextSafe(
+                textMeasurer = textMeasurer,
+                text = "Cover",
+                x = coverLeft + (4f * density),
+                y = coverBottom - (12f * density),
+                style = coverLabelStyle
+            )
 
             // Track Audio Mute Button (placed to the left of Cover card with 10.dp gap)
             val muteBtnW = TimelineHitTester.MUTE_BTN_SIZE_DP * density
@@ -1858,8 +1893,6 @@ fun TimelineCanvas(
             val muteBtnLeft = muteBtnRight - muteBtnW
             val muteBtnTop = rowCTop + (mainTrackHeightPx - muteBtnH) / 2f
             val muteBtnBottom = muteBtnTop + muteBtnH
-            val muteBtnCenterX = (muteBtnLeft + muteBtnRight) / 2f
-            val muteBtnCenterY = (muteBtnTop + muteBtnBottom) / 2f
             val isMuted = currentIsMainTrackMuted
 
             buildClipCornerPath(
@@ -1879,49 +1912,29 @@ fun TimelineCanvas(
                 style = muteBtnBorderStroke
             )
 
-            // Crisp Vector Speaker Cone
-            val coneLeft = muteBtnCenterX - (7f * density)
-            val coneRectRight = muteBtnCenterX - (3.5f * density)
-            val coneFlareRight = muteBtnCenterX + (0.5f * density)
-            speakerConePath.reset()
-            speakerConePath.moveTo(coneLeft, muteBtnCenterY - (3.5f * density))
-            speakerConePath.lineTo(coneRectRight, muteBtnCenterY - (3.5f * density))
-            speakerConePath.lineTo(coneFlareRight, muteBtnCenterY - (6.5f * density))
-            speakerConePath.lineTo(coneFlareRight, muteBtnCenterY + (6.5f * density))
-            speakerConePath.lineTo(coneRectRight, muteBtnCenterY + (3.5f * density))
-            speakerConePath.lineTo(coneLeft, muteBtnCenterY + (3.5f * density))
-            speakerConePath.close()
-            drawPath(speakerConePath, color = if (isMuted) speakerMutedColor else whiteColor)
+            // Official Google Material Icons for Mute/Unmute:
+            // Unmuted: Icons.AutoMirrored.Filled.VolumeUp tinted white, with "Mute clip\naudio" label below it.
+            // Muted: Icons.AutoMirrored.Filled.VolumeOff with "Unmute clip\naudio" label below it.
+            val iconX = muteBtnLeft + (muteBtnW - muteIconSize.width) / 2f
+            val iconY = muteBtnTop + (4f * density)
+            val activePainter = if (isMuted) volumeOffPainter else volumeUpPainter
+            val activeFilter = if (isMuted) mutedColorFilter else whiteColorFilter
 
-            if (!isMuted) {
-                // Wave 1
-                speakerWave1Path.reset()
-                speakerWave1Path.moveTo(muteBtnCenterX + (3.5f * density), muteBtnCenterY - (4f * density))
-                speakerWave1Path.quadraticTo(
-                    muteBtnCenterX + (6.5f * density),
-                    muteBtnCenterY,
-                    muteBtnCenterX + (3.5f * density),
-                    muteBtnCenterY + (4f * density)
-                )
-                drawPath(speakerWave1Path, color = whiteColor, style = speakerWaveStroke)
-
-                // Wave 2
-                speakerWave2Path.reset()
-                speakerWave2Path.moveTo(muteBtnCenterX + (6.5f * density), muteBtnCenterY - (7f * density))
-                speakerWave2Path.quadraticTo(
-                    muteBtnCenterX + (10.5f * density),
-                    muteBtnCenterY,
-                    muteBtnCenterX + (6.5f * density),
-                    muteBtnCenterY + (7f * density)
-                )
-                drawPath(speakerWave2Path, color = whiteColor, style = speakerWaveStroke)
-            } else {
-                // Red diagonal slash across speaker
-                speakerSlashPath.reset()
-                speakerSlashPath.moveTo(muteBtnCenterX - (6.5f * density), muteBtnCenterY + (7.5f * density))
-                speakerSlashPath.lineTo(muteBtnCenterX + (8.5f * density), muteBtnCenterY - (7.5f * density))
-                drawPath(speakerSlashPath, color = muteCrossColor, style = muteSlashStroke)
+            translate(left = iconX, top = iconY) {
+                with(activePainter) {
+                    draw(size = muteIconSize, colorFilter = activeFilter)
+                }
             }
+
+            val muteLabelText = if (isMuted) "Unmute clip\naudio" else "Mute clip\naudio"
+            drawTextSafe(
+                textMeasurer = textMeasurer,
+                text = muteLabelText,
+                x = muteBtnLeft + (1f * density),
+                y = iconY + muteIconSize.height + (2f * density),
+                style = muteLabelStyle,
+                maxLines = 2
+            )
         }
 
         // Draw Main Clips
@@ -2713,13 +2726,15 @@ fun TimelineCanvas(
             bottom = addBtnBottom,
             roundLeft = true,
             roundRight = true,
-            radius = 7f * density
+            radius = addBtnRadiusPx
         )
         drawPath(path = addBtnPath, color = colorPinkAddBtn)
+        // Thin crisp white border (0.8.dp) around pink button
+        drawPath(path = addBtnPath, color = whiteColor, style = addBtnBorderStroke)
 
         val plusCenterX = (addBtnLeft + addBtnRight) / 2f
         val plusCenterY = (addBtnTop + addBtnBottom) / 2f
-        val plusHalfSize = 6.5f * density
+        val plusHalfSize = 5f * density
         addPlusPath.reset()
         addPlusPath.moveTo(plusCenterX - plusHalfSize, plusCenterY)
         addPlusPath.lineTo(plusCenterX + plusHalfSize, plusCenterY)

@@ -1618,9 +1618,6 @@ fun EditorScreen(
                                             val trPos = toOuterPos(handleBoxW / 2f, -handleBoxH / 2f)
                                             val blPos = toOuterPos(-handleBoxW / 2f, handleBoxH / 2f)
                                             val brPos = toOuterPos(handleBoxW / 2f, handleBoxH / 2f)
-                                            val tmPos = toOuterPos(0f, -handleBoxH / 2f)
-                                            val bmPos = toOuterPos(0f, handleBoxH / 2f)
-                                            val lmPos = toOuterPos(-handleBoxW / 2f, 0f)
                                             val rmPos = toOuterPos(handleBoxW / 2f, 0f)
 
                                             val hitRadius = 28.dp.toPx()
@@ -1628,20 +1625,17 @@ fun EditorScreen(
                                             val distTR = (downPos - trPos).getDistance()
                                             val distBL = (downPos - blPos).getDistance()
                                             val distBR = (downPos - brPos).getDistance()
-                                            val distTM = (downPos - tmPos).getDistance()
-                                            val distBM = (downPos - bmPos).getDistance()
-                                            val distLM = (downPos - lmPos).getDistance()
                                             val distRM = (downPos - rmPos).getDistance()
 
                                             // Determine active handle mode:
                                             // 1: Top-Left Delete, 2: Top-Right Edit (Text only), 3: Bottom-Left Copy,
-                                            // 4: Bottom-Right Scale/Rotate, 5: Edge Midpoint Scale (Top, Bottom, Left, Right), 0: Normal Body
+                                            // 4: Bottom-Right Scale/Rotate, 5: Right Midpoint Scale, 0: Normal Body
                                             val activeHandle = when {
                                                 distTL <= hitRadius -> 1
                                                 activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT && distTR <= hitRadius -> 2
                                                 distBL <= hitRadius -> 3
                                                 distBR <= hitRadius -> 4
-                                                distTM <= hitRadius || distBM <= hitRadius || distLM <= hitRadius || distRM <= hitRadius -> 5
+                                                distRM <= hitRadius -> 5
                                                 else -> 0
                                             }
 
@@ -2034,11 +2028,11 @@ fun EditorScreen(
                                                 val top = cy - boxH / 2f
                                                 val hLeft = cx - handleBoxW / 2f
                                                 val hTop = cy - handleBoxH / 2f
-                                                val strokeWidth = 1.5.dp.toPx()
+                                                val strokeWidth = 1.dp.toPx()
                                                 val cornerBadgeRadius = 12.dp.toPx()
                                                 val midDotRadius = 7.dp.toPx()
 
-                                                // 1.5.dp White stroke bounding frame - hugs borders 100% flush
+                                                // 1.dp White stroke bounding frame - hugs borders 100% flush
                                                 drawRect(
                                                     color = Color.White,
                                                     topLeft = Offset(left, top),
@@ -2174,29 +2168,11 @@ fun EditorScreen(
                                                     cap = StrokeCap.Round
                                                 )
 
-                                                // 5. All 4 Edge Midpoints: Solid Red/Pink Handle Dots (●) with 6.dp radius
+                                                // 5. Edge Midpoint: ONLY ONE Solid Red/Pink Handle Dot (●) on the RIGHT edge
                                                 val edgeDotRadius = 6.dp.toPx()
                                                 val edgeDotStroke = 1.dp.toPx()
                                                 val pinkDotColor = Color(0xFFFF2D55)
                                                 val dotBorderColor = Color.White.copy(alpha = 0.5f)
-
-                                                // Top-Mid
-                                                val tmx = hLeft + handleBoxW / 2f
-                                                val tmy = hTop
-                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(tmx, tmy))
-                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(tmx, tmy), style = Stroke(width = edgeDotStroke))
-
-                                                // Bottom-Mid
-                                                val bmx = hLeft + handleBoxW / 2f
-                                                val bmy = hTop + handleBoxH
-                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(bmx, bmy))
-                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(bmx, bmy), style = Stroke(width = edgeDotStroke))
-
-                                                // Left-Mid
-                                                val lmx = hLeft
-                                                val lmy = hTop + handleBoxH / 2f
-                                                drawCircle(color = pinkDotColor, radius = edgeDotRadius, center = Offset(lmx, lmy))
-                                                drawCircle(color = dotBorderColor, radius = edgeDotRadius, center = Offset(lmx, lmy), style = Stroke(width = edgeDotStroke))
 
                                                 // Right-Mid
                                                 val rmx = hLeft + handleBoxW
