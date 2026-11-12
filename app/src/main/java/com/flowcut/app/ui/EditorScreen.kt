@@ -480,11 +480,8 @@ fun EditorScreen(
     ) { uri ->
         if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            val currentOverlayCount = vm.layerItems.count {
-                it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
-            }
-            if (currentOverlayCount >= 30) {
-                Toast.makeText(context, "Maximum 30 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.IMAGE), Toast.LENGTH_SHORT).show()
                 return@rememberLauncherForActivityResult
             }
             val mimeType = context.contentResolver.getType(uri) ?: ""
@@ -509,11 +506,8 @@ fun EditorScreen(
     ) { uri ->
         if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            val currentOverlayCount = vm.layerItems.count {
-                it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
-            }
-            if (currentOverlayCount >= 30) {
-                Toast.makeText(context, "Maximum 30 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.IMAGE), Toast.LENGTH_SHORT).show()
                 return@rememberLauncherForActivityResult
             }
             val mimeType = context.contentResolver.getType(uri) ?: ""
@@ -535,11 +529,8 @@ fun EditorScreen(
 
     val openOverlayPicker: () -> Unit = {
         val vm = resolvedViewModel
-        val currentOverlayCount = vm?.layerItems?.count {
-            it.type == com.flowcut.app.engine.LayerType.IMAGE || it.type == com.flowcut.app.engine.LayerType.VIDEO
-        } ?: 0
-        if (currentOverlayCount >= 30) {
-            Toast.makeText(context, "Maximum 30 photo/video overlays reached", Toast.LENGTH_SHORT).show()
+        if (vm != null && !com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
+            Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.IMAGE), Toast.LENGTH_SHORT).show()
         } else {
             try {
                 overlayPickerLauncher.launch(
@@ -555,19 +546,25 @@ fun EditorScreen(
         }
     }
 
+    var isStickerReplaceMode by remember { mutableStateOf(false) }
+
     val stickerImagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.STICKER)) {
-                Toast.makeText(context, "Maximum 20 sticker overlays reached", Toast.LENGTH_SHORT).show()
+            if (!isStickerReplaceMode && !com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.STICKER)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.STICKER), Toast.LENGTH_SHORT).show()
                 return@rememberLauncherForActivityResult
             }
             val cachePath = copyUriToCacheFile(context, uri, "sticker_img_")
             if (cachePath != null) {
-                val playheadUs = playbackController.playhead.timeUs
-                vm.addImageStickerOverlay(cachePath, playheadUs, 3_000_000L)
+                if (isStickerReplaceMode) {
+                    vm.replaceSelectedSticker(newTextOrEmoji = "", newMediaPath = cachePath)
+                } else {
+                    val playheadUs = playbackController.playhead.timeUs
+                    vm.addImageStickerOverlay(cachePath, playheadUs, 3_000_000L)
+                }
                 previewRenderer.requestRender()
                 frameDriver.wake()
             }
@@ -646,6 +643,8 @@ fun EditorScreen(
     var effectInitialIntensity by remember { mutableFloatStateOf(0.7f) }
     var filterIsNewItem by remember { mutableStateOf(false) }
     var effectIsNewItem by remember { mutableStateOf(false) }
+    var isOverlayAdjustSheetVisible by remember { mutableStateOf(false) }
+    var isAutoCaptionsSheetVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val fontsDir = File(context.filesDir, "fonts")
@@ -723,10 +722,15 @@ fun EditorScreen(
     }
 
     val openLocalAudioPicker: () -> Unit = {
-        try {
-            localAudioPickerLauncher.launch("audio/*")
-        } catch (_: Exception) {
-            Toast.makeText(context, "Cannot open audio picker", Toast.LENGTH_SHORT).show()
+        val vm = resolvedViewModel
+        if (vm != null && !com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.AUDIO)) {
+            Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.AUDIO), Toast.LENGTH_SHORT).show()
+        } else {
+            try {
+                localAudioPickerLauncher.launch("audio/*")
+            } catch (_: Exception) {
+                Toast.makeText(context, "Cannot open audio picker", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -765,10 +769,15 @@ fun EditorScreen(
     }
 
     val openExtractVideoPicker: () -> Unit = {
-        try {
-            extractVideoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-        } catch (_: Exception) {
-            Toast.makeText(context, "Cannot open video picker", Toast.LENGTH_SHORT).show()
+        val vm = resolvedViewModel
+        if (vm != null && !com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.AUDIO)) {
+            Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.AUDIO), Toast.LENGTH_SHORT).show()
+        } else {
+            try {
+                extractVideoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+            } catch (_: Exception) {
+                Toast.makeText(context, "Cannot open video picker", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -805,8 +814,8 @@ fun EditorScreen(
     val handleOpenText: () -> Unit = {
         val vm = resolvedViewModel
         if (vm != null) {
-            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.TEXT)) {
-                Toast.makeText(context, "Maximum 20 text overlays reached", Toast.LENGTH_SHORT).show()
+            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.TEXT)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.TEXT), Toast.LENGTH_SHORT).show()
             } else {
                 if (playbackController.playhead.mode == PlayMode.PLAYING) {
                     playbackController.pause()
@@ -837,8 +846,8 @@ fun EditorScreen(
     val handleOpenSticker: () -> Unit = {
         val vm = resolvedViewModel
         if (vm != null) {
-            if (!com.flowcut.app.engine.canAddLayer(vm.layerItems, com.flowcut.app.engine.LayerType.STICKER)) {
-                Toast.makeText(context, "Maximum 20 sticker overlays reached", Toast.LENGTH_SHORT).show()
+            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.STICKER)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.STICKER), Toast.LENGTH_SHORT).show()
             } else {
                 if (playbackController.playhead.mode == PlayMode.PLAYING) {
                     playbackController.pause()
@@ -1172,7 +1181,7 @@ fun EditorScreen(
                                             val newFocus = when (hit.type) {
                                                 com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO ->
                                                     TimelineFocusState.S2_PIP_ITEM(hit.id)
-                                                com.flowcut.app.engine.LayerType.STICKER ->
+                                                com.flowcut.app.engine.LayerType.STICKER, com.flowcut.app.engine.LayerType.MOSAIC ->
                                                     TimelineFocusState.S3_STICKER_ITEM(hit.id)
                                                 com.flowcut.app.engine.LayerType.TEXT ->
                                                     TimelineFocusState.S4_TEXT_ITEM(hit.id)
@@ -1987,7 +1996,7 @@ fun EditorScreen(
                                                                     val newFocus = when (hit.type) {
                                                                         com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO ->
                                                                             TimelineFocusState.S2_PIP_ITEM(hit.id)
-                                                                        com.flowcut.app.engine.LayerType.STICKER ->
+                                                                        com.flowcut.app.engine.LayerType.STICKER, com.flowcut.app.engine.LayerType.MOSAIC ->
                                                                             TimelineFocusState.S3_STICKER_ITEM(hit.id)
                                                                         com.flowcut.app.engine.LayerType.TEXT ->
                                                                             TimelineFocusState.S4_TEXT_ITEM(hit.id)
@@ -2576,6 +2585,14 @@ fun EditorScreen(
             val isFilterOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.FILTER
             val isEffectOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.EFFECT
 
+            val isStickerItem = vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S3_STICKER_ITEM ||
+                (activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.STICKER ||
+                 activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.MOSAIC)
+            val selectedStickerItem = if (isStickerItem) activeOverlayForToolbar else null
+            val canSplitSticker = selectedStickerItem != null &&
+                currentPlayheadUs >= (selectedStickerItem.startUs + 200_000L) &&
+                currentPlayheadUs <= (selectedStickerItem.endUs - 200_000L)
+
             val isPipOverlay = activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.IMAGE ||
                 activeOverlayForToolbar?.type == com.flowcut.app.engine.LayerType.VIDEO ||
                 isPipActive
@@ -2588,7 +2605,7 @@ fun EditorScreen(
                 currentPlayheadUs >= (selectedAudioItem.startUs + 200_000L) &&
                 currentPlayheadUs <= (selectedAudioItem.endUs - 200_000L)
 
-            val isOverlaySelectedForToolbar = vmUiState?.selectedOverlayId != null || isPipActive || isAudioActive
+            val isOverlaySelectedForToolbar = vmUiState?.selectedOverlayId != null || isPipActive || isAudioActive || isStickerItem
 
             BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
@@ -2605,6 +2622,57 @@ fun EditorScreen(
                 isTextToolbarActive = isTextToolbarActive,
                 isFilterOverlaySelected = isFilterOverlay,
                 isEffectOverlaySelected = isEffectOverlay,
+                isStickerSelected = isStickerItem,
+                canSplitSticker = canSplitSticker,
+                onAddStickerClick = {
+                    isStickerReplaceMode = false
+                    handleOpenSticker()
+                },
+                onStickerAnimationClick = {
+                    val overlayId = selectedStickerItem?.id ?: vmUiState?.selectedOverlayId
+                    if (overlayId != null) {
+                        if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                            playbackController.pause()
+                            frameDriver.wake()
+                            onPlaybackStateChange(false)
+                        }
+                        activeTextOverlayId = overlayId
+                        isTextAnimationSheetVisible = true
+                    }
+                },
+                onStickerAdjustClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isOverlayAdjustSheetVisible = true
+                },
+                onStickerReplaceClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isStickerReplaceMode = true
+                    isStickerSheetVisible = true
+                },
+                onPipAdjustClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isOverlayAdjustSheetVisible = true
+                },
+                onCaptionsClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isAutoCaptionsSheetVisible = true
+                },
                 onEditFilterOverlayClick = {
                     activeOverlayForToolbar?.let { itm ->
                         filterTargetOverlayId = itm.id
@@ -3020,6 +3088,10 @@ fun EditorScreen(
                         filterInitialIntensity = targetItem.filterIntensity
                         filterIsNewItem = false
                     } else {
+                        if (resolvedViewModel != null && !com.flowcut.app.engine.canAddLayerItem(curLayers, com.flowcut.app.engine.LayerType.FILTER)) {
+                            Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.FILTER), Toast.LENGTH_SHORT).show()
+                            return@BottomToolbar
+                        }
                         filterTargetOverlayId = null
                         filterInitialPresetId = 1
                         filterInitialIntensity = 0.8f
@@ -3056,6 +3128,10 @@ fun EditorScreen(
                         effectInitialIntensity = targetItem.effectIntensity
                         effectIsNewItem = false
                     } else {
+                        if (resolvedViewModel != null && !com.flowcut.app.engine.canAddLayerItem(curLayers, com.flowcut.app.engine.LayerType.EFFECT)) {
+                            Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.EFFECT), Toast.LENGTH_SHORT).show()
+                            return@BottomToolbar
+                        }
                         effectTargetOverlayId = null
                         effectInitialPresetId = 1
                         effectInitialIntensity = 0.7f
@@ -3346,6 +3422,7 @@ fun EditorScreen(
             editingTextOverlayId = editingTextOverlayId,
             isNewTextOverlay = isNewTextOverlay,
             isStickerSheetVisible = isStickerSheetVisible,
+            isStickerReplaceMode = isStickerReplaceMode,
             isTextColorSheetVisible = isTextColorSheetVisible,
             isTextFontSheetVisible = isTextFontSheetVisible,
             isTextAnimationSheetVisible = isTextAnimationSheetVisible,
@@ -3394,6 +3471,18 @@ fun EditorScreen(
                 isTextAdjustSheetVisible = false
                 activeTextOverlayId = null
             }
+        )
+
+        // Phase 8 Sheets: Overlay Adjust (Opacity/Brightness/Contrast/Saturation) & Auto-Captions
+        Phase8SheetsHost(
+            isOverlayAdjustVisible = isOverlayAdjustSheetVisible,
+            isAutoCaptionsVisible = isAutoCaptionsSheetVisible,
+            selectedOverlayId = vmUiState?.selectedOverlayId,
+            resolvedViewModel = resolvedViewModel,
+            previewRenderer = previewRenderer,
+            onWakeFrameDriver = { frameDriver.wake() },
+            onDismissOverlayAdjust = { isOverlayAdjustSheetVisible = false },
+            onDismissAutoCaptions = { isAutoCaptionsSheetVisible = false }
         )
 
         // Overlapping Layer Conflict Picker Dialog (Matching reference image_2d9184.png)
@@ -3447,6 +3536,7 @@ fun EditorScreen(
                                             com.flowcut.app.engine.LayerType.TEXT -> Color(0xFFF59E0B)
                                             com.flowcut.app.engine.LayerType.FILTER -> Color(0xFF06B6D4) // Cyan
                                             com.flowcut.app.engine.LayerType.EFFECT -> Color(0xFFA855F7) // Purple
+                                            com.flowcut.app.engine.LayerType.MOSAIC -> Color(0xFFD97706) // Amber/Brown
                                             else -> Color(0xFF68C95B) // Green
                                         }
 
@@ -5820,6 +5910,7 @@ private fun TextAndStickerSheetsHost(
     editingTextOverlayId: String?,
     isNewTextOverlay: Boolean,
     isStickerSheetVisible: Boolean,
+    isStickerReplaceMode: Boolean = false,
     isTextColorSheetVisible: Boolean,
     isTextFontSheetVisible: Boolean,
     isTextAnimationSheetVisible: Boolean,
@@ -5883,7 +5974,11 @@ private fun TextAndStickerSheetsHost(
     if (isStickerSheetVisible) {
         StickerPickerSheet(
             onSelectSticker = { glyph ->
-                resolvedViewModel?.addStickerOverlay(glyph, playheadUs, 3_000_000L)
+                if (isStickerReplaceMode) {
+                    resolvedViewModel?.replaceSelectedSticker(newTextOrEmoji = glyph, newMediaPath = "")
+                } else {
+                    resolvedViewModel?.addStickerOverlay(glyph, playheadUs, 3_000_000L)
+                }
                 previewRenderer.requestRender()
                 onWakeFrameDriver()
                 onCloseStickerPicker()
@@ -5892,7 +5987,8 @@ private fun TextAndStickerSheetsHost(
                 onCloseStickerPicker()
                 onPickStickerImage()
             },
-            onDismiss = onCloseStickerPicker
+            onDismiss = onCloseStickerPicker,
+            isReplaceMode = isStickerReplaceMode
         )
     }
 
@@ -6072,5 +6168,74 @@ private fun TextAndStickerSheetsHost(
         } else {
             onCloseTextAdjust()
         }
+    }
+}
+
+/**
+ * Dedicated Host for Phase 8 Sheets: Overlay Adjust (Opacity/Brightness/Contrast/Saturation) & Auto-Captions.
+ * Isolated into a separate composable method to avoid JVM 64KB MethodTooLargeException in EditorScreen.
+ */
+@Composable
+private fun Phase8SheetsHost(
+    isOverlayAdjustVisible: Boolean,
+    isAutoCaptionsVisible: Boolean,
+    selectedOverlayId: String?,
+    resolvedViewModel: com.flowcut.app.editor.EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    onWakeFrameDriver: () -> Unit,
+    onDismissOverlayAdjust: () -> Unit,
+    onDismissAutoCaptions: () -> Unit
+) {
+    if (isOverlayAdjustVisible && selectedOverlayId != null) {
+        val overlayItem = resolvedViewModel?.getOverlayItem(selectedOverlayId)
+        if (overlayItem != null) {
+            val origOpacity = remember(selectedOverlayId) { overlayItem.transform.opacity }
+            val origBrightness = remember(selectedOverlayId) { overlayItem.adjustBrightness }
+            val origContrast = remember(selectedOverlayId) { overlayItem.adjustContrast }
+            val origSaturation = remember(selectedOverlayId) { overlayItem.adjustSaturation }
+
+            OverlayAdjustSheet(
+                initialOpacity = overlayItem.transform.opacity,
+                initialBrightness = overlayItem.adjustBrightness,
+                initialContrast = overlayItem.adjustContrast,
+                initialSaturation = overlayItem.adjustSaturation,
+                onLiveChange = { op, br, co, sa ->
+                    resolvedViewModel.liveUpdateOverlayAdjust(selectedOverlayId, op, br, co, sa)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                },
+                onDone = { op, br, co, sa ->
+                    resolvedViewModel.updateOverlayAdjust(selectedOverlayId, op, br, co, sa)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onDismissOverlayAdjust()
+                },
+                onCancel = {
+                    resolvedViewModel.liveUpdateOverlayAdjust(selectedOverlayId, origOpacity, origBrightness, origContrast, origSaturation)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onDismissOverlayAdjust()
+                }
+            )
+        } else {
+            onDismissOverlayAdjust()
+        }
+    }
+
+    if (isAutoCaptionsVisible) {
+        val selectedItem = selectedOverlayId?.let { resolvedViewModel?.getOverlayItem(it) }
+        val audioItem = if (selectedItem?.type == com.flowcut.app.engine.LayerType.AUDIO) selectedItem else null
+        AutoCaptionsSheet(
+            onGenerateCaptions = { phrases ->
+                val startUs = audioItem?.startUs ?: 0L
+                val endUs = audioItem?.endUs ?: 0L
+                val added = resolvedViewModel?.generateCaptions(phrases, startUs, endUs) ?: 0
+                if (added > 0) {
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                }
+            },
+            onDismiss = onDismissAutoCaptions
+        )
     }
 }

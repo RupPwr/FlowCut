@@ -1,5 +1,17 @@
 package com.flowcut.app.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material.icons.filled.Cached
+import androidx.compose.material.icons.filled.SentimentSatisfiedAlt
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.ui.graphics.Color
 
 import androidx.compose.foundation.background
@@ -68,6 +80,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+enum class ToolbarMode {
+    S0_MAIN,
+    S1_S2_PIP,
+    S3_STICKER,
+    S4_TEXT,
+    S5_AUDIO_GROUP,
+    S6_AUDIO_ITEM,
+    S7_FILTER_EFFECT,
+    MAIN_CLIP,
+    SELECTED_OVERLAY
+}
+
 @Composable
 fun BottomToolbar(
     isClipSelected: Boolean = false,
@@ -84,6 +108,14 @@ fun BottomToolbar(
     isTextToolbarActive: Boolean = false,
     isFilterOverlaySelected: Boolean = false,
     isEffectOverlaySelected: Boolean = false,
+    isStickerSelected: Boolean = false,
+    canSplitSticker: Boolean = true,
+    onAddStickerClick: () -> Unit = {},
+    onStickerAnimationClick: () -> Unit = {},
+    onStickerAdjustClick: () -> Unit = {},
+    onStickerReplaceClick: () -> Unit = {},
+    onCaptionsClick: () -> Unit = {},
+    onPipAdjustClick: () -> Unit = {},
     onEditFilterOverlayClick: () -> Unit = {},
     onEditEffectOverlayClick: () -> Unit = {},
     onAddOverlayClick: () -> Unit = {},
@@ -129,6 +161,17 @@ fun BottomToolbar(
 ) {
     val colors = FlowCutTheme.colors
 
+    val currentMode = when {
+        isClipSelected -> ToolbarMode.MAIN_CLIP
+        isTextToolbarActive || (isOverlaySelected && isTextOverlaySelected) -> ToolbarMode.S4_TEXT
+        isStickerSelected -> ToolbarMode.S3_STICKER
+        isOverlaySelected && (isFilterOverlaySelected || isEffectOverlaySelected) -> ToolbarMode.S7_FILTER_EFFECT
+        isPipActive -> ToolbarMode.S1_S2_PIP
+        isAudioActive -> if (isAudioItemSelected) ToolbarMode.S6_AUDIO_ITEM else ToolbarMode.S5_AUDIO_GROUP
+        isOverlaySelected -> ToolbarMode.SELECTED_OVERLAY
+        else -> ToolbarMode.S0_MAIN
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -140,111 +183,159 @@ fun BottomToolbar(
             color = colors.border
         )
 
-        if (isClipSelected) {
-            SelectedClipToolbar(
-                onClearSelection = onClearSelection,
-                onSplitClick = onSplitClick,
-                onTrimClick = onTrimClick,
-                onVolumeClick = onVolumeClick,
-                onSpeedClick = onSpeedClick,
-                onAdjustClick = onAdjustClick,
-                onFilterClick = onFilterClick,
-                onEffectClick = onEffectClick,
-                onBackgroundClick = onBackgroundClick,
-                onRotateClick = onRotateClick,
-                onFlipClick = onFlipClick,
-                onOpacityClick = onOpacityClick,
-                onCopyClick = onCopyClick,
-                onReplaceClick = onReplaceClick,
-                onFreezeClick = onFreezeClick,
-                onDeleteClipClick = onDeleteClipClick
-            )
-        } else if (isTextToolbarActive || (isOverlaySelected && isTextOverlaySelected)) {
-            TextToolbarContent(
-                onClearSelection = onClearSelection,
-                onAddTextClick = onAddTextClick,
-                onEditTextOverlayClick = onEditTextOverlayClick,
-                onFontClick = onFontClick,
-                onColorClick = onColorClick,
-                onAnimationClick = onAnimationClick,
-                onSplitClick = onSplitClick,
-                onDeleteClipClick = onDeleteClipClick,
-                onOpacityClick = onOpacityClick,
-                onCopyClick = onCopyClick
-            )
-        } else if (isOverlaySelected && (isFilterOverlaySelected || isEffectOverlaySelected)) {
-            FilterEffectToolbarContent(
-                isFilter = isFilterOverlaySelected,
-                onClearSelection = onClearSelection,
-                onAddClick = if (isFilterOverlaySelected) onFilterClick else onEffectClick,
-                onEditClick = if (isFilterOverlaySelected) onEditFilterOverlayClick else onEditEffectOverlayClick,
-                onSplitClick = onSplitClick,
-                onCopyClick = onCopyClick,
-                onDeleteOverlayClick = { onDeleteClipClick?.invoke() }
-            )
-        } else if (isPipActive) {
-            PipToolbarContent(
-                isPipItemSelected = isPipItemSelected,
-                isPipVideo = isPipVideo,
-                canSplitPip = canSplitPip,
-                onClearSelection = onClearSelection,
-                onAddOverlayClick = onAddOverlayClick,
-                onSplitClick = onSplitClick,
-                onAnimationClick = onAnimationClick,
-                onDeleteClipClick = onDeleteClipClick,
-                onOpacityClick = onOpacityClick,
-                onVolumeClick = onVolumeClick,
-                onSpeedClick = onSpeedClick,
-                onCopyClick = onCopyClick,
-                onRotateClick = onRotateClick,
-                onFlipClick = onFlipClick,
-                onCutoutClick = onPipCutoutClick,
-                onMaskClick = onPipMaskClick,
-                onCropClick = onPipCropClick
-            )
-        } else if (isAudioActive) {
-            AudioToolbarContent(
-                isAudioItemSelected = isAudioItemSelected,
-                canSplitAudio = canSplitAudio,
-                onBackToAudioGroup = onBackToAudioGroup,
-                onClearSelection = onClearSelection,
-                onVolumeClick = onVolumeClick,
-                onAudioFadeClick = onAudioFadeClick,
-                onSpeedClick = onSpeedClick,
-                onSplitClick = onSplitClick,
-                onCopyClick = onCopyClick,
-                onDeleteAudioClick = onDeleteAudioClick,
-                onAudioSoundsClick = onAudioSoundsClick,
-                onAudioLocalClick = onAudioLocalClick,
-                onAudioEffectsClick = onAudioEffectsClick,
-                onAudioExtractClick = onAudioExtractClick,
-                onAudioRecordClick = onAudioRecordClick
-            )
-        } else if (isOverlaySelected) {
-            SelectedOverlayToolbar(
-                isPipOverlaySelected = isPipOverlaySelected,
-                isTextOverlaySelected = isTextOverlaySelected,
-                onClearSelection = onClearSelection,
-                onAddOverlayClick = onAddOverlayClick,
-                onEditTextOverlayClick = onEditTextOverlayClick,
-                onSplitClick = onSplitClick,
-                onCopyClick = onCopyClick,
-                onOpacityClick = onOpacityClick,
-                onRotateClick = onRotateClick,
-                onFlipClick = onFlipClick,
-                onDeleteClipClick = onDeleteClipClick
-            )
-        } else {
-            MainToolbarContent(
-                onTrimClick = onTrimClick,
-                onTextClick = onTextClick,
-                onStickerClick = onStickerClick,
-                onOverlayClick = onOverlayClick,
-                onAudioClick = onAudioClick,
-                onFilterClick = onFilterClick,
-                onEffectClick = onEffectClick,
-                onLockedItemClick = onLockedItemClick
-            )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+        ) {
+            AnimatedContent(
+                targetState = currentMode,
+                transitionSpec = {
+                    (slideInHorizontally(
+                        animationSpec = tween(200, easing = FastOutSlowInEasing),
+                        initialOffsetX = { fullWidth -> (fullWidth * 0.15f).toInt() }
+                    ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)))
+                        .togetherWith(
+                            slideOutHorizontally(
+                                animationSpec = tween(200, easing = FastOutSlowInEasing),
+                                targetOffsetX = { fullWidth -> (-fullWidth * 0.15f).toInt() }
+                            ) + fadeOut(animationSpec = tween(200, easing = FastOutSlowInEasing))
+                        )
+                },
+                label = "BottomToolbarAnimatedTransition",
+                modifier = Modifier.fillMaxSize()
+            ) { mode ->
+                when (mode) {
+                    ToolbarMode.MAIN_CLIP -> {
+                        SelectedClipToolbar(
+                            onClearSelection = onClearSelection,
+                            onSplitClick = onSplitClick,
+                            onTrimClick = onTrimClick,
+                            onVolumeClick = onVolumeClick,
+                            onSpeedClick = onSpeedClick,
+                            onAdjustClick = onAdjustClick,
+                            onFilterClick = onFilterClick,
+                            onEffectClick = onEffectClick,
+                            onBackgroundClick = onBackgroundClick,
+                            onRotateClick = onRotateClick,
+                            onFlipClick = onFlipClick,
+                            onOpacityClick = onOpacityClick,
+                            onCopyClick = onCopyClick,
+                            onReplaceClick = onReplaceClick,
+                            onFreezeClick = onFreezeClick,
+                            onDeleteClipClick = onDeleteClipClick
+                        )
+                    }
+                    ToolbarMode.S4_TEXT -> {
+                        TextToolbarContent(
+                            onClearSelection = onClearSelection,
+                            onAddTextClick = onAddTextClick,
+                            onEditTextOverlayClick = onEditTextOverlayClick,
+                            onFontClick = onFontClick,
+                            onColorClick = onColorClick,
+                            onAnimationClick = onAnimationClick,
+                            onSplitClick = onSplitClick,
+                            onDeleteClipClick = onDeleteClipClick,
+                            onOpacityClick = onOpacityClick,
+                            onCopyClick = onCopyClick,
+                            onCaptionsClick = onCaptionsClick
+                        )
+                    }
+                    ToolbarMode.S3_STICKER -> {
+                        StickerToolbarContent(
+                            canSplitSticker = canSplitSticker,
+                            onClearSelection = onClearSelection,
+                            onAddStickerClick = onAddStickerClick,
+                            onAnimationClick = onStickerAnimationClick,
+                            onAdjustClick = onStickerAdjustClick,
+                            onSplitClick = onSplitClick,
+                            onDeleteClipClick = onDeleteClipClick,
+                            onReplaceClick = onStickerReplaceClick,
+                            onCopyClick = onCopyClick
+                        )
+                    }
+                    ToolbarMode.S7_FILTER_EFFECT -> {
+                        FilterEffectToolbarContent(
+                            isFilter = isFilterOverlaySelected,
+                            onClearSelection = onClearSelection,
+                            onAddClick = if (isFilterOverlaySelected) onFilterClick else onEffectClick,
+                            onEditClick = if (isFilterOverlaySelected) onEditFilterOverlayClick else onEditEffectOverlayClick,
+                            onSplitClick = onSplitClick,
+                            onCopyClick = onCopyClick,
+                            onDeleteOverlayClick = { onDeleteClipClick?.invoke() }
+                        )
+                    }
+                    ToolbarMode.S1_S2_PIP -> {
+                        PipToolbarContent(
+                            isPipItemSelected = isPipItemSelected,
+                            isPipVideo = isPipVideo,
+                            canSplitPip = canSplitPip,
+                            onClearSelection = onClearSelection,
+                            onAddOverlayClick = onAddOverlayClick,
+                            onSplitClick = onSplitClick,
+                            onAnimationClick = onAnimationClick,
+                            onDeleteClipClick = onDeleteClipClick,
+                            onOpacityClick = onOpacityClick,
+                            onVolumeClick = onVolumeClick,
+                            onSpeedClick = onSpeedClick,
+                            onCopyClick = onCopyClick,
+                            onRotateClick = onRotateClick,
+                            onFlipClick = onFlipClick,
+                            onCutoutClick = onPipCutoutClick,
+                            onMaskClick = onPipMaskClick,
+                            onCropClick = onPipCropClick,
+                            onAdjustClick = onPipAdjustClick
+                        )
+                    }
+                    ToolbarMode.S5_AUDIO_GROUP, ToolbarMode.S6_AUDIO_ITEM -> {
+                        AudioToolbarContent(
+                            isAudioItemSelected = isAudioItemSelected,
+                            canSplitAudio = canSplitAudio,
+                            onBackToAudioGroup = onBackToAudioGroup,
+                            onClearSelection = onClearSelection,
+                            onVolumeClick = onVolumeClick,
+                            onAudioFadeClick = onAudioFadeClick,
+                            onSpeedClick = onSpeedClick,
+                            onSplitClick = onSplitClick,
+                            onCopyClick = onCopyClick,
+                            onDeleteAudioClick = onDeleteAudioClick,
+                            onAudioSoundsClick = onAudioSoundsClick,
+                            onAudioLocalClick = onAudioLocalClick,
+                            onAudioEffectsClick = onAudioEffectsClick,
+                            onAudioExtractClick = onAudioExtractClick,
+                            onAudioRecordClick = onAudioRecordClick,
+                            onCaptionsClick = onCaptionsClick
+                        )
+                    }
+                    ToolbarMode.SELECTED_OVERLAY -> {
+                        SelectedOverlayToolbar(
+                            isPipOverlaySelected = isPipOverlaySelected,
+                            isTextOverlaySelected = isTextOverlaySelected,
+                            onClearSelection = onClearSelection,
+                            onAddOverlayClick = onAddOverlayClick,
+                            onEditTextOverlayClick = onEditTextOverlayClick,
+                            onSplitClick = onSplitClick,
+                            onCopyClick = onCopyClick,
+                            onOpacityClick = onOpacityClick,
+                            onRotateClick = onRotateClick,
+                            onFlipClick = onFlipClick,
+                            onDeleteClipClick = onDeleteClipClick
+                        )
+                    }
+                    ToolbarMode.S0_MAIN -> {
+                        MainToolbarContent(
+                            onTrimClick = onTrimClick,
+                            onTextClick = onTextClick,
+                            onStickerClick = onStickerClick,
+                            onOverlayClick = onOverlayClick,
+                            onAudioClick = onAudioClick,
+                            onFilterClick = onFilterClick,
+                            onEffectClick = onEffectClick,
+                            onLockedItemClick = onLockedItemClick
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -734,6 +825,286 @@ private fun SelectedClipToolbar(
 }
 
 @Composable
+private fun StickerToolbarContent(
+    canSplitSticker: Boolean,
+    onClearSelection: () -> Unit,
+    onAddStickerClick: () -> Unit,
+    onAnimationClick: () -> Unit,
+    onAdjustClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onDeleteClipClick: (() -> Unit)?,
+    onReplaceClick: () -> Unit,
+    onCopyClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxSize(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 1. Left ⌄ collapse chevron (returns to S0_NONE)
+        Box(
+            modifier = Modifier
+                .width(48.dp)
+                .fillMaxHeight()
+                .clickable { onClearSelection() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Collapse Sticker",
+                tint = colors.textPrimary,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        // Vertical separator
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .height(24.dp)
+                .background(colors.border)
+        )
+
+        // Actions: ADD, ANIMATION, AI, ADJUST, SPLIT, DELETE, REPLACE, COPY
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 1. ADD (smiley+ icon + "ADD" -> opens StickerPickerSheet in add mode)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onAddStickerClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SentimentSatisfiedAlt,
+                    contentDescription = "ADD",
+                    tint = colors.accent,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "ADD",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 2. ANIMATION (opens TextAnimationSheet for sticker)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onAnimationClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Animation,
+                    contentDescription = "ANIMATION",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "ANIMATION",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 3. AI (Grayed out per spec Section 3)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .alpha(0.35f)
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "AI",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "AI",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 4. ADJUST (opens OverlayAdjustSheet)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onAdjustClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = "ADJUST",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "ADJUST",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 5. SPLIT (splits sticker, grayed-out alpha = 0.35f when outside [startUs + 200ms, endUs - 200ms])
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .alpha(if (canSplitSticker) 1.0f else 0.35f)
+                    .then(if (canSplitSticker) Modifier.clickable { onSplitClick() } else Modifier)
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                    contentDescription = "SPLIT",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "SPLIT",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 6. DELETE (deletes sticker)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onDeleteClipClick?.invoke() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "DELETE",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "DELETE",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 7. REPLACE (opens StickerPickerSheet in Replace Mode)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onReplaceClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Cached,
+                    contentDescription = "REPLACE",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "REPLACE",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 8. COPY (duplicates selected sticker)
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onCopyClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ContentCopy,
+                    contentDescription = "COPY",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "COPY",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun TextToolbarContent(
     onClearSelection: () -> Unit,
     onAddTextClick: () -> Unit,
@@ -744,7 +1115,8 @@ private fun TextToolbarContent(
     onSplitClick: () -> Unit,
     onDeleteClipClick: (() -> Unit)?,
     onOpacityClick: () -> Unit,
-    onCopyClick: () -> Unit
+    onCopyClick: () -> Unit,
+    onCaptionsClick: () -> Unit = {}
 ) {
     val colors = FlowCutTheme.colors
             Row(
@@ -806,6 +1178,34 @@ private fun TextToolbarContent(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "Add text",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 1b. Captions Action
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .clickable { onCaptionsClick() }
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Subtitles,
+                            contentDescription = "CAPTIONS",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "CAPTIONS",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -1256,7 +1656,8 @@ private fun PipToolbarContent(
     onFlipClick: () -> Unit,
     onCutoutClick: () -> Unit = {},
     onMaskClick: () -> Unit = {},
-    onCropClick: () -> Unit = {}
+    onCropClick: () -> Unit = {},
+    onAdjustClick: () -> Unit = {}
 ) {
     val colors = FlowCutTheme.colors
     val itemToolsEnabled = isPipItemSelected
@@ -1504,6 +1905,35 @@ private fun PipToolbarContent(
                         )
                     }
 
+                    // 7b. ADJUST (Opacity, Brightness, Contrast, Saturation)
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onAdjustClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "ADJUST",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ADJUST",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
                     // 8. OPACITY
                     Column(
                         modifier = Modifier
@@ -1698,7 +2128,8 @@ private fun AudioToolbarContent(
     onAudioLocalClick: () -> Unit,
     onAudioEffectsClick: () -> Unit,
     onAudioExtractClick: () -> Unit,
-    onAudioRecordClick: () -> Unit
+    onAudioRecordClick: () -> Unit,
+    onCaptionsClick: () -> Unit = {}
 ) {
     val colors = FlowCutTheme.colors
             if (isAudioItemSelected) {
@@ -1762,6 +2193,34 @@ private fun AudioToolbarContent(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = "ADD",
+                                color = colors.textPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // 0b. CAPTIONS
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 52.dp)
+                                .fillMaxHeight()
+                                .clickable { onCaptionsClick() }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Subtitles,
+                                contentDescription = "CAPTIONS",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "CAPTIONS",
                                 color = colors.textPrimary,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.SemiBold,

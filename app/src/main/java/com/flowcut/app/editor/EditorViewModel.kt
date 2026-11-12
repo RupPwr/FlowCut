@@ -29,6 +29,8 @@ import com.flowcut.app.engine.OverlayKeyframe
 import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.engine.canAddLayer
+import com.flowcut.app.engine.canAddLayerItem
+import com.flowcut.app.engine.getLayerCap
 import com.flowcut.app.engine.clampItemTrimBoundsOnRow
 import com.flowcut.app.engine.findAvailableRowOrClamp
 import com.flowcut.app.engine.trackGroup
@@ -98,6 +100,22 @@ data class FreezeResult(
     val freezeIndex: Int,
     val freezeStartMs: Long
 )
+
+const val MAX_TIMELINE_DURATION_US: Long = 15L * 60L * 1_000_000L // 900_000_000L (15 minutes)
+
+fun getLayerCapLimitMessage(type: LayerType): String {
+    val cap = getLayerCap(type)
+    val name = when (type) {
+        LayerType.TEXT -> "Text"
+        LayerType.MOSAIC -> "Mosaic"
+        LayerType.STICKER -> "Sticker"
+        LayerType.IMAGE, LayerType.VIDEO -> "PIP"
+        LayerType.AUDIO -> "Audio"
+        LayerType.FILTER -> "Filter"
+        LayerType.EFFECT -> "Effect"
+    }
+    return "Maximum limit reached: $cap $name"
+}
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -369,39 +387,107 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun addFilterLayer(presetId: Int, intensity: Float, startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
         val totalUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
         val clampedStart = startUs.coerceIn(0L, maxOf(0L, totalUs - OverlayItem.MIN_DURATION_US))
-        val endUs = minOf(clampedStart + durationUs, totalUs).coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US)
+
+        val existingItem = _layerItems.firstOrNull { it.type == LayerType.FILTER && clampedStart in it.startUs until it.endUs }
+        if (existingItem != null) {
+            val updated = existingItem.copy(filterPresetId = presetId, filterIntensity = intensity)
+            updateLayerItem(updated)
+            selectOverlay(updated.id)
+            return updated
+        }
+
+        if (!canAddLayerItem(_layerItems, LayerType.FILTER)) {
+            showToast(getLayerCapLimitMessage(LayerType.FILTER))
+            return null
+        }
+
+        val nextItem = _layerItems
+            .filter { it.type == LayerType.FILTER && it.startUs > clampedStart }
+            .minByOrNull { it.startUs }
+        val availableEndUs = minOf(clampedStart + durationUs, nextItem?.startUs ?: totalUs, totalUs)
+        if (availableEndUs - clampedStart < OverlayItem.MIN_DURATION_US) {
+            showToast("Not enough space between existing filters/effects at this position")
+            return null
+        }
+
         val newItem = OverlayItem(
             id = UUID.randomUUID().toString(),
             type = LayerType.FILTER,
             laneIndex = 0,
             zIndex = (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1,
             startUs = clampedStart,
-            endUs = endUs,
+            endUs = availableEndUs,
             filterPresetId = presetId,
             filterIntensity = intensity
         )
-        addLayerItem(newItem)
-        selectOverlay(newItem.id)
-        return newItem
+        return if (addLayerItem(newItem)) {
+            selectOverlay(newItem.id)
+            newItem
+        } else null
     }
 
     fun addEffectLayer(presetId: Int, intensity: Float, startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
         val totalUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
         val clampedStart = startUs.coerceIn(0L, maxOf(0L, totalUs - OverlayItem.MIN_DURATION_US))
-        val endUs = minOf(clampedStart + durationUs, totalUs).coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US)
+
+        val existingItem = _layerItems.firstOrNull { it.type == LayerType.EFFECT && clampedStart in it.startUs until it.endUs }
+        if (existingItem != null) {
+            val updated = existingItem.copy(effectPresetId = presetId, effectIntensity = intensity)
+            updateLayerItem(updated)
+            selectOverlay(updated.id)
+            return updated
+        }
+
+        if (!canAddLayerItem(_layerItems, LayerType.EFFECT)) {
+            showToast(getLayerCapLimitMessage(LayerType.EFFECT))
+            return null
+        }
+
+        val nextItem = _layerItems
+            .filter { it.type == LayerType.EFFECT && it.startUs > clampedStart }
+            .minByOrNull { it.startUs }
+        val availableEndUs = minOf(clampedStart + durationUs, nextItem?.startUs ?: totalUs, totalUs)
+        if (availableEndUs - clampedStart < OverlayItem.MIN_DURATION_US) {
+            showToast("Not enough space between existing filters/effects at this position")
+            return null
+        }
+
         val newItem = OverlayItem(
             id = UUID.randomUUID().toString(),
             type = LayerType.EFFECT,
             laneIndex = 0,
             zIndex = (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1,
             startUs = clampedStart,
-            endUs = endUs,
+            endUs = availableEndUs,
             effectPresetId = presetId,
             effectIntensity = intensity
         )
-        addLayerItem(newItem)
-        selectOverlay(newItem.id)
-        return newItem
+        return if (addLayerItem(newItem)) {
+            selectOverlay(newItem.id)
+            newItem
+        } else null
+    }
+
+    fun addMosaicOverlay(startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
+        if (!canAddLayerItem(_layerItems, LayerType.MOSAIC)) {
+            showToast(getLayerCapLimitMessage(LayerType.MOSAIC))
+            return null
+        }
+        val totalUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+        val clampedStart = startUs.coerceIn(0L, maxOf(0L, totalUs - OverlayItem.MIN_DURATION_US))
+        val endUs = minOf(clampedStart + durationUs, totalUs).coerceAtLeast(clampedStart + OverlayItem.MIN_DURATION_US)
+        val newItem = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.MOSAIC,
+            laneIndex = -1,
+            zIndex = (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1,
+            startUs = clampedStart,
+            endUs = endUs
+        )
+        return if (addLayerItem(newItem)) {
+            selectOverlay(newItem.id)
+            newItem
+        } else null
     }
 
     fun updateSelectedFilterLayer(presetId: Int, intensity: Float): OverlayItem? {
@@ -622,7 +708,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun addLayerItem(item: OverlayItem): Boolean {
-        if (!canAddLayer(_layerItems, item.type)) return false
+        if (!canAddLayerItem(_layerItems, item.type)) {
+            showToast(getLayerCapLimitMessage(item.type))
+            return false
+        }
+        if (item.type == LayerType.FILTER || item.type == LayerType.EFFECT) {
+            val hasSameTypeOverlap = _layerItems.any {
+                it.id != item.id && it.type == item.type && it.startUs < item.endUs && it.endUs > item.startUs
+            }
+            if (hasSameTypeOverlap) {
+                showToast("Not enough space between existing filters/effects at this position")
+                return false
+            }
+        }
         val trackGrp = item.trackGroup()
         val totalDurationUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs })
 
@@ -648,7 +746,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             resolvedStartUs = alloc.startUs
             resolvedEndUs = alloc.endUs
         } else {
-            // Text or Sticker (Row A Pins / Row B Bar)
+            // Text or Sticker or Mosaic (Row A Pins / Row B Bar)
             assignedLane = if (item.laneIndex < 0) findNextAvailableLane(item.startUs, item.endUs) else item.laneIndex
             resolvedStartUs = item.startUs
             resolvedEndUs = item.endUs
@@ -667,9 +765,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         syncLayerPlan()
         val newFocus = when (resolvedItem.type) {
             LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(resolvedItem.id)
-            LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(resolvedItem.id)
+            LayerType.STICKER, LayerType.MOSAIC -> TimelineFocusState.S3_STICKER_ITEM(resolvedItem.id)
             LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(resolvedItem.id)
             LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(resolvedItem.id)
+            LayerType.FILTER, LayerType.EFFECT -> TimelineFocusState.S7_FILTER_EFFECT_ITEM(resolvedItem.id)
             else -> TimelineFocusState.S0_NONE
         }
         _uiState.update {
@@ -694,6 +793,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         volume: Float = 1.0f,
         naturalDurationUs: Long = durationUs
     ): OverlayItem? {
+        if (!canAddLayerItem(_layerItems, LayerType.AUDIO)) {
+            showToast(getLayerCapLimitMessage(LayerType.AUDIO))
+            return null
+        }
         val endUs = startUs + durationUs
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
@@ -719,7 +822,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         startUs: Long,
         durationUs: Long = 3_000_000L
     ): OverlayItem? {
-        if (!canAddLayer(_layerItems, LayerType.TEXT)) return null
+        if (!canAddLayerItem(_layerItems, LayerType.TEXT)) {
+            showToast(getLayerCapLimitMessage(LayerType.TEXT))
+            return null
+        }
         val endUs = startUs + durationUs
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
@@ -740,7 +846,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         startUs: Long,
         durationUs: Long = 3_000_000L
     ): OverlayItem? {
-        if (!canAddLayer(_layerItems, LayerType.STICKER)) return null
+        if (!canAddLayerItem(_layerItems, LayerType.STICKER)) {
+            showToast(getLayerCapLimitMessage(LayerType.STICKER))
+            return null
+        }
         val endUs = startUs + durationUs
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
@@ -762,7 +871,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         startUs: Long,
         durationUs: Long = 3_000_000L
     ): OverlayItem? {
-        if (!canAddLayer(_layerItems, LayerType.STICKER)) return null
+        if (!canAddLayerItem(_layerItems, LayerType.STICKER)) {
+            showToast(getLayerCapLimitMessage(LayerType.STICKER))
+            return null
+        }
         val endUs = startUs + durationUs
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
@@ -781,7 +893,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         startUs: Long,
         durationUs: Long = 3_000_000L
     ): OverlayItem? {
-        if (!canAddLayer(_layerItems, LayerType.IMAGE)) return null
+        if (!canAddLayerItem(_layerItems, LayerType.IMAGE)) {
+            showToast(getLayerCapLimitMessage(LayerType.IMAGE))
+            return null
+        }
         val endUs = startUs + durationUs
         var intrinsicWidth = 0
         var intrinsicHeight = 0
@@ -824,7 +939,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         startUs: Long,
         durationUs: Long = 3_000_000L
     ): OverlayItem? {
-        if (!canAddLayer(_layerItems, LayerType.VIDEO)) return null
+        if (!canAddLayerItem(_layerItems, LayerType.VIDEO)) {
+            showToast(getLayerCapLimitMessage(LayerType.VIDEO))
+            return null
+        }
         val endUs = startUs + durationUs
         var intrinsicWidth = 0
         var intrinsicHeight = 0
@@ -1210,22 +1328,189 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         ))
     }
 
+    // Phase 8: Sticker Replace, Color Adjustment, and Captions Generator
+    fun replaceSelectedSticker(newTextOrEmoji: String = "", newMediaPath: String = ""): Boolean {
+        val selectedId = _uiState.value.selectedOverlayId ?: return false
+        val item = _layerItems.firstOrNull { it.id == selectedId } ?: return false
+
+        var intrinsicW = item.intrinsicWidth
+        var intrinsicH = item.intrinsicHeight
+        if (newMediaPath.isNotEmpty()) {
+            try {
+                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(newMediaPath, opts)
+                if (opts.outWidth > 0 && opts.outHeight > 0) {
+                    intrinsicW = opts.outWidth
+                    intrinsicH = opts.outHeight
+                }
+            } catch (_: Throwable) {}
+        } else if (newTextOrEmoji.isNotEmpty()) {
+            intrinsicW = 0
+            intrinsicH = 0
+        }
+
+        val updated = item.copy(
+            text = newTextOrEmoji,
+            mediaPath = newMediaPath,
+            intrinsicWidth = intrinsicW,
+            intrinsicHeight = intrinsicH
+        )
+        return updateLayerItem(updated)
+    }
+
+    fun liveUpdateOverlayAdjust(
+        itemId: String,
+        opacity: Float,
+        brightness: Float,
+        contrast: Float,
+        saturation: Float
+    ) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        _layerItems[idx] = cur.copy(
+            transform = cur.transform.copy(opacity = opacity.coerceIn(0f, 1f)),
+            adjustBrightness = brightness.coerceIn(-0.5f, 0.5f),
+            adjustContrast = contrast.coerceIn(0.5f, 1.8f),
+            adjustSaturation = saturation.coerceIn(0.0f, 2.0f)
+        )
+        syncLayerPlan()
+    }
+
+    fun updateOverlayAdjust(
+        itemId: String,
+        opacity: Float,
+        brightness: Float,
+        contrast: Float,
+        saturation: Float
+    ): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        return updateLayerItem(item.copy(
+            transform = item.transform.copy(opacity = opacity.coerceIn(0f, 1f)),
+            adjustBrightness = brightness.coerceIn(-0.5f, 0.5f),
+            adjustContrast = contrast.coerceIn(0.5f, 1.8f),
+            adjustSaturation = saturation.coerceIn(0.0f, 2.0f)
+        ))
+    }
+
+    fun generateCaptions(
+        phrases: List<String>,
+        startUs: Long = 0L,
+        endUs: Long = 0L
+    ): Int {
+        val validPhrases = phrases.map { it.trim() }.filter { it.isNotEmpty() }
+        if (validPhrases.isEmpty()) return 0
+
+        val timelineDuration = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(1_000_000L)
+        val effectiveStart = startUs.coerceAtLeast(0L)
+        val effectiveEnd = if (endUs > effectiveStart) endUs else timelineDuration
+        val totalSpanUs = (effectiveEnd - effectiveStart).coerceAtLeast(1_000_000L)
+
+        val count = validPhrases.size
+        val phraseDurationUs = (totalSpanUs / count).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+
+        var addedCount = 0
+        for (i in 0 until count) {
+            if (!canAddLayerItem(_layerItems, LayerType.TEXT)) {
+                showToast(getLayerCapLimitMessage(LayerType.TEXT))
+                break
+            }
+            val phraseStart = effectiveStart + i * phraseDurationUs
+            val phraseEnd = (phraseStart + phraseDurationUs).coerceAtMost(effectiveEnd)
+            if (phraseEnd - phraseStart < OverlayItem.MIN_DURATION_US) break
+
+            val item = OverlayItem(
+                id = UUID.randomUUID().toString(),
+                type = LayerType.TEXT,
+                laneIndex = -1,
+                zIndex = 0,
+                startUs = phraseStart,
+                endUs = phraseEnd,
+                text = validPhrases[i],
+                textColorArgb = 0xFFFFFFFF.toInt(),
+                bgStyle = 1,
+                transform = ClipTransform(scale = 0.85f, panY = 0.65f)
+            )
+            if (addLayerItem(item)) {
+                addedCount++
+            }
+        }
+        return addedCount
+    }
+
     fun copyLayerItem(itemId: String): OverlayItem? {
         val existing = _layerItems.firstOrNull { it.id == itemId } ?: return null
-        if (!canAddLayer(_layerItems, existing.type)) return null
+        if (!canAddLayerItem(_layerItems, existing.type)) {
+            showToast(getLayerCapLimitMessage(existing.type))
+            return null
+        }
 
         val durUs = existing.durationUs
-        val newStartUs = existing.endUs
-        val newEndUs = newStartUs + durUs
+        val newStartUs: Long
+        val newEndUs: Long
+
+        if (existing.type == LayerType.FILTER || existing.type == LayerType.EFFECT) {
+            val totalUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+            val sameType = _layerItems.filter { it.type == existing.type }.sortedBy { it.startUs }
+
+            var foundSlot: Pair<Long, Long>? = null
+
+            // 1. Check gap immediately after existing.endUs
+            val afterItems = sameType.filter { it.startUs >= existing.endUs }
+            val firstNextStart = afterItems.firstOrNull()?.startUs ?: totalUs
+            if (firstNextStart - existing.endUs >= OverlayItem.MIN_DURATION_US) {
+                foundSlot = Pair(existing.endUs, minOf(existing.endUs + durUs, firstNextStart))
+            } else {
+                // 2. Search gaps between subsequent items
+                for (i in afterItems.indices) {
+                    val gapStart = afterItems[i].endUs
+                    val gapEnd = afterItems.getOrNull(i + 1)?.startUs ?: totalUs
+                    if (gapEnd - gapStart >= OverlayItem.MIN_DURATION_US) {
+                        foundSlot = Pair(gapStart, minOf(gapStart + durUs, gapEnd))
+                        break
+                    }
+                }
+            }
+
+            // 3. If no slot found after existing.endUs, search earlier gaps from 0L
+            if (foundSlot == null) {
+                if (sameType.isNotEmpty() && sameType.first().startUs >= OverlayItem.MIN_DURATION_US) {
+                    foundSlot = Pair(0L, minOf(durUs, sameType.first().startUs))
+                } else {
+                    for (i in 0 until (sameType.indexOf(existing).takeIf { it >= 0 } ?: (sameType.size - 1))) {
+                        val gapStart = sameType[i].endUs
+                        val gapEnd = sameType[i + 1].startUs
+                        if (gapEnd - gapStart >= OverlayItem.MIN_DURATION_US) {
+                            foundSlot = Pair(gapStart, minOf(gapStart + durUs, gapEnd))
+                            break
+                        }
+                    }
+                }
+            }
+
+            if (foundSlot == null) {
+                showToast("Not enough space between existing filters/effects")
+                return null
+            }
+
+            newStartUs = foundSlot.first
+            newEndUs = foundSlot.second
+        } else {
+            newStartUs = existing.endUs
+            newEndUs = newStartUs + durUs
+        }
+
         val copy = existing.copy(
             id = UUID.randomUUID().toString(),
-            laneIndex = -1,
+            laneIndex = if (existing.type == LayerType.FILTER || existing.type == LayerType.EFFECT) 0 else -1,
             startUs = newStartUs,
             endUs = newEndUs,
             zIndex = 0
         )
         return if (addLayerItem(copy)) _layerItems.lastOrNull() else null
     }
+
+    fun duplicateSelectedOverlay(): OverlayItem? = copySelectedOverlay()
 
     private fun pushUndoState() {
         val currentProject = _uiState.value.project
@@ -1257,7 +1542,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val item = _layerItems.firstOrNull { it.id == itemId }
         val newFocus = when (item?.type) {
             LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(itemId)
-            LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(itemId)
+            LayerType.STICKER, LayerType.MOSAIC -> TimelineFocusState.S3_STICKER_ITEM(itemId)
             LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(itemId)
             LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(itemId)
             LayerType.FILTER, LayerType.EFFECT -> TimelineFocusState.S7_FILTER_EFFECT_ITEM(itemId)
@@ -1301,7 +1586,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val maxSplitUs = item.endUs - OverlayItem.MIN_DURATION_US
         if (playheadUs < minSplitUs || playheadUs > maxSplitUs) return null
 
-        if (!canAddLayer(_layerItems, item.type)) return null
+        if (!canAddLayerItem(_layerItems, item.type)) {
+            showToast(getLayerCapLimitMessage(item.type))
+            return null
+        }
 
         pushUndoState()
 
@@ -1337,8 +1625,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val newFocus = when (item.type) {
             LayerType.VIDEO, LayerType.IMAGE -> TimelineFocusState.S2_PIP_ITEM(rightId)
             LayerType.TEXT -> TimelineFocusState.S4_TEXT_ITEM(rightId)
-            LayerType.STICKER -> TimelineFocusState.S3_STICKER_ITEM(rightId)
+            LayerType.STICKER, LayerType.MOSAIC -> TimelineFocusState.S3_STICKER_ITEM(rightId)
             LayerType.AUDIO -> TimelineFocusState.S6_AUDIO_ITEM(rightId)
+            LayerType.FILTER, LayerType.EFFECT -> TimelineFocusState.S7_FILTER_EFFECT_ITEM(rightId)
             else -> _uiState.value.focusMode
         }
 
@@ -1493,10 +1782,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val item = _layerItems[idx]
+
+        val totalTimelineUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+        var clampedStartUs = newStartUs
+        var clampedEndUs = newEndUs
+        if (item.type == LayerType.FILTER || item.type == LayerType.EFFECT) {
+            val sameTypeNeighbors = _layerItems.filter { it.id != itemId && it.type == item.type }
+            val prevSameTypeEndUs = sameTypeNeighbors.filter { it.endUs <= item.startUs }.maxOfOrNull { it.endUs } ?: 0L
+            val nextSameTypeStartUs = sameTypeNeighbors.filter { it.startUs >= item.endUs }.minOfOrNull { it.startUs } ?: totalTimelineUs
+            val dur = item.durationUs
+            val minStart = maxOf(0L, prevSameTypeEndUs)
+            val maxStart = (minOf(nextSameTypeStartUs, totalTimelineUs) - dur).coerceAtLeast(minStart)
+            clampedStartUs = newStartUs.coerceIn(minStart, maxStart)
+            clampedEndUs = clampedStartUs + dur
+        }
+
         _layerItems[idx] = item.copy(
             laneIndex = newLaneIndex,
-            startUs = newStartUs,
-            endUs = newEndUs
+            startUs = clampedStartUs,
+            endUs = clampedEndUs
         )
         syncLayerPlan()
     }
@@ -1505,12 +1809,27 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return
         val item = _layerItems[idx]
+
+        val totalTimelineUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs }).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+        var clampedStartUs = newStartUs
+        var clampedEndUs = newEndUs
+        if (item.type == LayerType.FILTER || item.type == LayerType.EFFECT) {
+            val sameTypeNeighbors = _layerItems.filter { it.id != itemId && it.type == item.type }
+            val prevSameTypeEndUs = sameTypeNeighbors.filter { it.endUs <= item.startUs }.maxOfOrNull { it.endUs } ?: 0L
+            val nextSameTypeStartUs = sameTypeNeighbors.filter { it.startUs >= item.endUs }.minOfOrNull { it.startUs } ?: totalTimelineUs
+            val dur = item.durationUs
+            val minStart = maxOf(0L, prevSameTypeEndUs)
+            val maxStart = (minOf(nextSameTypeStartUs, totalTimelineUs) - dur).coerceAtLeast(minStart)
+            clampedStartUs = newStartUs.coerceIn(minStart, maxStart)
+            clampedEndUs = clampedStartUs + dur
+        }
+
         pushUndoState()
         val topZ = getTopZIndex()
         _layerItems[idx] = item.copy(
             laneIndex = newLaneIndex,
-            startUs = newStartUs,
-            endUs = newEndUs,
+            startUs = clampedStartUs,
+            endUs = clampedEndUs,
             zIndex = topZ
         )
         syncLayerPlan()
@@ -2042,22 +2361,48 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val speedNum = oldMap.speedNum
         val speedDen = oldMap.speedDen
 
-        val newDurationMs: Long
-        val finalMap: TimeMap
-        if (speedNum == 0) {
+        val otherClipsDurUs = msToUs(currentProject.clips.filterIndexed { idx, _ -> idx != clipIndex }.sumOf { it.durationMs })
+        val proposedTimelineDurUs = if (speedNum == 0) {
             // Freeze clip (speedNum == 0): inUs == outUs == freezeSourceUs.
             // Allow changing timeline durationMs freely between 200ms and 30,000ms.
             val dur = targetDurationMs ?: run {
                 val diffUs = kotlin.math.abs(newOutUs - newInUs)
                 if (diffUs > 0L) usToMs(diffUs) else oldClip.durationMs
             }
-            newDurationMs = dur.coerceIn(200L, 30_000L)
-            finalMap = TimeMap(oldMap.inUs, oldMap.inUs, 0, 100)
+            msToUs(dur.coerceIn(200L, 30_000L))
         } else {
-            val timelineDurUs = ((newOutUs - newInUs) * speedDen.toLong()) / speedNum.toLong()
-            newDurationMs = usToMs(timelineDurUs)
+            ((newOutUs - newInUs) * speedDen.toLong()) / speedNum.toLong()
+        }
+
+        val effectiveTimelineDurUs: Long
+        val finalMap: TimeMap
+        val newDurationMs: Long
+
+        if (otherClipsDurUs + proposedTimelineDurUs > MAX_TIMELINE_DURATION_US) {
+            val remainingUs = MAX_TIMELINE_DURATION_US - otherClipsDurUs
+            if (remainingUs < OverlayItem.MIN_DURATION_US) {
+                showToast("Maximum timeline duration is 15 minutes")
+                return
+            }
+            effectiveTimelineDurUs = remainingUs
+            newDurationMs = usToMs(remainingUs)
+            if (speedNum == 0) {
+                finalMap = TimeMap(oldMap.inUs, oldMap.inUs, 0, 100)
+            } else {
+                val allowedMediaDeltaUs = (remainingUs * speedNum.toLong()) / speedDen.toLong()
+                val adjustedOutUs = newInUs + allowedMediaDeltaUs
+                finalMap = TimeMap(newInUs, adjustedOutUs, speedNum, speedDen)
+            }
+            showToast("Maximum timeline duration is 15 minutes")
+        } else {
+            effectiveTimelineDurUs = proposedTimelineDurUs
+            newDurationMs = usToMs(effectiveTimelineDurUs)
             if (newDurationMs < 200L) return
-            finalMap = TimeMap(newInUs, newOutUs, speedNum, speedDen)
+            finalMap = if (speedNum == 0) {
+                TimeMap(oldMap.inUs, oldMap.inUs, 0, 100)
+            } else {
+                TimeMap(newInUs, newOutUs, speedNum, speedDen)
+            }
         }
 
         val newClip = oldClip.copy(durationMs = newDurationMs)
@@ -2211,11 +2556,30 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
         val clampedSpeed = speed.coerceIn(0.2f, maxSpeed)
-        val speedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
+        val rawSpeedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
         val speedDen = 100
 
-        val timelineDurUs = (sourceSpanUs * speedDen.toLong()) / speedNum.toLong()
-        val newDurMs = maxOf(200L, usToMs(timelineDurUs))
+        val timelineDurUs = (sourceSpanUs * speedDen.toLong()) / rawSpeedNum.toLong()
+
+        val otherClipsDurUs = msToUs(currentProject.clips.filterIndexed { idx, _ -> idx != clipIndex }.sumOf { it.durationMs })
+        val effectiveTimelineDurUs: Long
+        val finalSpeedNum: Int
+
+        if (otherClipsDurUs + timelineDurUs > MAX_TIMELINE_DURATION_US) {
+            val remainingUs = MAX_TIMELINE_DURATION_US - otherClipsDurUs
+            if (remainingUs < OverlayItem.MIN_DURATION_US) {
+                showToast("Maximum timeline duration is 15 minutes")
+                return
+            }
+            effectiveTimelineDurUs = remainingUs
+            finalSpeedNum = maxOf(1, ((sourceSpanUs * speedDen.toLong()) / effectiveTimelineDurUs).toInt())
+            showToast("Maximum timeline duration is 15 minutes")
+        } else {
+            effectiveTimelineDurUs = timelineDurUs
+            finalSpeedNum = rawSpeedNum
+        }
+
+        val newDurMs = maxOf(200L, usToMs(effectiveTimelineDurUs))
 
         val newClip = oldClip.copy(durationMs = newDurMs)
         val newClips = currentProject.clips.toMutableList()
@@ -2229,7 +2593,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        clipTimeMaps[oldClip.id] = TimeMap(oldMap.inUs, oldMap.outUs, speedNum, speedDen)
+        clipTimeMaps[oldClip.id] = TimeMap(oldMap.inUs, oldMap.outUs, finalSpeedNum, speedDen)
         val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
         updateProject(newProject, recordUndo = false)
     }
@@ -2290,6 +2654,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         val speedDen = 100
         val newClips = currentProject.clips.toMutableList()
+        val tempMaps = mutableMapOf<String, TimeMap>()
+        var accumulatedUs = 0L
+        var hitCap = false
 
         for (i in newClips.indices) {
             val clip = newClips[i]
@@ -2297,14 +2664,36 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val sourceSpanUs = oldMap.outUs - oldMap.inUs
             val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
             val clampedSpeed = speed.coerceIn(0.2f, maxSpeed)
-            val speedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
+            val rawSpeedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
 
-            val timelineDurUs = (sourceSpanUs * speedDen.toLong()) / speedNum.toLong()
-            val newDurMs = maxOf(200L, usToMs(timelineDurUs))
+            val timelineDurUs = (sourceSpanUs * speedDen.toLong()) / rawSpeedNum.toLong()
 
-            newClips[i] = clip.copy(durationMs = newDurMs)
-            clipTimeMaps[clip.id] = TimeMap(oldMap.inUs, oldMap.outUs, speedNum, speedDen)
+            if (accumulatedUs + timelineDurUs <= MAX_TIMELINE_DURATION_US) {
+                val newDurMs = maxOf(200L, usToMs(timelineDurUs))
+                newClips[i] = clip.copy(durationMs = newDurMs)
+                tempMaps[clip.id] = TimeMap(oldMap.inUs, oldMap.outUs, rawSpeedNum, speedDen)
+                accumulatedUs += timelineDurUs
+            } else {
+                val remainingUs = MAX_TIMELINE_DURATION_US - accumulatedUs
+                if (remainingUs >= OverlayItem.MIN_DURATION_US) {
+                    val newDurMs = usToMs(remainingUs)
+                    newClips[i] = clip.copy(durationMs = newDurMs)
+                    val adjustedSpeedNum = maxOf(1, ((sourceSpanUs * speedDen.toLong()) / remainingUs).toInt())
+                    tempMaps[clip.id] = TimeMap(oldMap.inUs, oldMap.outUs, adjustedSpeedNum, speedDen)
+                    accumulatedUs = MAX_TIMELINE_DURATION_US
+                } else {
+                    tempMaps[clip.id] = oldMap
+                }
+                hitCap = true
+                break
+            }
         }
+
+        if (hitCap) {
+            showToast("Maximum timeline duration is 15 minutes")
+        }
+
+        clipTimeMaps.putAll(tempMaps)
 
         val newTransitions = currentProject.transitions.toMutableList()
         for (j in newTransitions.indices) {
@@ -2490,8 +2879,35 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val currentProject = _uiState.value.project
         if (clipIndex !in currentProject.clips.indices) return null
         val oldClip = currentProject.clips[clipIndex]
-        val newId = java.util.UUID.randomUUID().toString()
-        val newClip = oldClip.copy(id = newId)
+
+        val currentTotalUs = msToUs(currentProject.clips.sumOf { it.durationMs })
+        val oldClipDurUs = msToUs(oldClip.durationMs)
+        val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
+
+        val newClip: Clip
+        val newMap: TimeMap
+
+        if (currentTotalUs + oldClipDurUs > MAX_TIMELINE_DURATION_US) {
+            val remainingUs = MAX_TIMELINE_DURATION_US - currentTotalUs
+            if (remainingUs < OverlayItem.MIN_DURATION_US) {
+                showToast("Maximum timeline duration is 15 minutes")
+                return null
+            }
+            val clampedDurMs = usToMs(remainingUs)
+            val newId = java.util.UUID.randomUUID().toString()
+            newClip = oldClip.copy(id = newId, durationMs = clampedDurMs)
+            val speedFactor = if (oldMap.speedDen > 0 && oldMap.speedNum > 0) {
+                oldMap.speedNum.toDouble() / oldMap.speedDen.toDouble()
+            } else 1.0
+            val mediaDeltaUs = (remainingUs.toDouble() * speedFactor).toLong()
+            newMap = TimeMap(oldMap.inUs, (oldMap.inUs + mediaDeltaUs).coerceAtMost(oldMap.outUs), oldMap.speedNum, oldMap.speedDen)
+            showToast("Maximum timeline duration is 15 minutes")
+        } else {
+            val newId = java.util.UUID.randomUUID().toString()
+            newClip = oldClip.copy(id = newId)
+            newMap = oldMap
+        }
+        val newId = newClip.id
 
         val newClips = currentProject.clips.toMutableList()
         val insertIndex = clipIndex + 1
@@ -2525,8 +2941,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         redoLayerItems.clear()
 
         // Copy ALL per-clip metadata from oldClip.id to newId
-        val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
-        clipTimeMaps[newId] = oldMap
+        clipTimeMaps[newId] = newMap
         val natDur = clipNaturalDurations[oldClip.id] ?: getMediaFileDurationUs(oldClip)
         clipNaturalDurations[newId] = natDur
 
@@ -2668,7 +3083,22 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val oldClip = currentProject.clips[selectedK]
         val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
 
-        val freezeDurationMs = 3000L
+        val currentTotalUs = msToUs(currentProject.clips.sumOf { it.durationMs })
+        val proposedFreezeDurUs = 3_000_000L
+        val freezeDurationMs: Long
+
+        if (currentTotalUs + proposedFreezeDurUs > MAX_TIMELINE_DURATION_US) {
+            val remainingUs = MAX_TIMELINE_DURATION_US - currentTotalUs
+            if (remainingUs < OverlayItem.MIN_DURATION_US) {
+                showToast("Maximum timeline duration is 15 minutes")
+                return null
+            }
+            freezeDurationMs = usToMs(remainingUs)
+            showToast("Maximum timeline duration is 15 minutes")
+        } else {
+            freezeDurationMs = 3000L
+        }
+
         val freezeClipId = java.util.UUID.randomUUID().toString()
 
         val newClips = currentProject.clips.toMutableList()
@@ -3133,22 +3563,50 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             )
 
             if (imported.isNotEmpty()) {
+                val clampedClips = mutableListOf<Clip>()
+                var accumulatedUs = 0L
+                var hitCap = false
+
                 for (c in imported) {
-                    clipNaturalDurations[c.id] = msToUs(c.durationMs)
+                    val clipDurUs = msToUs(c.durationMs)
+                    if (accumulatedUs + clipDurUs <= MAX_TIMELINE_DURATION_US) {
+                        clampedClips.add(c)
+                        clipNaturalDurations[c.id] = clipDurUs
+                        accumulatedUs += clipDurUs
+                    } else {
+                        val remainingUs = MAX_TIMELINE_DURATION_US - accumulatedUs
+                        if (remainingUs >= OverlayItem.MIN_DURATION_US) {
+                            val clampedDurMs = usToMs(remainingUs)
+                            val clampedClip = c.copy(durationMs = clampedDurMs)
+                            clampedClips.add(clampedClip)
+                            clipNaturalDurations[c.id] = clipDurUs
+                            clipTimeMaps[c.id] = TimeMap(0L, remainingUs)
+                            accumulatedUs = MAX_TIMELINE_DURATION_US
+                        }
+                        hitCap = true
+                        break
+                    }
                 }
-                val newProject = ProgramTimeline.addClips(Project(), imported)
-                undoStack.clear()
-                updateProject(newProject, recordUndo = false)
-                _uiState.update {
-                    it.copy(
-                        currentScreen = AppScreen.EDITOR,
-                        currentMs = 0L,
-                        selectedClipIndex = null,
-                        selectedJunctionIndex = null,
-                        selectedOverlayId = null
-                    )
+
+                if (hitCap) {
+                    showToast("Maximum timeline duration is 15 minutes")
                 }
-                previewEngine?.seekTo(0L)
+
+                if (clampedClips.isNotEmpty()) {
+                    val newProject = ProgramTimeline.addClips(Project(), clampedClips)
+                    undoStack.clear()
+                    updateProject(newProject, recordUndo = false)
+                    _uiState.update {
+                        it.copy(
+                            currentScreen = AppScreen.EDITOR,
+                            currentMs = 0L,
+                            selectedClipIndex = null,
+                            selectedJunctionIndex = null,
+                            selectedOverlayId = null
+                        )
+                    }
+                    previewEngine?.seekTo(0L)
+                }
             }
 
             _uiState.update {
@@ -3158,9 +3616,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun importClips(uris: List<Uri>) {
-        val currentClipsCount = _uiState.value.project.clips.size
+        val currentClips = _uiState.value.project.clips
+        val currentClipsCount = currentClips.size
         if (currentClipsCount >= MAX_CLIPS) {
             showToast("Maximum clip limit reached ($MAX_CLIPS clips)")
+            return
+        }
+
+        val currentTotalUs = msToUs(currentClips.sumOf { it.durationMs })
+        if (currentTotalUs >= MAX_TIMELINE_DURATION_US) {
+            showToast("Maximum timeline duration is 15 minutes")
             return
         }
 
@@ -3187,11 +3652,39 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             )
 
             if (imported.isNotEmpty()) {
+                val clampedClips = mutableListOf<Clip>()
+                var accumulatedUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs })
+                var hitCap = false
+
                 for (c in imported) {
-                    clipNaturalDurations[c.id] = msToUs(c.durationMs)
+                    val clipDurUs = msToUs(c.durationMs)
+                    if (accumulatedUs + clipDurUs <= MAX_TIMELINE_DURATION_US) {
+                        clampedClips.add(c)
+                        clipNaturalDurations[c.id] = clipDurUs
+                        accumulatedUs += clipDurUs
+                    } else {
+                        val remainingUs = MAX_TIMELINE_DURATION_US - accumulatedUs
+                        if (remainingUs >= OverlayItem.MIN_DURATION_US) {
+                            val clampedDurMs = usToMs(remainingUs)
+                            val clampedClip = c.copy(durationMs = clampedDurMs)
+                            clampedClips.add(clampedClip)
+                            clipNaturalDurations[c.id] = clipDurUs
+                            clipTimeMaps[c.id] = TimeMap(0L, remainingUs)
+                            accumulatedUs = MAX_TIMELINE_DURATION_US
+                        }
+                        hitCap = true
+                        break
+                    }
                 }
-                val newProject = ProgramTimeline.addClips(_uiState.value.project, imported)
-                updateProject(newProject, recordUndo = true)
+
+                if (hitCap) {
+                    showToast("Maximum timeline duration is 15 minutes")
+                }
+
+                if (clampedClips.isNotEmpty()) {
+                    val newProject = ProgramTimeline.addClips(_uiState.value.project, clampedClips)
+                    updateProject(newProject, recordUndo = true)
+                }
             }
 
             _uiState.update {

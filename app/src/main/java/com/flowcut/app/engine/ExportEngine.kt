@@ -749,7 +749,10 @@ class ExportEngine(private val context: Context) {
                                     chromaEnabled = item.chromaEnabled,
                                     chromaColorArgb = item.chromaColorArgb,
                                     chromaThreshold = item.chromaThreshold,
-                                    chromaBlend = item.chromaBlend
+                                    chromaBlend = item.chromaBlend,
+                                    adjustBrightness = item.adjustBrightness,
+                                    adjustContrast = item.adjustContrast,
+                                    adjustSaturation = item.adjustSaturation
                                 )
                             }
                         }

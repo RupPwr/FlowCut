@@ -26,6 +26,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Button
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.automirrored.filled.FormatAlignRight
@@ -290,6 +294,7 @@ fun StickerPickerSheet(
     onSelectSticker: (stickerGlyph: String) -> Unit,
     onAddImageClick: () -> Unit,
     onDismiss: () -> Unit,
+    isReplaceMode: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val colors = FlowCutTheme.colors
@@ -349,7 +354,7 @@ fun StickerPickerSheet(
                     }
 
                     Text(
-                        text = "Stickers & Overlays",
+                        text = if (isReplaceMode) "Replace Sticker" else "Stickers & Overlays",
                         color = colors.textPrimary,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
@@ -380,7 +385,7 @@ fun StickerPickerSheet(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Add Image / Logo (PNG, JPG)",
+                        text = if (isReplaceMode) "Replace with Image / Logo (PNG, JPG)" else "Add Image / Logo (PNG, JPG)",
                         color = colors.accent,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold
@@ -3122,6 +3127,413 @@ fun PipCutoutSheet(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.width(42.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Compact Overlay Adjust Sheet with 4 pink/red sliders (Opacity, Brightness, Contrast, Saturation)
+ * and a Reset button, matching Phase 8 VideoGuru Spec.
+ */
+@Composable
+fun OverlayAdjustSheet(
+    initialOpacity: Float = 1.0f,
+    initialBrightness: Float = 0.0f,
+    initialContrast: Float = 1.0f,
+    initialSaturation: Float = 1.0f,
+    onLiveChange: (opacity: Float, brightness: Float, contrast: Float, saturation: Float) -> Unit,
+    onDone: (opacity: Float, brightness: Float, contrast: Float, saturation: Float) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var opacity by remember { mutableFloatStateOf(initialOpacity.coerceIn(0.0f, 1.0f)) }
+    var brightness by remember { mutableFloatStateOf(initialBrightness.coerceIn(-0.5f, 0.5f)) }
+    var contrast by remember { mutableFloatStateOf(initialContrast.coerceIn(0.5f, 1.8f)) }
+    var saturation by remember { mutableFloatStateOf(initialSaturation.coerceIn(0.0f, 2.0f)) }
+
+    fun notifyChange() {
+        onLiveChange(opacity, brightness, contrast, saturation)
+    }
+
+    fun resetAll() {
+        opacity = 1.0f
+        brightness = 0.0f
+        contrast = 1.0f
+        saturation = 1.0f
+        notifyChange()
+    }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .background(DARK_SHEET_BG)
+                    .border(BorderStroke(0.5.dp, DARK_SURFACE_BORDER), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                ) {
+                    // Header Row: Cancel (✕), "Adjust Overlay", Reset Pill, Done (✓)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.White)
+                        }
+
+                        Text(
+                            text = "Adjust Overlay",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(DARK_CARD_BG)
+                                    .clickable { resetAll() }
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = "Reset",
+                                    color = PINK_RED_ACCENT,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            IconButton(
+                                onClick = { onDone(opacity, brightness, contrast, saturation) },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(Icons.Default.Check, contentDescription = "Done", tint = PINK_RED_ACCENT)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 1. Opacity Slider (0.0f..1.0f)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Opacity",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(76.dp)
+                        )
+                        Slider(
+                            value = opacity,
+                            onValueChange = {
+                                opacity = it
+                                notifyChange()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${(opacity * 100f).roundToInt()}%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(44.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // 2. Brightness Slider (-0.5f..0.5f, norm 0f..1f)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Brightness",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(76.dp)
+                        )
+                        Slider(
+                            value = (brightness + 0.5f),
+                            onValueChange = { norm ->
+                                brightness = norm - 0.5f
+                                notifyChange()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        val bDisplay = (brightness * 100f).roundToInt()
+                        Text(
+                            text = if (bDisplay > 0) "+$bDisplay%" else "$bDisplay%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(44.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // 3. Contrast Slider (0.5f..1.8f, norm 0f..1f)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Contrast",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(76.dp)
+                        )
+                        Slider(
+                            value = (contrast - 0.5f) / 1.3f,
+                            onValueChange = { norm ->
+                                contrast = 0.5f + norm * 1.3f
+                                notifyChange()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        val cDisplay = ((contrast - 1.0f) * 100f).roundToInt()
+                        Text(
+                            text = if (cDisplay > 0) "+$cDisplay%" else "$cDisplay%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(44.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // 4. Saturation Slider (0.0f..2.0f, norm 0f..1f)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Saturation",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(76.dp)
+                        )
+                        Slider(
+                            value = saturation / 2.0f,
+                            onValueChange = { norm ->
+                                saturation = norm * 2.0f
+                                notifyChange()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        val sDisplay = ((saturation - 1.0f) * 100f).roundToInt()
+                        Text(
+                            text = if (sDisplay > 0) "+$sDisplay%" else "$sDisplay%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(44.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Auto Captions Sheet allowing multi-line lyrics/script input or auto-generation from timeline beats/speech.
+ * Slices sequential non-overlapping LayerType.TEXT items.
+ */
+@Composable
+fun AutoCaptionsSheet(
+    onGenerateCaptions: (phrases: List<String>) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = FlowCutTheme.colors
+    var scriptText by remember { mutableStateOf("") }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .background(DARK_SHEET_BG)
+                    .border(BorderStroke(0.5.dp, DARK_SURFACE_BORDER), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                ) {
+                    // Header Row: Close (✕), Title "Auto-Captions"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                        }
+
+                        Text(
+                            text = "Auto-Captions",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(modifier = Modifier.size(36.dp))
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = "Paste or type script / lyrics (one phrase per line) or use auto-generate:",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 12.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Script Input TextField
+                    OutlinedTextField(
+                        value = scriptText,
+                        onValueChange = { scriptText = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp),
+                        placeholder = {
+                            Text(
+                                text = "Enter lyrics or speech text here...\nLine 1: Welcome to the video\nLine 2: Enjoy the moment",
+                                color = Color.White.copy(alpha = 0.35f),
+                                fontSize = 13.sp
+                            )
+                        },
+                        textStyle = TextStyle(
+                            color = Color.White,
+                            fontSize = 14.sp
+                        ),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = DARK_CARD_BG,
+                            unfocusedContainerColor = DARK_CARD_BG,
+                            focusedIndicatorColor = PINK_RED_ACCENT,
+                            unfocusedIndicatorColor = DARK_SURFACE_BORDER,
+                            cursorColor = PINK_RED_ACCENT
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Auto-Generate from Timeline Beats button
+                    OutlinedButton(
+                        onClick = {
+                            scriptText = listOf(
+                                "Welcome to the video",
+                                "Watch this amazing moment",
+                                "Don't forget to like and follow",
+                                "Thanks for watching!"
+                            ).joinToString("\n")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, PINK_RED_ACCENT.copy(alpha = 0.6f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = PINK_RED_ACCENT.copy(alpha = 0.12f)
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "Auto",
+                            tint = PINK_RED_ACCENT,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Auto-Generate from Timeline Beats / Speech",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Generate Captions Primary Button
+                    val phrases = scriptText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    val canGenerate = phrases.isNotEmpty()
+
+                    Button(
+                        onClick = {
+                            if (canGenerate) {
+                                onGenerateCaptions(phrases)
+                                onDismiss()
+                            }
+                        },
+                        enabled = canGenerate,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PINK_RED_ACCENT,
+                            disabledContainerColor = Color(0xFF3A3A3C)
+                        )
+                    ) {
+                        Text(
+                            text = if (phrases.isEmpty()) "Generate Captions" else "Generate ${phrases.size} Captions",
+                            color = if (canGenerate) Color.White else Color.White.copy(alpha = 0.4f),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }

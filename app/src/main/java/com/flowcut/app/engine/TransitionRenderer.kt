@@ -104,6 +104,9 @@ class TransitionRenderer {
     private var uChromaKeyRgbLoc = -1
     private var uChromaThresholdLoc = -1
     private var uChromaBlendLoc = -1
+    private var uAdjustBrightnessLoc = -1
+    private var uAdjustContrastLoc = -1
+    private var uAdjustSaturationLoc = -1
     private val overlayMvp = FloatArray(16)
 
     // Pre-allocated fallback arrays for zero allocations (Rule R10)
@@ -541,6 +544,11 @@ class TransitionRenderer {
         uniform float uMaskFeather;
         uniform int uMaskInvert;
 
+        // Per-Overlay Color Adjustment Uniforms
+        uniform float uAdjustBrightness;
+        uniform float uAdjustContrast;
+        uniform float uAdjustSaturation;
+
         in vec2 vTexUV;
         in vec2 vLocalUV;
         out vec4 outColor;
@@ -613,7 +621,16 @@ class TransitionRenderer {
             }
 
             float finalAlpha = texColor.a * clamp(uOverlayOpacity, 0.0, 1.0) * chromaAlpha * maskAlpha;
-            outColor = vec4(texColor.rgb, finalAlpha);
+
+            // Per-Overlay Color Adjustment
+            vec3 rgb = texColor.rgb;
+            rgb += uAdjustBrightness;
+            rgb = (rgb - 0.5) * uAdjustContrast + 0.5;
+            float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+            rgb = mix(vec3(luma), rgb, uAdjustSaturation);
+            rgb = clamp(rgb, 0.0, 1.0);
+
+            outColor = vec4(rgb, finalAlpha);
         }
     """.trimIndent()
 
@@ -679,6 +696,9 @@ class TransitionRenderer {
         uChromaKeyRgbLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaKeyRgb")
         uChromaThresholdLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaThreshold")
         uChromaBlendLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaBlend")
+        uAdjustBrightnessLoc = GLES30.glGetUniformLocation(overlayProgramId, "uAdjustBrightness")
+        uAdjustContrastLoc = GLES30.glGetUniformLocation(overlayProgramId, "uAdjustContrast")
+        uAdjustSaturationLoc = GLES30.glGetUniformLocation(overlayProgramId, "uAdjustSaturation")
 
         // Setup VAO & VBO
         val vaos = IntArray(1)
@@ -816,7 +836,10 @@ class TransitionRenderer {
         chromaEnabled: Boolean = false,
         chromaColorArgb: Int = 0xFF00FF00.toInt(),
         chromaThreshold: Float = 0.25f,
-        chromaBlend: Float = 0.10f
+        chromaBlend: Float = 0.10f,
+        adjustBrightness: Float = 0.0f,
+        adjustContrast: Float = 1.0f,
+        adjustSaturation: Float = 1.0f
     ) {
         if (texId <= 0) return
         val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
@@ -851,6 +874,11 @@ class TransitionRenderer {
         GLES30.glUniform3f(uChromaKeyRgbLoc, r, g, b)
         GLES30.glUniform1f(uChromaThresholdLoc, chromaThreshold)
         GLES30.glUniform1f(uChromaBlendLoc, chromaBlend)
+
+        // Per-Overlay Color Adjustment Uniforms
+        GLES30.glUniform1f(uAdjustBrightnessLoc, adjustBrightness)
+        GLES30.glUniform1f(uAdjustContrastLoc, adjustContrast)
+        GLES30.glUniform1f(uAdjustSaturationLoc, adjustSaturation)
 
         computeOverlayMvp(overlayMvp, transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom)
         GLES30.glUniformMatrix4fv(uOverlayMatLoc, 1, false, overlayMvp, 0)

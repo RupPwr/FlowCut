@@ -237,7 +237,8 @@ object TimelineHitTester {
         val item = overlayItems.firstOrNull { it.id == selectedOverlayId } ?: return OverlayTrimEdge.NONE
 
         val isUpperPin = item.type == LayerType.TEXT || item.type == LayerType.STICKER ||
-                item.type == LayerType.FILTER || item.type == LayerType.EFFECT
+                item.type == LayerType.FILTER || item.type == LayerType.EFFECT ||
+                item.type == LayerType.MOSAIC
         val itemTopPx: Float
         val itemBottomPx: Float
 
@@ -394,7 +395,8 @@ object TimelineHitTester {
 
         val rowAPins = overlayItems.filter {
             it.type == LayerType.TEXT || it.type == LayerType.STICKER ||
-            it.type == LayerType.FILTER || it.type == LayerType.EFFECT
+            it.type == LayerType.FILTER || it.type == LayerType.EFFECT ||
+            it.type == LayerType.MOSAIC
         }
         if (rowAPins.isEmpty()) return null
 

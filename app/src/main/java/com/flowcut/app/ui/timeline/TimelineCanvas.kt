@@ -471,6 +471,8 @@ fun TimelineCanvas(
     val whitePinSelectionStroke = remember(density) { Stroke(width = 1.5f * density) }
     val connectorTickStroke = remember(density) { Stroke(width = 1.5f * density, cap = StrokeCap.Round) }
     val stackedCapStroke = remember(density) { Stroke(width = 1f * density) }
+    val pinIconStroke = remember(density) { Stroke(width = 1.8f * density, cap = StrokeCap.Round) }
+    val pinMosaicStroke = remember(density) { Stroke(width = 1.6f * density, cap = StrokeCap.Round) }
 
     val cornerRadiusPx = remember(density) { 6.dp.value * density }
     val selectionStroke = remember(density) { Stroke(width = 2.5f * density) }
@@ -779,6 +781,21 @@ fun TimelineCanvas(
                     val initialPinStartUs = curPinItem?.startUs ?: 0L
                     val initialPinEndUs = curPinItem?.endUs ?: 0L
                     val pinDurationUs = curPinItem?.durationUs ?: 0L
+                    val isFilterOrEffectPin = curPinItem != null && (curPinItem.type == LayerType.FILTER || curPinItem.type == LayerType.EFFECT)
+                    val pinMinStartUs: Long
+                    val pinMaxStartUs: Long
+                    if (isFilterOrEffectPin) {
+                        val totalTimelineUs = msToUs(snapshotOnDown.totalMs)
+                        val sameTypeNeighbors = currentOverlayItems.filter { it.id != curPinItem!!.id && it.type == curPinItem.type }
+                        val prevEnd = sameTypeNeighbors.filter { it.endUs <= initialPinStartUs }.maxOfOrNull { it.endUs } ?: 0L
+                        val nextStart = sameTypeNeighbors.filter { it.startUs >= initialPinEndUs }.minOfOrNull { it.startUs } ?: totalTimelineUs
+                        pinMinStartUs = maxOf(0L, prevEnd)
+                        pinMaxStartUs = (minOf(nextStart, totalTimelineUs) - pinDurationUs).coerceAtLeast(pinMinStartUs)
+                    } else {
+                        val totalTimelineUs = msToUs(snapshotOnDown.totalMs)
+                        pinMinStartUs = 0L
+                        pinMaxStartUs = (totalTimelineUs - pinDurationUs).coerceAtLeast(0L)
+                    }
                     var currentPinStartUs = initialPinStartUs
                     var currentPinEndUs = initialPinEndUs
                     var isPinDragging = false
@@ -1189,9 +1206,7 @@ fun TimelineCanvas(
                                         currentFingerX = change.position.x
                                         if (pxPerUsAtStart > 0.0) {
                                             val dragDeltaUs = (totalDxPx / pxPerUsAtStart).roundToLong() + accumulatedAutoScrollUs
-                                            val totalTimelineUs = msToUs(holder.current.totalMs)
-                                            val maxStartUs = (totalTimelineUs - pinDurationUs).coerceAtLeast(0L)
-                                            val newStartUs = (initialPinStartUs + dragDeltaUs).coerceIn(0L, maxStartUs)
+                                            val newStartUs = (initialPinStartUs + dragDeltaUs).coerceIn(pinMinStartUs, pinMaxStartUs)
                                             val newEndUs = newStartUs + pinDurationUs
                                             if (newStartUs != currentPinStartUs) {
                                                 currentPinStartUs = newStartUs
@@ -1234,9 +1249,7 @@ fun TimelineCanvas(
                                                             accumulatedAutoScrollUs += deltaUs
                                                             val totalDx = currentFingerX - startTouchX
                                                             val dragDeltaUs = (totalDx / pxPerUsAtStart).roundToLong() + accumulatedAutoScrollUs
-                                                            val totalTimelineUs = msToUs(holder.current.totalMs)
-                                                            val maxStartUs = (totalTimelineUs - pinDurationUs).coerceAtLeast(0L)
-                                                            val nStartUs = (initialPinStartUs + dragDeltaUs).coerceIn(0L, maxStartUs)
+                                                            val nStartUs = (initialPinStartUs + dragDeltaUs).coerceIn(pinMinStartUs, pinMaxStartUs)
                                                             val nEndUs = nStartUs + pinDurationUs
                                                             if (nStartUs != currentPinStartUs) {
                                                                 currentPinStartUs = nStartUs
@@ -1580,7 +1593,8 @@ fun TimelineCanvas(
         for (idx in overlayItems.indices) {
             val item = overlayItems[idx]
             if (item.type != LayerType.TEXT && item.type != LayerType.STICKER &&
-                item.type != LayerType.FILTER && item.type != LayerType.EFFECT) continue
+                item.type != LayerType.FILTER && item.type != LayerType.EFFECT &&
+                item.type != LayerType.MOSAIC) continue
 
             val isSelectedPin = (item.id == selectedOverlayId)
             val startX = zoomState.timeUsToX(item.startUs, offsetPx, halfWidthInt, pxPerUs)
@@ -1590,6 +1604,7 @@ fun TimelineCanvas(
                 LayerType.TEXT -> colorTextWarmOrange
                 LayerType.FILTER -> Color(0xFF06B6D4)
                 LayerType.EFFECT -> Color(0xFFA855F7)
+                LayerType.MOSAIC -> Color(0xFFD97706)
                 LayerType.STICKER -> if (item.mediaPath.isNotEmpty()) colorStickerGreen else colorStickerTeal
                 else -> colorStickerTeal
             }
@@ -1617,7 +1632,8 @@ fun TimelineCanvas(
                     if (otherIdx == idx) continue
                     val other = overlayItems[otherIdx]
                     if (other.type != LayerType.TEXT && other.type != LayerType.STICKER &&
-                        other.type != LayerType.FILTER && other.type != LayerType.EFFECT) continue
+                        other.type != LayerType.FILTER && other.type != LayerType.EFFECT &&
+                        other.type != LayerType.MOSAIC) continue
                     val otherStartX = zoomState.timeUsToX(other.startUs, offsetPx, halfWidthInt, pxPerUs)
                     if (abs(startX - otherStartX) <= stackDistPx) {
                         clusterSize++
@@ -1668,7 +1684,7 @@ fun TimelineCanvas(
 
                 val pinCenterY = pinTopY + pinBodyHeightPx / 2f
 
-                // Pin inner icon: crisp white "T" for TEXT, "F" for FILTER, "E" for EFFECT, smiley for STICKER
+                // Pin inner icon: crisp white "T" for TEXT, "F" for FILTER, "E" for EFFECT, "M" for MOSAIC, smiley for STICKER
                 if (item.type == LayerType.TEXT) {
                     val tTop = pinCenterY - (4.5f * density)
                     val tStemBottom = pinCenterY + (4.5f * density)
@@ -1678,7 +1694,7 @@ fun TimelineCanvas(
                     pinTPath.lineTo(startX + tHalfBar, tTop)
                     pinTPath.moveTo(startX, tTop)
                     pinTPath.lineTo(startX, tStemBottom)
-                    drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
+                    drawPath(path = pinTPath, color = whiteColor, style = pinIconStroke)
                 } else if (item.type == LayerType.FILTER) {
                     val fTop = pinCenterY - (4.5f * density)
                     val fStemBottom = pinCenterY + (4.5f * density)
@@ -1690,7 +1706,7 @@ fun TimelineCanvas(
                     pinTPath.lineTo(startX + (3.5f * density), fTop)
                     pinTPath.moveTo(fStemX, pinCenterY)
                     pinTPath.lineTo(startX + (2f * density), pinCenterY)
-                    drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
+                    drawPath(path = pinTPath, color = whiteColor, style = pinIconStroke)
                 } else if (item.type == LayerType.EFFECT) {
                     val eTop = pinCenterY - (4.5f * density)
                     val eStemBottom = pinCenterY + (4.5f * density)
@@ -1704,7 +1720,20 @@ fun TimelineCanvas(
                     pinTPath.lineTo(startX + (2f * density), pinCenterY)
                     pinTPath.moveTo(eStemX, eStemBottom)
                     pinTPath.lineTo(startX + (3.5f * density), eStemBottom)
-                    drawPath(path = pinTPath, color = whiteColor, style = Stroke(width = 1.8f * density, cap = StrokeCap.Round))
+                    drawPath(path = pinTPath, color = whiteColor, style = pinIconStroke)
+                } else if (item.type == LayerType.MOSAIC) {
+                    val mTop = pinCenterY - (4.5f * density)
+                    val mBottom = pinCenterY + (4.5f * density)
+                    val mLeft = startX - (4f * density)
+                    val mRight = startX + (4f * density)
+                    val mMidY = pinCenterY + (0.8f * density)
+                    pinTPath.reset()
+                    pinTPath.moveTo(mLeft, mBottom)
+                    pinTPath.lineTo(mLeft, mTop)
+                    pinTPath.lineTo(startX, mMidY)
+                    pinTPath.lineTo(mRight, mTop)
+                    pinTPath.lineTo(mRight, mBottom)
+                    drawPath(path = pinTPath, color = whiteColor, style = pinMosaicStroke)
                 } else {
                     if (item.mediaPath.isNotEmpty()) {
                         drawRect(
@@ -1760,6 +1789,7 @@ fun TimelineCanvas(
                         LayerType.TEXT -> colorTextWarmOrange
                         LayerType.FILTER -> Color(0xFF06B6D4)
                         LayerType.EFFECT -> Color(0xFFA855F7)
+                        LayerType.MOSAIC -> Color(0xFFD97706)
                         LayerType.STICKER -> if (selItem.mediaPath.isNotEmpty()) colorStickerGreen else colorStickerTeal
                         else -> colorStickerTeal
                     }
@@ -1849,6 +1879,7 @@ fun TimelineCanvas(
                         LayerType.FILTER -> filterPresetName(selItem.filterPresetId)
                         LayerType.EFFECT -> effectPresetName(selItem.effectPresetId)
                         LayerType.TEXT -> if (selItem.text.isNotBlank()) selItem.text else "Your Text"
+                        LayerType.MOSAIC -> "Mosaic"
                         LayerType.STICKER -> if (selItem.text.isNotBlank()) selItem.text else "Sticker"
                         else -> ""
                     }

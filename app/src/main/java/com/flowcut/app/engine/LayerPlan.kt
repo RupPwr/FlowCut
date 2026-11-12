@@ -6,13 +6,14 @@ import java.util.TreeSet
  * Supported timeline layer types with enforced maximum item caps.
  */
 enum class LayerType(val maxCap: Int) {
-    VIDEO(maxCap = 1000),
-    TEXT(maxCap = 20),
-    IMAGE(maxCap = 1000),
-    STICKER(maxCap = 20),
-    FILTER(maxCap = 20),
-    EFFECT(maxCap = 20),
-    AUDIO(maxCap = 1000)
+    VIDEO(maxCap = 40),
+    TEXT(maxCap = 40),
+    IMAGE(maxCap = 40),
+    STICKER(maxCap = 40),
+    FILTER(maxCap = 40),
+    EFFECT(maxCap = 40),
+    AUDIO(maxCap = 40),
+    MOSAIC(maxCap = 40)
 }
 
 /**
@@ -79,7 +80,11 @@ data class OverlayItem(
     val chromaEnabled: Boolean = false,
     val chromaColorArgb: Int = 0xFF00FF00.toInt(), // Default green screen #00FF00
     val chromaThreshold: Float = 0.25f, // 0.0f..0.8f
-    val chromaBlend: Float = 0.10f // 0.01f..0.4f
+    val chromaBlend: Float = 0.10f, // 0.01f..0.4f
+    // Phase 8: Per-Overlay Color Adjustment
+    val adjustBrightness: Float = 0.0f, // -0.5f..0.5f
+    val adjustContrast: Float = 1.0f, // 0.5f..1.8f
+    val adjustSaturation: Float = 1.0f // 0.0f..2.0f
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L
@@ -333,16 +338,44 @@ data class RowAllocationResult(
 )
 
 /**
- * Validates whether another layer item of the specified type can be added.
- * For PIP (VIDEO/IMAGE) and AUDIO, capacity is governed by the 4-track non-overlapping row engine.
+ * Returns the maximum allowed item count for the specified layer type.
  */
-fun canAddLayer(items: List<OverlayItem>, type: LayerType): Boolean {
-    if (type == LayerType.IMAGE || type == LayerType.VIDEO || type == LayerType.AUDIO) {
-        return true
-    }
-    val currentCount = items.count { it.type == type }
-    return currentCount < type.maxCap
+fun getLayerCap(targetType: LayerType): Int = when (targetType) {
+    LayerType.TEXT -> 40
+    LayerType.MOSAIC -> 40
+    LayerType.STICKER -> 40
+    LayerType.IMAGE, LayerType.VIDEO -> 40
+    LayerType.AUDIO -> 40
+    LayerType.FILTER -> 40
+    LayerType.EFFECT -> 40
 }
+
+/**
+ * Validates whether another layer item of the specified type can be added.
+ * - Text: max 40
+ * - Mosaic: max 40
+ * - Sticker: max 40
+ * - PIP (Image + Video combined): max 40 total items
+ * - Audio (Music, Sounds, Local, Effects, Extract, Record): max 40 total items
+ * - Filter: max 40
+ * - Effect: max 40
+ */
+fun canAddLayerItem(currentItems: List<OverlayItem>, targetType: LayerType): Boolean = when (targetType) {
+    LayerType.IMAGE, LayerType.VIDEO ->
+        currentItems.count { it.type == LayerType.IMAGE || it.type == LayerType.VIDEO } < 40
+    LayerType.TEXT -> currentItems.count { it.type == LayerType.TEXT } < 40
+    LayerType.STICKER -> currentItems.count { it.type == LayerType.STICKER } < 40
+    LayerType.MOSAIC -> currentItems.count { it.type == LayerType.MOSAIC } < 40
+    LayerType.AUDIO -> currentItems.count { it.type == LayerType.AUDIO } < 40
+    LayerType.FILTER -> currentItems.count { it.type == LayerType.FILTER } < 40
+    LayerType.EFFECT -> currentItems.count { it.type == LayerType.EFFECT } < 40
+}
+
+/**
+ * Validates whether another layer item of the specified type can be added.
+ * Delegates directly to [canAddLayerItem].
+ */
+fun canAddLayer(items: List<OverlayItem>, type: LayerType): Boolean = canAddLayerItem(items, type)
 
 /**
  * Deterministic 4-row non-overlapping track allocator for PIP and Audio groups.
@@ -436,6 +469,35 @@ fun clampItemTrimBoundsOnRow(
         val maxTimelineSpanUs = (remainingMediaUs.toDouble() / speedVal).toLong()
         target.startUs + maxTimelineSpanUs
     } else Long.MAX_VALUE
+
+    if (target.type == LayerType.FILTER || target.type == LayerType.EFFECT) {
+        val sameTypeNeighbors = items.filter {
+            it.id != itemId && it.type == target.type
+        }
+
+        val prevSameTypeEndUs = sameTypeNeighbors
+            .filter { it.endUs <= target.startUs }
+            .maxOfOrNull { it.endUs } ?: 0L
+
+        val nextSameTypeStartUs = sameTypeNeighbors
+            .filter { it.startUs >= target.endUs }
+            .minOfOrNull { it.startUs } ?: maxProjectTimeUs
+
+        val minAllowedStartUs = maxOf(0L, prevSameTypeEndUs, minAllowedStartFromSource)
+        val maxAllowedEndUs = minOf(nextSameTypeStartUs, maxProjectTimeUs, maxAllowedEndFromNatural)
+
+        val safeCandidateEndUs = candidateEndUs.coerceAtMost(maxAllowedEndUs)
+        val clampedStartUs = candidateStartUs.coerceIn(
+            minAllowedStartUs,
+            (safeCandidateEndUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(minAllowedStartUs)
+        )
+        val clampedEndUs = safeCandidateEndUs.coerceIn(
+            clampedStartUs + OverlayItem.MIN_DURATION_US,
+            maxAllowedEndUs.coerceAtLeast(clampedStartUs + OverlayItem.MIN_DURATION_US)
+        )
+
+        return Pair(clampedStartUs, clampedEndUs)
+    }
 
     if (group == null) {
         val baseMinStart = maxOf(0L, minAllowedStartFromSource)
