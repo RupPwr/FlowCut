@@ -665,6 +665,38 @@ class ExportEngine(private val context: Context) {
                 drawSpec.bgParamsA = bgParamsA
                 drawSpec.bgParamsB = if (isTransition) bgParamsB else null
 
+                val timeSec = (res.tUs.toDouble() / 1_000_000.0).toFloat()
+                val st = PreviewRenderer.getClipFilterState(clipA.id)
+                var filterId = st.filterPresetId
+                var filterInt = st.filterIntensity
+                var effectId = st.effectPresetId
+                var effectInt = st.effectIntensity
+
+                val plan = PreviewRenderer.currentLayerPlan
+                if (plan.segments.isNotEmpty()) {
+                    val found = plan.resolveAt(res.tUs, activeLayerSet)
+                    if (found && activeLayerSet.filterCount > 0) {
+                        for (f in 0 until activeLayerSet.filterCount) {
+                            val idx = activeLayerSet.activeFilterIndices[f]
+                            val item = plan.items.getOrNull(idx) ?: continue
+                            if (item.filterPresetId > 0) {
+                                filterId = item.filterPresetId
+                                filterInt = item.filterIntensity
+                            }
+                            if (item.effectPresetId > 0) {
+                                effectId = item.effectPresetId
+                                effectInt = item.effectIntensity
+                            }
+                        }
+                    }
+                }
+
+                drawSpec.filterPresetId = filterId
+                drawSpec.filterIntensity = filterInt
+                drawSpec.effectPresetId = effectId
+                drawSpec.effectIntensity = effectInt
+                drawSpec.timeSec = timeSec
+
                 val needsScissor = if (isTransition) {
                     (bgA.type == BackgroundType.NONE && bgB.type == BackgroundType.NONE) &&
                         PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
@@ -685,7 +717,6 @@ class ExportEngine(private val context: Context) {
                 }
 
                 // Overlay compositor hook: render active overlay layers for this timestamp
-                val plan = PreviewRenderer.currentLayerPlan
                 if (plan.segments.isNotEmpty()) {
                     val found = plan.resolveAt(res.tUs, activeLayerSet)
                     if (found && activeLayerSet.visualCount > 0) {

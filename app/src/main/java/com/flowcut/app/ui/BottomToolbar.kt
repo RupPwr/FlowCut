@@ -110,6 +110,8 @@ fun BottomToolbar(
     onFontClick: () -> Unit = {},
     onColorClick: () -> Unit = {},
     onAnimationClick: () -> Unit = {},
+    onFilterClick: () -> Unit = {},
+    onEffectClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = FlowCutTheme.colors
@@ -126,7 +128,118 @@ fun BottomToolbar(
         )
 
         if (isClipSelected) {
-            // Contextual Selected Clip Toolbar (CapCut / VN style)
+            SelectedClipToolbar(
+                onClearSelection = onClearSelection,
+                onSplitClick = onSplitClick,
+                onTrimClick = onTrimClick,
+                onVolumeClick = onVolumeClick,
+                onSpeedClick = onSpeedClick,
+                onAdjustClick = onAdjustClick,
+                onFilterClick = onFilterClick,
+                onEffectClick = onEffectClick,
+                onBackgroundClick = onBackgroundClick,
+                onRotateClick = onRotateClick,
+                onFlipClick = onFlipClick,
+                onOpacityClick = onOpacityClick,
+                onCopyClick = onCopyClick,
+                onReplaceClick = onReplaceClick,
+                onFreezeClick = onFreezeClick,
+                onDeleteClipClick = onDeleteClipClick
+            )
+        } else if (isTextToolbarActive || (isOverlaySelected && isTextOverlaySelected)) {
+            TextToolbarContent(
+                onClearSelection = onClearSelection,
+                onAddTextClick = onAddTextClick,
+                onEditTextOverlayClick = onEditTextOverlayClick,
+                onFontClick = onFontClick,
+                onColorClick = onColorClick,
+                onAnimationClick = onAnimationClick,
+                onSplitClick = onSplitClick,
+                onDeleteClipClick = onDeleteClipClick,
+                onOpacityClick = onOpacityClick,
+                onCopyClick = onCopyClick
+            )
+        } else if (isPipActive) {
+            PipToolbarContent(
+                isPipItemSelected = isPipItemSelected,
+                canSplitPip = canSplitPip,
+                onClearSelection = onClearSelection,
+                onAddOverlayClick = onAddOverlayClick,
+                onSplitClick = onSplitClick,
+                onAnimationClick = onAnimationClick,
+                onDeleteClipClick = onDeleteClipClick,
+                onOpacityClick = onOpacityClick,
+                onCopyClick = onCopyClick,
+                onRotateClick = onRotateClick,
+                onFlipClick = onFlipClick
+            )
+        } else if (isAudioActive) {
+            AudioToolbarContent(
+                isAudioItemSelected = isAudioItemSelected,
+                canSplitAudio = canSplitAudio,
+                onBackToAudioGroup = onBackToAudioGroup,
+                onClearSelection = onClearSelection,
+                onVolumeClick = onVolumeClick,
+                onAudioFadeClick = onAudioFadeClick,
+                onSpeedClick = onSpeedClick,
+                onSplitClick = onSplitClick,
+                onCopyClick = onCopyClick,
+                onDeleteAudioClick = onDeleteAudioClick,
+                onAudioSoundsClick = onAudioSoundsClick,
+                onAudioLocalClick = onAudioLocalClick,
+                onAudioEffectsClick = onAudioEffectsClick,
+                onAudioExtractClick = onAudioExtractClick,
+                onAudioRecordClick = onAudioRecordClick
+            )
+        } else if (isOverlaySelected) {
+            SelectedOverlayToolbar(
+                isPipOverlaySelected = isPipOverlaySelected,
+                isTextOverlaySelected = isTextOverlaySelected,
+                onClearSelection = onClearSelection,
+                onAddOverlayClick = onAddOverlayClick,
+                onEditTextOverlayClick = onEditTextOverlayClick,
+                onSplitClick = onSplitClick,
+                onCopyClick = onCopyClick,
+                onOpacityClick = onOpacityClick,
+                onRotateClick = onRotateClick,
+                onFlipClick = onFlipClick,
+                onDeleteClipClick = onDeleteClipClick
+            )
+        } else {
+            MainToolbarContent(
+                onTrimClick = onTrimClick,
+                onTextClick = onTextClick,
+                onStickerClick = onStickerClick,
+                onOverlayClick = onOverlayClick,
+                onAudioClick = onAudioClick,
+                onFilterClick = onFilterClick,
+                onEffectClick = onEffectClick,
+                onLockedItemClick = onLockedItemClick
+            )
+        }
+    }
+}
+
+@Composable
+private fun SelectedClipToolbar(
+    onClearSelection: () -> Unit,
+    onSplitClick: () -> Unit,
+    onTrimClick: () -> Unit,
+    onVolumeClick: () -> Unit,
+    onSpeedClick: () -> Unit,
+    onAdjustClick: () -> Unit,
+    onFilterClick: () -> Unit,
+    onEffectClick: () -> Unit,
+    onBackgroundClick: () -> Unit,
+    onRotateClick: () -> Unit,
+    onFlipClick: () -> Unit,
+    onOpacityClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onReplaceClick: () -> Unit,
+    onFreezeClick: () -> Unit,
+    onDeleteClipClick: (() -> Unit)?
+) {
+    val colors = FlowCutTheme.colors
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -298,6 +411,62 @@ fun BottomToolbar(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "ADJUST",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // Filter Action
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .clickable { onFilterClick() }
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Palette,
+                            contentDescription = "FILTER",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "FILTER",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // Effect Action
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .clickable { onEffectClick() }
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "EFFECT",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "EFFECT",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -532,8 +701,23 @@ fun BottomToolbar(
                     }
                 }
             }
-        } else if (isTextToolbarActive || (isOverlaySelected && isTextOverlaySelected)) {
-            // Dedicated Text Toolbar (9 options: Add text, Edit, Font, Color, Animation, Split, Delete, Adjust, Copy)
+
+}
+
+@Composable
+private fun TextToolbarContent(
+    onClearSelection: () -> Unit,
+    onAddTextClick: () -> Unit,
+    onEditTextOverlayClick: () -> Unit,
+    onFontClick: () -> Unit,
+    onColorClick: () -> Unit,
+    onAnimationClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onDeleteClipClick: (() -> Unit)?,
+    onOpacityClick: () -> Unit,
+    onCopyClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -827,11 +1011,26 @@ fun BottomToolbar(
                     }
                 }
             }
-        } else if (isPipActive) {
-            // Dedicated PIP Toolbar matching image_21c07a.jpg
-            val itemToolsEnabled = isPipItemSelected
-            val splitEnabled = isPipItemSelected && canSplitPip
 
+}
+
+@Composable
+private fun PipToolbarContent(
+    isPipItemSelected: Boolean,
+    canSplitPip: Boolean,
+    onClearSelection: () -> Unit,
+    onAddOverlayClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onAnimationClick: () -> Unit,
+    onDeleteClipClick: (() -> Unit)?,
+    onOpacityClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onRotateClick: () -> Unit,
+    onFlipClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    val itemToolsEnabled = isPipItemSelected
+    val splitEnabled = isPipItemSelected && canSplitPip
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1104,7 +1303,28 @@ fun BottomToolbar(
                     }
                 }
             }
-        } else if (isAudioActive) {
+
+}
+
+@Composable
+private fun AudioToolbarContent(
+    isAudioItemSelected: Boolean,
+    canSplitAudio: Boolean,
+    onBackToAudioGroup: () -> Unit,
+    onClearSelection: () -> Unit,
+    onVolumeClick: () -> Unit,
+    onAudioFadeClick: () -> Unit,
+    onSpeedClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onDeleteAudioClick: () -> Unit,
+    onAudioSoundsClick: () -> Unit,
+    onAudioLocalClick: () -> Unit,
+    onAudioEffectsClick: () -> Unit,
+    onAudioExtractClick: () -> Unit,
+    onAudioRecordClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
             if (isAudioItemSelected) {
                 // S6 Selected Audio Item Toolbar: VOLUME, FADE, SPEED, SPLIT, COPY, DELETE
                 val splitEnabled = canSplitAudio
@@ -1528,8 +1748,24 @@ fun BottomToolbar(
                     }
                 }
             }
-        } else if (isOverlaySelected) {
-            // Contextual Selected Overlay Toolbar (SPLIT, COPY, OPACITY, ROTATE, FLIP, DELETE)
+
+}
+
+@Composable
+private fun SelectedOverlayToolbar(
+    isPipOverlaySelected: Boolean,
+    isTextOverlaySelected: Boolean,
+    onClearSelection: () -> Unit,
+    onAddOverlayClick: () -> Unit,
+    onEditTextOverlayClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onOpacityClick: () -> Unit,
+    onRotateClick: () -> Unit,
+    onFlipClick: () -> Unit,
+    onDeleteClipClick: (() -> Unit)?
+) {
+    val colors = FlowCutTheme.colors
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1799,8 +2035,21 @@ fun BottomToolbar(
                     }
                 }
             }
-        } else {
-            // Main Bottom Toolbar (Normal state when NO clip or overlay is selected)
+
+}
+
+@Composable
+private fun MainToolbarContent(
+    onTrimClick: () -> Unit,
+    onTextClick: () -> Unit,
+    onStickerClick: () -> Unit,
+    onOverlayClick: () -> Unit,
+    onAudioClick: () -> Unit,
+    onFilterClick: () -> Unit,
+    onEffectClick: () -> Unit,
+    onLockedItemClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1971,7 +2220,61 @@ fun BottomToolbar(
                     )
                 }
 
-                // 7. AI (Locked)
+                // 7. Filter
+                Column(
+                    modifier = Modifier
+                        .widthIn(min = 52.dp)
+                        .clickable { onFilterClick() }
+                        .padding(horizontal = 2.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Palette,
+                        contentDescription = "Filter",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Filter",
+                        color = colors.textPrimary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // 8. Effect
+                Column(
+                    modifier = Modifier
+                        .widthIn(min = 52.dp)
+                        .clickable { onEffectClick() }
+                        .padding(horizontal = 2.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = "Effect",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Effect",
+                        color = colors.textPrimary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // 9. AI (Locked)
                 Column(
                     modifier = Modifier
                         .widthIn(min = 52.dp)
@@ -1998,6 +2301,5 @@ fun BottomToolbar(
                     )
                 }
             }
-        }
-    }
+
 }

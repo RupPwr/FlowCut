@@ -34,7 +34,21 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FormatAlignCenter
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.InvertColors
+import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.PanoramaFishEye
+import androidx.compose.material.icons.filled.Vibration
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.text.style.TextOverflow
+import com.flowcut.app.core.timeline.SnapshotHolder
+import com.flowcut.app.engine.ClipFilterState
+import com.flowcut.app.engine.PreviewRenderer
+import kotlin.math.roundToInt
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -1877,6 +1891,595 @@ fun TextAdjustSheet(
                                         textDecoration = if (idx == 2) TextDecoration.Underline else TextDecoration.None
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Pro Color Filters & GPU Visual Effects Suite
+// ---------------------------------------------------------------------------
+
+data class FilterPresetInfo(
+    val id: Int,
+    val name: String,
+    val gradient: Brush
+)
+
+val FILTER_PRESETS = listOf(
+    FilterPresetInfo(0, "None", Brush.verticalGradient(listOf(Color(0xFF2C2C2E), Color(0xFF1C1C1E)))),
+    FilterPresetInfo(1, "Vivid", Brush.verticalGradient(listOf(Color(0xFFFF334B), Color(0xFF007AFF)))),
+    FilterPresetInfo(2, "Warm", Brush.verticalGradient(listOf(Color(0xFFFF9500), Color(0xFFFFCC00)))),
+    FilterPresetInfo(3, "Cool", Brush.verticalGradient(listOf(Color(0xFF00C6FF), Color(0xFF0072FF)))),
+    FilterPresetInfo(4, "Teal & Orange", Brush.horizontalGradient(listOf(Color(0xFF008080), Color(0xFFFF8C00)))),
+    FilterPresetInfo(5, "Vintage", Brush.verticalGradient(listOf(Color(0xFF8B5A2B), Color(0xFFD2B48C)))),
+    FilterPresetInfo(6, "Noir B&W", Brush.verticalGradient(listOf(Color(0xFF000000), Color(0xFFFFFFFF)))),
+    FilterPresetInfo(7, "Matte Fade", Brush.verticalGradient(listOf(Color(0xFF4A5568), Color(0xFFCBD5E0)))),
+    FilterPresetInfo(8, "Cyberpunk", Brush.horizontalGradient(listOf(Color(0xFFFF007F), Color(0xFF00F0FF)))),
+    FilterPresetInfo(9, "Golden Hour", Brush.verticalGradient(listOf(Color(0xFFFF7E00), Color(0xFFFFD700)))),
+    FilterPresetInfo(10, "Dramatic", Brush.verticalGradient(listOf(Color(0xFF14171A), Color(0xFF657786)))),
+    FilterPresetInfo(11, "Pastel", Brush.horizontalGradient(listOf(Color(0xFFFBCFE8), Color(0xFFA7F3D0))))
+)
+
+data class EffectPresetInfo(
+    val id: Int,
+    val name: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val gradient: Brush,
+    val iconTint: Color = Color.White
+)
+
+val EFFECT_PRESETS = listOf(
+    EffectPresetInfo(0, "None", Icons.Default.Block, Brush.verticalGradient(listOf(Color(0xFF2C2C2E), Color(0xFF1C1C1E))), Color(0xFF8E8E93)),
+    EffectPresetInfo(1, "RGB Split", Icons.Default.InvertColors, Brush.horizontalGradient(listOf(Color(0xFFFF0055), Color(0xFF00EEFF)))),
+    EffectPresetInfo(2, "Vignette", Icons.Default.PanoramaFishEye, Brush.radialGradient(listOf(Color(0xFF444444), Color(0xFF000000)))),
+    EffectPresetInfo(3, "VHS", Icons.Default.GraphicEq, Brush.verticalGradient(listOf(Color(0xFF5E2BFF), Color(0xFF00F5D4)))),
+    EffectPresetInfo(4, "Pulse", Icons.Default.Favorite, Brush.verticalGradient(listOf(Color(0xFFFF0055), Color(0xFFFF5252)))),
+    EffectPresetInfo(5, "Shake", Icons.Default.Vibration, Brush.verticalGradient(listOf(Color(0xFFFF9100), Color(0xFFFFD600)))),
+    EffectPresetInfo(6, "Flash", Icons.Default.FlashOn, Brush.verticalGradient(listOf(Color(0xFFFFEA00), Color(0xFFFFFFFF))), Color.Black),
+    EffectPresetInfo(7, "Glow", Icons.Default.Lightbulb, Brush.verticalGradient(listOf(Color(0xFF9D4EDD), Color(0xFFFF70A6)))),
+    EffectPresetInfo(8, "Pixelate", Icons.Default.GridOn, Brush.verticalGradient(listOf(Color(0xFF06D6A0), Color(0xFF118AB2))))
+)
+
+/**
+ * Dedicated FilterSheet anchored cleanly at Alignment.BottomCenter matching our dark + #FF2D55 theme.
+ * Features a top row with "Intensity" label + pink slider (0% to 100%, default 80%), "Apply to All" button,
+ * Cancel (✕), and Done (✓), plus a scrollable row of 12 Filter Cards (68.dp x 84.dp) with color-graded preview swatches.
+ */
+@Composable
+fun FilterSheet(
+    targetClipIndex: Int,
+    snapshotHolder: SnapshotHolder,
+    previewRenderer: PreviewRenderer,
+    onWakeFrameDriver: () -> Unit = {},
+    getClipFilterState: (clipId: String) -> ClipFilterState,
+    onCommitSingleFilter: (clipIndex: Int, presetId: Int, intensity: Float) -> Unit,
+    onCommitApplyAllFilter: (presetId: Int, intensity: Float) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val currentSnapshot = snapshotHolder.current
+    val clip = currentSnapshot.project.clips.getOrNull(targetClipIndex) ?: run {
+        onDismiss()
+        return
+    }
+
+    val originalClipFilter = remember(clip.id) { getClipFilterState(clip.id) }
+    val originalAllStates = remember {
+        currentSnapshot.project.clips.associate { it.id to getClipFilterState(it.id) }
+    }
+
+    var selectedPresetId by remember(clip.id) { mutableIntStateOf(originalClipFilter.filterPresetId) }
+    var currentIntensity by remember(clip.id) {
+        mutableFloatStateOf(if (originalClipFilter.filterIntensity in 0.01f..1.0f) originalClipFilter.filterIntensity else 0.80f)
+    }
+    var isApplyToAll by remember { mutableStateOf(false) }
+    var isCommitted by remember { mutableStateOf(false) }
+
+    fun applyLive(presetId: Int, intensity: Float, toAll: Boolean) {
+        if (toAll) {
+            for (c in snapshotHolder.current.project.clips) {
+                PreviewRenderer.setClipFilter(c.id, presetId, intensity)
+            }
+        } else {
+            for ((id, orig) in originalAllStates) {
+                if (id == clip.id) {
+                    PreviewRenderer.setClipFilter(id, presetId, intensity)
+                } else {
+                    PreviewRenderer.setClipFilter(id, orig.filterPresetId, orig.filterIntensity)
+                }
+            }
+        }
+        previewRenderer.requestRender()
+        onWakeFrameDriver()
+    }
+
+    val handleClose = {
+        if (!isCommitted) {
+            for ((id, orig) in originalAllStates) {
+                PreviewRenderer.setClipFilter(id, orig.filterPresetId, orig.filterIntensity)
+            }
+            previewRenderer.requestRender()
+            onWakeFrameDriver()
+        }
+        onDismiss()
+    }
+
+    val handleDone = {
+        isCommitted = true
+        if (isApplyToAll) {
+            onCommitApplyAllFilter(selectedPresetId, currentIntensity)
+        } else {
+            onCommitSingleFilter(targetClipIndex, selectedPresetId, currentIntensity)
+        }
+        onDismiss()
+    }
+
+    BackHandler { handleClose() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (!isCommitted) {
+                for ((id, orig) in originalAllStates) {
+                    PreviewRenderer.setClipFilter(id, orig.filterPresetId, orig.filterIntensity)
+                }
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = handleClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { handleClose() }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) {},
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = DARK_SHEET_BG,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp,
+                border = BorderStroke(0.5.dp, DARK_SURFACE_BORDER)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 16.dp)
+                ) {
+                    // Top Actions Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(
+                            onClick = handleClose,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Surface(
+                                onClick = {
+                                    isApplyToAll = !isApplyToAll
+                                    applyLive(selectedPresetId, currentIntensity, isApplyToAll)
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isApplyToAll) PINK_RED_ACCENT else DARK_CARD_BG,
+                                border = BorderStroke(
+                                    0.5.dp,
+                                    if (isApplyToAll) PINK_RED_ACCENT else DARK_SURFACE_BORDER
+                                ),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(horizontal = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "Apply to All",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = handleDone,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Done",
+                                    tint = PINK_RED_ACCENT,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Intensity Slider Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "Intensity",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Slider(
+                            value = currentIntensity,
+                            onValueChange = { newIntensity ->
+                                currentIntensity = newIntensity
+                                applyLive(selectedPresetId, newIntensity, isApplyToAll)
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${(currentIntensity * 100).roundToInt()}%",
+                            color = Color(0xFF8E8E93),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(36.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Scrollable row of 12 Filter Cards (68.dp x 84.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        for (preset in FILTER_PRESETS) {
+                            val isSelected = preset.id == selectedPresetId
+                            Column(
+                                modifier = Modifier
+                                    .size(width = 68.dp, height = 84.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(
+                                        BorderStroke(
+                                            if (isSelected) 2.dp else 0.5.dp,
+                                            if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER
+                                        ),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .background(DARK_CARD_BG)
+                                    .clickable {
+                                        selectedPresetId = preset.id
+                                        applyLive(preset.id, currentIntensity, isApplyToAll)
+                                    }
+                                    .padding(4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(50.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(preset.gradient),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (preset.id == 0) {
+                                        Icon(
+                                            imageVector = Icons.Default.Block,
+                                            contentDescription = "None",
+                                            tint = Color(0xFF8E8E93),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = preset.name,
+                                    color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated EffectSheet anchored cleanly at Alignment.BottomCenter matching our dark + #FF2D55 theme.
+ * Features a top row with "Intensity" label + pink slider (0% to 100%, default 70%), Cancel (✕), and Done (✓),
+ * plus a scrollable row of 8 Visual Effect Cards (None + 8 effects = 9 cards, 68.dp x 84.dp) with expressive icons and colored preview badges.
+ */
+@Composable
+fun EffectSheet(
+    targetClipIndex: Int,
+    snapshotHolder: SnapshotHolder,
+    previewRenderer: PreviewRenderer,
+    onWakeFrameDriver: () -> Unit = {},
+    getClipFilterState: (clipId: String) -> ClipFilterState,
+    onCommitSingleEffect: (clipIndex: Int, presetId: Int, intensity: Float) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val currentSnapshot = snapshotHolder.current
+    val clip = currentSnapshot.project.clips.getOrNull(targetClipIndex) ?: run {
+        onDismiss()
+        return
+    }
+
+    val originalClipFilter = remember(clip.id) { getClipFilterState(clip.id) }
+    var selectedPresetId by remember(clip.id) { mutableIntStateOf(originalClipFilter.effectPresetId) }
+    var currentIntensity by remember(clip.id) {
+        mutableFloatStateOf(if (originalClipFilter.effectIntensity in 0.01f..1.0f) originalClipFilter.effectIntensity else 0.70f)
+    }
+    var isCommitted by remember { mutableStateOf(false) }
+
+    fun applyLive(presetId: Int, intensity: Float) {
+        PreviewRenderer.setClipEffect(clip.id, presetId, intensity)
+        previewRenderer.requestRender()
+        onWakeFrameDriver()
+    }
+
+    val handleClose = {
+        if (!isCommitted) {
+            PreviewRenderer.setClipEffect(clip.id, originalClipFilter.effectPresetId, originalClipFilter.effectIntensity)
+            previewRenderer.requestRender()
+            onWakeFrameDriver()
+        }
+        onDismiss()
+    }
+
+    val handleDone = {
+        isCommitted = true
+        onCommitSingleEffect(targetClipIndex, selectedPresetId, currentIntensity)
+        onDismiss()
+    }
+
+    BackHandler { handleClose() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (!isCommitted) {
+                PreviewRenderer.setClipEffect(clip.id, originalClipFilter.effectPresetId, originalClipFilter.effectIntensity)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = handleClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { handleClose() }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) {},
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = DARK_SHEET_BG,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp,
+                border = BorderStroke(0.5.dp, DARK_SURFACE_BORDER)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 16.dp)
+                ) {
+                    // Top Actions Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(
+                            onClick = handleClose,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "Visual Effects",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        IconButton(
+                            onClick = handleDone,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Done",
+                                tint = PINK_RED_ACCENT,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    // Intensity Slider Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "Intensity",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Slider(
+                            value = currentIntensity,
+                            onValueChange = { newIntensity ->
+                                currentIntensity = newIntensity
+                                applyLive(selectedPresetId, newIntensity)
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${(currentIntensity * 100).roundToInt()}%",
+                            color = Color(0xFF8E8E93),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(36.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Scrollable row of 8 Visual Effect Cards (68.dp x 84.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        for (preset in EFFECT_PRESETS) {
+                            val isSelected = preset.id == selectedPresetId
+                            Column(
+                                modifier = Modifier
+                                    .size(width = 68.dp, height = 84.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(
+                                        BorderStroke(
+                                            if (isSelected) 2.dp else 0.5.dp,
+                                            if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER
+                                        ),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .background(DARK_CARD_BG)
+                                    .clickable {
+                                        selectedPresetId = preset.id
+                                        applyLive(preset.id, currentIntensity)
+                                    }
+                                    .padding(4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(50.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(preset.gradient),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = preset.icon,
+                                        contentDescription = preset.name,
+                                        tint = preset.iconTint,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                Text(
+                                    text = preset.name,
+                                    color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }

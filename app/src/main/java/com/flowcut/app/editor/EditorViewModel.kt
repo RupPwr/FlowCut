@@ -144,6 +144,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val redoBackgrounds = ArrayDeque<Map<String, ClipBackground>>()
     val clipBackgrounds = mutableMapOf<String, ClipBackground>()
 
+    // Per-clip filter & effect state and undo/redo stacks
+    private val undoFilterStates = ArrayDeque<Map<String, com.flowcut.app.engine.ClipFilterState>>()
+    private val redoFilterStates = ArrayDeque<Map<String, com.flowcut.app.engine.ClipFilterState>>()
+    val clipFilterStates = mutableMapOf<String, com.flowcut.app.engine.ClipFilterState>()
+
     // Multi-layer Overlay Items and undo/redo stacks
     private val undoLayerItems = ArrayDeque<List<OverlayItem>>()
     private val redoLayerItems = ArrayDeque<List<OverlayItem>>()
@@ -267,6 +272,111 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         updateProject(currentProject, recordUndo = false)
+    }
+
+    fun getClipFilterState(clipId: String): com.flowcut.app.engine.ClipFilterState =
+        clipFilterStates[clipId] ?: com.flowcut.app.engine.ClipFilterState.DEFAULT
+
+    fun commitClipFilter(clipIndex: Int, presetId: Int, intensity: Float) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        undoFilterStates.addLast(HashMap(clipFilterStates))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+        redoFilterStates.clear()
+        undoLayerItems.addLast(ArrayList(_layerItems))
+        redoLayerItems.clear()
+
+        val existing = getClipFilterState(clip.id)
+        val updated = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
+        clipFilterStates[clip.id] = updated
+        PreviewRenderer.setClipFilter(clip.id, presetId, intensity)
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitApplyFilterToAll(presetId: Int, intensity: Float) {
+        val currentProject = _uiState.value.project
+        if (currentProject.clips.isEmpty()) return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        undoFilterStates.addLast(HashMap(clipFilterStates))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+        redoFilterStates.clear()
+        undoLayerItems.addLast(ArrayList(_layerItems))
+        redoLayerItems.clear()
+
+        for (c in currentProject.clips) {
+            val existing = getClipFilterState(c.id)
+            val updated = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
+            clipFilterStates[c.id] = updated
+            PreviewRenderer.setClipFilter(c.id, presetId, intensity)
+        }
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun commitClipEffect(clipIndex: Int, presetId: Int, intensity: Float) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+
+        undoStack.push(currentProject)
+        undoTimeMaps.addLast(HashMap(clipTimeMaps))
+        undoVolumes.addLast(HashMap(clipVolumes))
+        undoTransforms.addLast(HashMap(clipTransforms))
+        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+        undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        undoFilterStates.addLast(HashMap(clipFilterStates))
+        redoTimeMaps.clear()
+        redoVolumes.clear()
+        redoTransforms.clear()
+        redoColorAdjusts.clear()
+        redoBackgrounds.clear()
+        redoFilterStates.clear()
+        undoLayerItems.addLast(ArrayList(_layerItems))
+        redoLayerItems.clear()
+
+        val existing = getClipFilterState(clip.id)
+        val updated = existing.copy(effectPresetId = presetId, effectIntensity = intensity)
+        clipFilterStates[clip.id] = updated
+        PreviewRenderer.setClipEffect(clip.id, presetId, intensity)
+
+        updateProject(currentProject, recordUndo = false)
+    }
+
+    fun addFilterLayer(presetId: Int, intensity: Float, startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
+        val endUs = startUs + durationUs
+        val newItem = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.FILTER,
+            laneIndex = 0,
+            zIndex = (_layerItems.maxOfOrNull { it.zIndex } ?: 0) + 1,
+            startUs = startUs,
+            endUs = endUs,
+            filterPresetId = presetId,
+            filterIntensity = intensity
+        )
+        addLayerItem(newItem)
+        return newItem
     }
 
     fun getClipTransform(clipId: String): ClipTransform =
@@ -2608,6 +2718,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             PreviewRenderer.clipColorAdjusts.remove(deletedId)
             clipBackgrounds.remove(deletedId)
             PreviewRenderer.clipBackgrounds.remove(deletedId)
+            clipFilterStates.remove(deletedId)
+            PreviewRenderer.clipFilterStates.remove(deletedId)
         }
         val newProject = ProgramTimeline.deleteClip(_uiState.value.project, index)
         val isAllMuted = newProject.clips.isNotEmpty() && newProject.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
@@ -2659,6 +2771,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             redoBackgrounds.clear()
             clipBackgrounds.clear()
             PreviewRenderer.clipBackgrounds.clear()
+            undoFilterStates.clear()
+            redoFilterStates.clear()
+            clipFilterStates.clear()
+            PreviewRenderer.clipFilterStates.clear()
             undoLayerItems.clear()
             redoLayerItems.clear()
             _layerItems.clear()
@@ -2906,6 +3022,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipBackgrounds.putAll(prevBgs)
             PreviewRenderer.syncBackgrounds(clipBackgrounds)
         }
+        if (undoFilterStates.isNotEmpty()) {
+            val prevFilters = undoFilterStates.removeLast()
+            redoFilterStates.addLast(HashMap(clipFilterStates))
+            clipFilterStates.clear()
+            clipFilterStates.putAll(prevFilters)
+            PreviewRenderer.syncFilterStates(clipFilterStates)
+        }
         if (undoLayerItems.isNotEmpty()) {
             val prevLayers = undoLayerItems.removeLast()
             redoLayerItems.addLast(ArrayList(_layerItems))
@@ -2962,6 +3085,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipBackgrounds.clear()
             clipBackgrounds.putAll(nextBgs)
             PreviewRenderer.syncBackgrounds(clipBackgrounds)
+        }
+        if (redoFilterStates.isNotEmpty()) {
+            val nextFilters = redoFilterStates.removeLast()
+            undoFilterStates.addLast(HashMap(clipFilterStates))
+            clipFilterStates.clear()
+            clipFilterStates.putAll(nextFilters)
+            PreviewRenderer.syncFilterStates(clipFilterStates)
         }
         if (redoLayerItems.isNotEmpty()) {
             val nextLayers = redoLayerItems.removeLast()

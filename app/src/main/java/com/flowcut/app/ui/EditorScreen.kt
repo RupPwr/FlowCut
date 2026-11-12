@@ -619,6 +619,10 @@ fun EditorScreen(
     var isAudioFadeSheetVisible by remember { mutableStateOf(false) }
     var isAudioVolumeSheetVisible by remember { mutableStateOf(false) }
     var isAudioSpeedSheetVisible by remember { mutableStateOf(false) }
+    var isFilterSheetVisible by remember { mutableStateOf(false) }
+    var isEffectSheetVisible by remember { mutableStateOf(false) }
+    var filterTargetClipIndex by remember { mutableIntStateOf(-1) }
+    var effectTargetClipIndex by remember { mutableIntStateOf(-1) }
 
     LaunchedEffect(Unit) {
         val fontsDir = File(context.filesDir, "fonts")
@@ -2934,6 +2938,58 @@ fun EditorScreen(
                         isTextAdjustSheetVisible = false
                         isTextAnimationSheetVisible = true
                     }
+                },
+                onFilterClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    val clips = snapshotHolder.current.project.clips
+                    val target = selectedClipIndex
+                        ?: if (clips.isNotEmpty()) {
+                            snapshotHolder.current.main.lastStartAtOrBefore(usToMs(playbackController.playhead.timeUs)).coerceIn(clips.indices)
+                        } else null
+
+                    if (target != null) {
+                        filterTargetClipIndex = target
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isEffectSheetVisible = false
+                        isFilterSheetVisible = true
+                    } else {
+                        Toast.makeText(context, "No clips in project", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onEffectClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    val clips = snapshotHolder.current.project.clips
+                    val target = selectedClipIndex
+                        ?: if (clips.isNotEmpty()) {
+                            snapshotHolder.current.main.lastStartAtOrBefore(usToMs(playbackController.playhead.timeUs)).coerceIn(clips.indices)
+                        } else null
+
+                    if (target != null) {
+                        effectTargetClipIndex = target
+                        isVolumeSheetVisible = false
+                        isSpeedSheetVisible = false
+                        isAdjustSheetVisible = false
+                        isBackgroundSheetVisible = false
+                        isTrimSheetVisible = false
+                        isOpacitySheetVisible = false
+                        isFilterSheetVisible = false
+                        isEffectSheetVisible = true
+                    } else {
+                        Toast.makeText(context, "No clips in project", Toast.LENGTH_SHORT).show()
+                    }
                 }
             )
         }
@@ -3119,6 +3175,45 @@ fun EditorScreen(
                     frameDriver.wake()
                 },
                 onDismiss = { isBackgroundSheetVisible = false }
+            )
+        }
+
+        // Filter BottomSheet (CapCut/VN style)
+        if (isFilterSheetVisible && filterTargetClipIndex in snapshotHolder.current.project.clips.indices) {
+            FilterSheet(
+                targetClipIndex = filterTargetClipIndex,
+                snapshotHolder = snapshotHolder,
+                previewRenderer = previewRenderer,
+                onWakeFrameDriver = { frameDriver.wake() },
+                getClipFilterState = { id -> resolvedViewModel?.getClipFilterState(id) ?: com.flowcut.app.engine.ClipFilterState.DEFAULT },
+                onCommitSingleFilter = { idx, presetId, intensity ->
+                    resolvedViewModel?.commitClipFilter(idx, presetId, intensity)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onCommitApplyAllFilter = { presetId, intensity ->
+                    resolvedViewModel?.commitApplyFilterToAll(presetId, intensity)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isFilterSheetVisible = false }
+            )
+        }
+
+        // Effect BottomSheet (CapCut/VN style)
+        if (isEffectSheetVisible && effectTargetClipIndex in snapshotHolder.current.project.clips.indices) {
+            EffectSheet(
+                targetClipIndex = effectTargetClipIndex,
+                snapshotHolder = snapshotHolder,
+                previewRenderer = previewRenderer,
+                onWakeFrameDriver = { frameDriver.wake() },
+                getClipFilterState = { id -> resolvedViewModel?.getClipFilterState(id) ?: com.flowcut.app.engine.ClipFilterState.DEFAULT },
+                onCommitSingleEffect = { idx, presetId, intensity ->
+                    resolvedViewModel?.commitClipEffect(idx, presetId, intensity)
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDismiss = { isEffectSheetVisible = false }
             )
         }
 

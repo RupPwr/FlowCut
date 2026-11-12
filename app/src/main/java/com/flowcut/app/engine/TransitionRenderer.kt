@@ -8,6 +8,17 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
+data class ClipFilterState(
+    val filterPresetId: Int = 0,
+    val filterIntensity: Float = 0.8f,
+    val effectPresetId: Int = 0,
+    val effectIntensity: Float = 0.7f
+) {
+    companion object {
+        val DEFAULT = ClipFilterState()
+    }
+}
+
 data class DrawSpec(
     var type: TransitionType = TransitionType.NONE,
     var easedP: Float = 0f,
@@ -31,7 +42,12 @@ data class DrawSpec(
     var bgModeA: Int = 0,
     var bgModeB: Int = 0,
     var bgParamsA: FloatArray? = null,
-    var bgParamsB: FloatArray? = null
+    var bgParamsB: FloatArray? = null,
+    var filterPresetId: Int = 0,
+    var filterIntensity: Float = 0.0f,
+    var effectPresetId: Int = 0,
+    var effectIntensity: Float = 0.0f,
+    var timeSec: Float = 0.0f
 )
 
 class TransitionRenderer {
@@ -69,6 +85,11 @@ class TransitionRenderer {
     private var uBgParamsBLoc = -1
     private var uOpacityALoc = -1
     private var uOpacityBLoc = -1
+    private var uFilterPresetIdLoc = -1
+    private var uFilterIntensityLoc = -1
+    private var uEffectPresetIdLoc = -1
+    private var uEffectIntensityLoc = -1
+    private var uTimeSecLoc = -1
 
     // Overlay compositor program and uniforms
     private var overlayProgramId = 0
@@ -127,6 +148,12 @@ class TransitionRenderer {
         uniform vec4 uBgParamsB;
         uniform float uOpacityA;
         uniform float uOpacityB;
+
+        uniform int uFilterPresetId;
+        uniform float uFilterIntensity;
+        uniform int uEffectPresetId;
+        uniform float uEffectIntensity;
+        uniform float uTimeSec;
 
         in vec2 vUV;
         out vec4 outColor;
@@ -301,35 +328,172 @@ class TransitionRenderer {
         vec4 sA(vec2 uv) { return sampleClipA(uv); }
         vec4 sB(vec2 uv) { return sampleClipB(uv); }
 
-        void main() {
-            vec4 c;
+        vec4 sampleScene(vec2 uv) {
             if (uType == 0) {
-                c = sA(vUV);
+                return sA(uv);
             } else if (uType == 1) {
                 // SLIDE: B comes from right, A moves 30% left
-                if (vUV.x > 1.0 - uP) {
-                    c = sB(vec2(vUV.x - (1.0 - uP), vUV.y));
+                if (uv.x > 1.0 - uP) {
+                    return sB(vec2(uv.x - (1.0 - uP), uv.y));
                 } else {
-                    c = sA(vec2(vUV.x + 0.3 * uP, vUV.y));
+                    return sA(vec2(uv.x + 0.3 * uP, uv.y));
                 }
             } else if (uType == 2) {
                 // CIRCLE: circular reveal from center
-                vec2 d = (vUV - 0.5) * vec2(uAspect, 1.0);
+                vec2 d = (uv - 0.5) * vec2(uAspect, 1.0);
                 float maxR = length(vec2(0.5 * uAspect, 0.5));
                 float r = uP * (maxR + 0.01);
                 float m = (uP <= 0.0) ? 0.0 : 1.0 - smoothstep(r - 0.004, r + 0.004, length(d));
-                c = mix(sA(vUV), sB(vUV), m);
+                return mix(sA(uv), sB(uv), m);
             } else if (uType == 3) {
                 // ZOOM: A zooms in and fades out, B zooms out from 1.4x to 1.0x and fades in
                 float sa = 1.0 + 0.8 * uP;
                 float sb = 1.4 - 0.4 * uP;
-                vec4 a = sA((vUV - 0.5) / sa + 0.5);
-                vec4 b = sB((vUV - 0.5) / sb + 0.5);
-                c = mix(a, b, uP);
+                vec4 a = sA((uv - 0.5) / sa + 0.5);
+                vec4 b = sB((uv - 0.5) / sb + 0.5);
+                return mix(a, b, uP);
             } else {
                 // FADE
-                c = mix(sA(vUV), sB(vUV), uP);
+                return mix(sA(uv), sB(uv), uP);
             }
+        }
+
+        vec2 applyUvEffects(vec2 uv, int effectId, float intensity, float timeSec) {
+            if (effectId == 0 || intensity <= 0.001) return uv;
+            vec2 effUv = uv;
+            if (effectId == 4) {
+                // 4: Heartbeat Pulse (smooth rhythmic zoom pulse driven by uTimeSec)
+                float cycle = mod(timeSec, 0.85);
+                float p = sin(cycle * 3.14159265 / 0.85);
+                float pulse = pow(max(0.0, p), 4.0) * (0.08 * clamp(intensity, 0.0, 1.0));
+                effUv = (effUv - 0.5) / (1.0 + pulse) + 0.5;
+            } else if (effectId == 5) {
+                // 5: Handheld Shake (smooth sinusoidal camera shake on UV driven by uTimeSec)
+                float sX = sin(timeSec * 11.0) * 0.6 + sin(timeSec * 23.0) * 0.4;
+                float sY = cos(timeSec * 13.0) * 0.6 + cos(timeSec * 29.0) * 0.4;
+                vec2 shake = vec2(sX, sY) * (0.02 * clamp(intensity, 0.0, 1.0));
+                effUv += shake;
+            } else if (effectId == 8) {
+                // 8: Pixelate (quantized UV mosaic grid scaled by intensity)
+                float minGrid = 20.0;
+                float maxGrid = 180.0;
+                float grid = mix(maxGrid, minGrid, clamp(intensity, 0.0, 1.0));
+                effUv = floor(effUv * grid) / grid;
+            }
+            return effUv;
+        }
+
+        vec3 applyFilter(vec3 inRgb, int presetId, float intensity) {
+            if (presetId == 0 || intensity <= 0.001) {
+                return inRgb;
+            }
+            float luma = dot(inRgb, vec3(0.2126, 0.7152, 0.0722));
+            vec3 filtered = inRgb;
+
+            if (presetId == 1) {
+                // 1: Vivid (boosted saturation + crisp S-curve contrast)
+                vec3 sat = mix(vec3(luma), inRgb, 1.45);
+                filtered = sat * sat * (3.0 - 2.0 * sat);
+            } else if (presetId == 2) {
+                // 2: Warm (golden highlights + warm skin tones)
+                filtered = inRgb * vec3(1.16, 1.05, 0.88) + vec3(0.06, 0.03, 0.0);
+            } else if (presetId == 3) {
+                // 3: Cool (crisp cyan/blue shadows + clean highlights)
+                vec3 coolTint = inRgb * vec3(0.88, 1.02, 1.20);
+                filtered = coolTint + vec3(0.0, 0.02, 0.08) * (1.0 - luma);
+            } else if (presetId == 4) {
+                // 4: Teal & Orange (cinematic shadow-teal / highlight-orange split-toning)
+                vec3 shadowTeal = vec3(-0.05, 0.08, 0.16) * (1.0 - luma);
+                vec3 highlightOrange = vec3(0.18, 0.08, -0.06) * luma;
+                filtered = inRgb + shadowTeal + highlightOrange;
+                filtered = (filtered - 0.5) * 1.15 + 0.5;
+            } else if (presetId == 5) {
+                // 5: Vintage (warm faded blacks + subtle sepia tint)
+                vec3 lifted = inRgb * 0.88 + vec3(0.08, 0.06, 0.04);
+                vec3 sepia = vec3(luma * 1.15, luma * 0.95, luma * 0.78);
+                filtered = mix(lifted, sepia, 0.55);
+            } else if (presetId == 6) {
+                // 6: Noir B&W (high-contrast luminance monochrome)
+                float noirVal = smoothstep(0.10, 0.90, luma);
+                filtered = vec3(noirVal);
+            } else if (presetId == 7) {
+                // 7: Matte Fade (lifted shadow floor + soft desaturated film look)
+                vec3 lifted = inRgb * 0.80 + 0.14;
+                float lLuma = dot(lifted, vec3(0.2126, 0.7152, 0.0722));
+                filtered = mix(vec3(lLuma), lifted, 0.70);
+            } else if (presetId == 8) {
+                // 8: Cyberpunk (magenta/cyan neon color matrix)
+                vec3 neon;
+                neon.r = inRgb.r * 1.30 + 0.12 * (1.0 - inRgb.g);
+                neon.g = inRgb.g * 0.75;
+                neon.b = inRgb.b * 1.40 + 0.15 * (1.0 - inRgb.r);
+                filtered = mix(inRgb, neon, 0.85);
+            } else if (presetId == 9) {
+                // 9: Golden Hour (rich amber warmth + soft glow)
+                vec3 amber = vec3(1.25, 1.04, 0.80);
+                filtered = pow(clamp(inRgb * amber, 0.0, 1.0), vec3(0.90)) + vec3(0.07, 0.04, 0.0) * luma;
+            } else if (presetId == 10) {
+                // 10: Dramatic (deep crushed blacks + metallic desaturated tones)
+                vec3 crushed = max(vec3(0.0), (inRgb - 0.08) / 0.92);
+                float cLuma = dot(crushed, vec3(0.2126, 0.7152, 0.0722));
+                vec3 desat = mix(vec3(cLuma), crushed, 0.55);
+                filtered = pow(clamp(desat, 0.0, 1.0), vec3(1.25));
+            } else if (presetId == 11) {
+                // 11: Pastel (softened contrast + airy bright tint)
+                vec3 soft = (inRgb - 0.5) * 0.72 + 0.55;
+                filtered = soft * vec3(1.06, 1.03, 1.09) + vec3(0.05, 0.05, 0.06);
+            }
+
+            filtered = clamp(filtered, 0.0, 1.0);
+            return mix(inRgb, filtered, clamp(intensity, 0.0, 1.0));
+        }
+
+        void main() {
+            vec2 effUv = applyUvEffects(vUV, uEffectPresetId, uEffectIntensity, uTimeSec);
+            vec4 c;
+
+            if (uEffectPresetId == 1 && uEffectIntensity > 0.001) {
+                // 1: RGB Split (chromatic aberration horizontal R/B UV offset scaled by intensity)
+                float splitOffset = 0.025 * clamp(uEffectIntensity, 0.0, 1.0);
+                float r = sampleScene(vec2(effUv.x + splitOffset, effUv.y)).r;
+                vec4 centerCol = sampleScene(effUv);
+                float b = sampleScene(vec2(effUv.x - splitOffset, effUv.y)).b;
+                c = vec4(r, centerCol.g, b, centerCol.a);
+            } else {
+                c = sampleScene(effUv);
+            }
+
+            // Apply Color-based Visual Effects
+            if (uEffectPresetId > 0 && uEffectIntensity > 0.001) {
+                if (uEffectPresetId == 2) {
+                    // 2: Vignette (smooth radial edge darkening around center)
+                    float dist = length(effUv - vec2(0.5, 0.5));
+                    float vig = smoothstep(0.25, 0.82, dist);
+                    c.rgb *= mix(1.0, 1.0 - 0.80 * vig, clamp(uEffectIntensity, 0.0, 1.0));
+                } else if (uEffectPresetId == 3) {
+                    // 3: VHS Scanline (subtle horizontal scanlines + warm tint)
+                    float scan = sin((effUv.y + uTimeSec * 0.05) * 650.0) * 0.5 + 0.5;
+                    float lineFactor = clamp(scan * 0.30 + 0.80, 0.0, 1.0);
+                    vec3 vhsCol = c.rgb * lineFactor * vec3(1.06, 1.0, 0.90);
+                    c.rgb = mix(c.rgb, vhsCol, clamp(uEffectIntensity, 0.0, 1.0));
+                } else if (uEffectPresetId == 6) {
+                    // 6: Flash Strobe (rhythmic white exposure flash driven by uTimeSec)
+                    float cycle = mod(uTimeSec, 0.50);
+                    float f = sin(cycle * 3.14159265 / 0.50);
+                    float flash = pow(max(0.0, f), 6.0) * clamp(uEffectIntensity, 0.0, 1.0);
+                    c.rgb = mix(c.rgb, vec3(1.0), flash * 0.85);
+                } else if (uEffectPresetId == 7) {
+                    // 7: Dreamy Glow (soft highlight bloom blend)
+                    float glowLuma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+                    float glowWeight = smoothstep(0.35, 0.85, glowLuma);
+                    vec3 glowCol = c.rgb + vec3(0.28, 0.22, 0.35) * glowWeight;
+                    c.rgb = mix(c.rgb, glowCol, clamp(uEffectIntensity, 0.0, 1.0));
+                }
+            }
+
+            // Apply Color Filter Presets (0..11)
+            c.rgb = applyFilter(c.rgb, uFilterPresetId, uFilterIntensity);
+
             outColor = vec4(c.rgb, 1.0);
         }
     """.trimIndent()
@@ -400,6 +564,11 @@ class TransitionRenderer {
         uBgParamsBLoc = GLES30.glGetUniformLocation(programId, "uBgParamsB")
         uOpacityALoc = GLES30.glGetUniformLocation(programId, "uOpacityA")
         uOpacityBLoc = GLES30.glGetUniformLocation(programId, "uOpacityB")
+        uFilterPresetIdLoc = GLES30.glGetUniformLocation(programId, "uFilterPresetId")
+        uFilterIntensityLoc = GLES30.glGetUniformLocation(programId, "uFilterIntensity")
+        uEffectPresetIdLoc = GLES30.glGetUniformLocation(programId, "uEffectPresetId")
+        uEffectIntensityLoc = GLES30.glGetUniformLocation(programId, "uEffectIntensity")
+        uTimeSecLoc = GLES30.glGetUniformLocation(programId, "uTimeSec")
 
         // Setup Overlay Compositor Program
         val overlayVs = compileShader(GLES30.GL_VERTEX_SHADER, overlayVertexShaderSource)
@@ -508,6 +677,11 @@ class TransitionRenderer {
         GLES30.glUniform4fv(uBgParamsBLoc, 1, spec.bgParamsB ?: defaultBgParams, 0)
         GLES30.glUniform1f(uOpacityALoc, spec.opacityA)
         GLES30.glUniform1f(uOpacityBLoc, spec.opacityB)
+        GLES30.glUniform1i(uFilterPresetIdLoc, spec.filterPresetId)
+        GLES30.glUniform1f(uFilterIntensityLoc, spec.filterIntensity)
+        GLES30.glUniform1i(uEffectPresetIdLoc, spec.effectPresetId)
+        GLES30.glUniform1f(uEffectIntensityLoc, spec.effectIntensity)
+        GLES30.glUniform1f(uTimeSecLoc, spec.timeSec)
 
         // Draw quad
         GLES30.glBindVertexArray(vaoId)

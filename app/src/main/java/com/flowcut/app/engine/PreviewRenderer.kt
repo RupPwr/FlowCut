@@ -701,6 +701,7 @@ class PreviewRenderer(
                     drawSpec.bgParamsA = bgParamsA
                     drawSpec.bgParamsB = bgParamsB
 
+                    resolveFilterAndEffect(clipA.id, frame.tUs)
                     renderer.draw(drawSpec)
                 } catch (_: Exception) {
                 } finally {
@@ -875,6 +876,7 @@ class PreviewRenderer(
                 drawSpec.bgParamsA = bgParamsA
                 drawSpec.bgParamsB = null
 
+                resolveFilterAndEffect(clipA.id, frame.tUs)
                 renderer.draw(drawSpec)
             } catch (_: Exception) {
             } finally {
@@ -1017,6 +1019,7 @@ class PreviewRenderer(
                 drawSpec.bgParamsA = null
                 drawSpec.bgParamsB = bgParamsB
 
+                resolveFilterAndEffect(clipA.id, frame.tUs)
                 renderer.draw(drawSpec)
             } catch (_: Exception) {
             } finally {
@@ -1047,6 +1050,39 @@ class PreviewRenderer(
                 frameCount = 0
             }
         }
+    }
+
+    private fun resolveFilterAndEffect(clipId: String?, tUs: Long) {
+        val st = getClipFilterState(clipId)
+        var filterId = st.filterPresetId
+        var filterInt = st.filterIntensity
+        var effectId = st.effectPresetId
+        var effectInt = st.effectIntensity
+
+        val plan = currentLayerPlan
+        if (plan.segments.isNotEmpty()) {
+            val found = plan.resolveAt(tUs, activeLayerSet)
+            if (found && activeLayerSet.filterCount > 0) {
+                for (f in 0 until activeLayerSet.filterCount) {
+                    val idx = activeLayerSet.activeFilterIndices[f]
+                    val item = plan.items.getOrNull(idx) ?: continue
+                    if (item.filterPresetId > 0) {
+                        filterId = item.filterPresetId
+                        filterInt = item.filterIntensity
+                    }
+                    if (item.effectPresetId > 0) {
+                        effectId = item.effectPresetId
+                        effectInt = item.effectIntensity
+                    }
+                }
+            }
+        }
+
+        drawSpec.filterPresetId = filterId
+        drawSpec.filterIntensity = filterInt
+        drawSpec.effectPresetId = effectId
+        drawSpec.effectIntensity = effectInt
+        drawSpec.timeSec = (tUs.toDouble() / 1_000_000.0).toFloat()
     }
 
     private fun renderOverlays(tUs: Long) {
@@ -1225,6 +1261,28 @@ class PreviewRenderer(
         fun syncBackgrounds(bgs: Map<String, ClipBackground>) {
             clipBackgrounds.clear()
             clipBackgrounds.putAll(bgs)
+        }
+
+        val clipFilterStates = ConcurrentHashMap<String, ClipFilterState>()
+
+        fun getClipFilterState(clipId: String?): ClipFilterState {
+            if (clipId == null) return ClipFilterState.DEFAULT
+            return clipFilterStates[clipId] ?: ClipFilterState.DEFAULT
+        }
+
+        fun setClipFilter(clipId: String, presetId: Int, intensity: Float) {
+            val existing = getClipFilterState(clipId)
+            clipFilterStates[clipId] = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
+        }
+
+        fun setClipEffect(clipId: String, presetId: Int, intensity: Float) {
+            val existing = getClipFilterState(clipId)
+            clipFilterStates[clipId] = existing.copy(effectPresetId = presetId, effectIntensity = intensity)
+        }
+
+        fun syncFilterStates(states: Map<String, ClipFilterState>) {
+            clipFilterStates.clear()
+            clipFilterStates.putAll(states)
         }
 
         fun packBackground(bg: ClipBackground, outParams: FloatArray): Int {

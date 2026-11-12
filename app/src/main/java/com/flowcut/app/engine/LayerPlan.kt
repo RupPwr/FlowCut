@@ -57,6 +57,8 @@ data class OverlayItem(
     val intrinsicHeight: Int = 0,
     val filterPresetId: Int = 0,
     val filterIntensity: Float = 1.0f,
+    val effectPresetId: Int = 0,
+    val effectIntensity: Float = 1.0f,
     val audioSubType: Int = 0,
     val volume: Float = 1.0f,
     val fadeInUs: Long = 0L,
