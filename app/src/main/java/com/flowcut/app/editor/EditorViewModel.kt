@@ -1142,6 +1142,74 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return true
     }
 
+    // Phase 7: Advanced GPU Tools (Mask, Crop, Cutout / Chroma Key)
+    fun liveUpdatePipMask(itemId: String, maskType: Int, maskFeather: Float, maskInvert: Boolean) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        _layerItems[idx] = cur.copy(
+            maskType = maskType,
+            maskFeather = maskFeather,
+            maskInvert = maskInvert
+        )
+        syncLayerPlan()
+    }
+
+    fun updatePipMask(itemId: String, maskType: Int, maskFeather: Float, maskInvert: Boolean): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        return updateLayerItem(item.copy(
+            maskType = maskType,
+            maskFeather = maskFeather,
+            maskInvert = maskInvert
+        ))
+    }
+
+    fun liveUpdatePipCrop(itemId: String, cropLeft: Float, cropTop: Float, cropRight: Float, cropBottom: Float) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        _layerItems[idx] = cur.copy(
+            cropLeft = cropLeft,
+            cropTop = cropTop,
+            cropRight = cropRight,
+            cropBottom = cropBottom
+        )
+        syncLayerPlan()
+    }
+
+    fun updatePipCrop(itemId: String, cropLeft: Float, cropTop: Float, cropRight: Float, cropBottom: Float): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        return updateLayerItem(item.copy(
+            cropLeft = cropLeft,
+            cropTop = cropTop,
+            cropRight = cropRight,
+            cropBottom = cropBottom
+        ))
+    }
+
+    fun liveUpdatePipCutout(itemId: String, chromaEnabled: Boolean, chromaColorArgb: Int, chromaThreshold: Float, chromaBlend: Float) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return
+        val cur = _layerItems[idx]
+        _layerItems[idx] = cur.copy(
+            chromaEnabled = chromaEnabled,
+            chromaColorArgb = chromaColorArgb,
+            chromaThreshold = chromaThreshold,
+            chromaBlend = chromaBlend
+        )
+        syncLayerPlan()
+    }
+
+    fun updatePipCutout(itemId: String, chromaEnabled: Boolean, chromaColorArgb: Int, chromaThreshold: Float, chromaBlend: Float): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        return updateLayerItem(item.copy(
+            chromaEnabled = chromaEnabled,
+            chromaColorArgb = chromaColorArgb,
+            chromaThreshold = chromaThreshold,
+            chromaBlend = chromaBlend
+        ))
+    }
+
     fun copyLayerItem(itemId: String): OverlayItem? {
         val existing = _layerItems.firstOrNull { it.id == itemId } ?: return null
         if (!canAddLayer(_layerItems, existing.type)) return null

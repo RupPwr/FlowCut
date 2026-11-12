@@ -738,7 +738,18 @@ class ExportEngine(private val context: Context) {
                                     transform = effTransform,
                                     opacity = effTransform.opacity,
                                     displayWidth = EXPORT_W,
-                                    displayHeight = EXPORT_H
+                                    displayHeight = EXPORT_H,
+                                    cropLeft = item.cropLeft,
+                                    cropTop = item.cropTop,
+                                    cropRight = item.cropRight,
+                                    cropBottom = item.cropBottom,
+                                    maskType = item.maskType,
+                                    maskFeather = item.maskFeather,
+                                    maskInvert = item.maskInvert,
+                                    chromaEnabled = item.chromaEnabled,
+                                    chromaColorArgb = item.chromaColorArgb,
+                                    chromaThreshold = item.chromaThreshold,
+                                    chromaBlend = item.chromaBlend
                                 )
                             }
                         }

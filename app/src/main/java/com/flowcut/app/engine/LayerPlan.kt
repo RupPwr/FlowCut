@@ -67,7 +67,19 @@ data class OverlayItem(
     val speed: Float = 1.0f,
     val sourceInUs: Long = 0L,
     val naturalDurationUs: Long = 0L,
-    val keyframes: List<OverlayKeyframe> = emptyList()
+    val keyframes: List<OverlayKeyframe> = emptyList(),
+    // Phase 7: Advanced GPU Tools (Mask, Crop, Chroma Cutout)
+    val maskType: Int = 0, // 0 = None, 1 = Circle, 2 = Rounded Rect, 3 = Heart, 4 = Star, 5 = Linear Split, 6 = Mirror Band
+    val maskFeather: Float = 0.05f, // 0.0f..0.5f soft edge feathering
+    val maskInvert: Boolean = false,
+    val cropLeft: Float = 0.0f,
+    val cropTop: Float = 0.0f,
+    val cropRight: Float = 1.0f,
+    val cropBottom: Float = 1.0f,
+    val chromaEnabled: Boolean = false,
+    val chromaColorArgb: Int = 0xFF00FF00.toInt(), // Default green screen #00FF00
+    val chromaThreshold: Float = 0.25f, // 0.0f..0.8f
+    val chromaBlend: Float = 0.10f // 0.01f..0.4f
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L

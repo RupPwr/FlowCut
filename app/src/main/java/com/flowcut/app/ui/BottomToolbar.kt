@@ -30,8 +30,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.CropOriginal
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEmotions
@@ -117,6 +120,9 @@ fun BottomToolbar(
     onFontClick: () -> Unit = {},
     onColorClick: () -> Unit = {},
     onAnimationClick: () -> Unit = {},
+    onPipCutoutClick: () -> Unit = {},
+    onPipMaskClick: () -> Unit = {},
+    onPipCropClick: () -> Unit = {},
     onFilterClick: () -> Unit = {},
     onEffectClick: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -191,7 +197,10 @@ fun BottomToolbar(
                 onSpeedClick = onSpeedClick,
                 onCopyClick = onCopyClick,
                 onRotateClick = onRotateClick,
-                onFlipClick = onFlipClick
+                onFlipClick = onFlipClick,
+                onCutoutClick = onPipCutoutClick,
+                onMaskClick = onPipMaskClick,
+                onCropClick = onPipCropClick
             )
         } else if (isAudioActive) {
             AudioToolbarContent(
@@ -1244,7 +1253,10 @@ private fun PipToolbarContent(
     onSpeedClick: () -> Unit,
     onCopyClick: () -> Unit,
     onRotateClick: () -> Unit,
-    onFlipClick: () -> Unit
+    onFlipClick: () -> Unit,
+    onCutoutClick: () -> Unit = {},
+    onMaskClick: () -> Unit = {},
+    onCropClick: () -> Unit = {}
 ) {
     val colors = FlowCutTheme.colors
     val itemToolsEnabled = isPipItemSelected
@@ -1280,7 +1292,7 @@ private fun PipToolbarContent(
                         .background(colors.border)
                 )
 
-                // Actions: ADD, ANIMATION, OPACITY, SPLIT, DELETE, COPY, ROTATE, FLIP
+                // Actions: ADD, ANIMATION, CUTOUT, SPLIT, MASK, DELETE, CROP, OPACITY, VOLUME, SPEED, COPY, ROTATE, FLIP
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -1347,26 +1359,26 @@ private fun PipToolbarContent(
                         )
                     }
 
-                    // 3. OPACITY
+                    // 3. CUTOUT / CHROMA KEY
                     Column(
                         modifier = Modifier
                             .widthIn(min = 52.dp)
                             .fillMaxHeight()
                             .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
-                            .then(if (itemToolsEnabled) Modifier.clickable { onOpacityClick() } else Modifier)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onCutoutClick() } else Modifier)
                             .padding(horizontal = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Opacity,
-                            contentDescription = "OPACITY",
+                            imageVector = Icons.Default.AutoFixHigh,
+                            contentDescription = "CUTOUT",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "OPACITY",
+                            text = "CUTOUT",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -1376,65 +1388,7 @@ private fun PipToolbarContent(
                         )
                     }
 
-                    // 4. VOLUME
-                    Column(
-                        modifier = Modifier
-                            .widthIn(min = 52.dp)
-                            .fillMaxHeight()
-                            .alpha(if (volumeSpeedEnabled) 1.0f else 0.35f)
-                            .then(if (volumeSpeedEnabled) Modifier.clickable { onVolumeClick() } else Modifier)
-                            .padding(horizontal = 2.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                            contentDescription = "VOLUME",
-                            tint = colors.textPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "VOLUME",
-                            color = colors.textPrimary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    // 5. SPEED
-                    Column(
-                        modifier = Modifier
-                            .widthIn(min = 52.dp)
-                            .fillMaxHeight()
-                            .alpha(if (volumeSpeedEnabled) 1.0f else 0.35f)
-                            .then(if (volumeSpeedEnabled) Modifier.clickable { onSpeedClick() } else Modifier)
-                            .padding(horizontal = 2.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Speed,
-                            contentDescription = "SPEED",
-                            tint = colors.textPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "SPEED",
-                            color = colors.textPrimary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    // 6. SPLIT
+                    // 4. SPLIT
                     Column(
                         modifier = Modifier
                             .widthIn(min = 52.dp)
@@ -1463,7 +1417,36 @@ private fun PipToolbarContent(
                         )
                     }
 
-                    // 5. DELETE
+                    // 5. MASK
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onMaskClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CropOriginal,
+                            contentDescription = "MASK",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "MASK",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 6. DELETE
                     Column(
                         modifier = Modifier
                             .widthIn(min = 52.dp)
@@ -1483,6 +1466,122 @@ private fun PipToolbarContent(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "DELETE",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 7. CROP
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onCropClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Crop,
+                            contentDescription = "CROP",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "CROP",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 8. OPACITY
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (itemToolsEnabled) 1.0f else 0.35f)
+                            .then(if (itemToolsEnabled) Modifier.clickable { onOpacityClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Opacity,
+                            contentDescription = "OPACITY",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "OPACITY",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 9. VOLUME
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (volumeSpeedEnabled) 1.0f else 0.35f)
+                            .then(if (volumeSpeedEnabled) Modifier.clickable { onVolumeClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = "VOLUME",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "VOLUME",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 10. SPEED
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (volumeSpeedEnabled) 1.0f else 0.35f)
+                            .then(if (volumeSpeedEnabled) Modifier.clickable { onSpeedClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = "SPEED",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "SPEED",
                             color = colors.textPrimary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,

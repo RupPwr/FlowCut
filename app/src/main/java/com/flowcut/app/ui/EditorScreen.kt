@@ -176,7 +176,9 @@ private fun hitTestPreviewOverlays(
             com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
                 val tw = if (item.intrinsicWidth > 0) item.intrinsicWidth.toFloat() else 1f
                 val th = if (item.intrinsicHeight > 0) item.intrinsicHeight.toFloat() else 1f
-                (tw / th).coerceIn(0.01f, 100f)
+                val cropW = (item.cropRight - item.cropLeft).coerceIn(0.01f, 1.0f)
+                val cropH = (item.cropBottom - item.cropTop).coerceIn(0.01f, 1.0f)
+                ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
             }
             else -> 1.0f
         }
@@ -631,6 +633,9 @@ fun EditorScreen(
     var isAudioFadeSheetVisible by remember { mutableStateOf(false) }
     var isAudioVolumeSheetVisible by remember { mutableStateOf(false) }
     var isAudioSpeedSheetVisible by remember { mutableStateOf(false) }
+    var isPipMaskSheetVisible by remember { mutableStateOf(false) }
+    var isPipCropSheetVisible by remember { mutableStateOf(false) }
+    var isPipCutoutSheetVisible by remember { mutableStateOf(false) }
     var isFilterSheetVisible by remember { mutableStateOf(false) }
     var isEffectSheetVisible by remember { mutableStateOf(false) }
     var filterTargetOverlayId by remember { mutableStateOf<String?>(null) }
@@ -1609,7 +1614,9 @@ fun EditorScreen(
                                                 com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
                                                     val tw = if (activeOverlay.intrinsicWidth > 0) activeOverlay.intrinsicWidth.toFloat() else 1f
                                                     val th = if (activeOverlay.intrinsicHeight > 0) activeOverlay.intrinsicHeight.toFloat() else 1f
-                                                    (tw / th).coerceIn(0.01f, 100f)
+                                                    val cropW = (activeOverlay.cropRight - activeOverlay.cropLeft).coerceIn(0.01f, 1.0f)
+                                                    val cropH = (activeOverlay.cropBottom - activeOverlay.cropTop).coerceIn(0.01f, 1.0f)
+                                                    ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
                                                 }
                                                 else -> 1.0f
                                             }
@@ -2028,7 +2035,9 @@ fun EditorScreen(
                                                 com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
                                                     val tw = if (activeOverlay.intrinsicWidth > 0) activeOverlay.intrinsicWidth.toFloat() else 1f
                                                     val th = if (activeOverlay.intrinsicHeight > 0) activeOverlay.intrinsicHeight.toFloat() else 1f
-                                                    (tw / th).coerceIn(0.01f, 100f)
+                                                    val cropW = (activeOverlay.cropRight - activeOverlay.cropLeft).coerceIn(0.01f, 1.0f)
+                                                    val cropH = (activeOverlay.cropBottom - activeOverlay.cropTop).coerceIn(0.01f, 1.0f)
+                                                    ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
                                                 }
                                                 else -> 1.0f
                                             }
@@ -2613,6 +2622,36 @@ fun EditorScreen(
                         effectIsNewItem = false
                         isEffectSheetVisible = true
                     }
+                },
+                onPipCutoutClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isPipMaskSheetVisible = false
+                    isPipCropSheetVisible = false
+                    isPipCutoutSheetVisible = true
+                },
+                onPipMaskClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isPipCutoutSheetVisible = false
+                    isPipCropSheetVisible = false
+                    isPipMaskSheetVisible = true
+                },
+                onPipCropClick = {
+                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        onPlaybackStateChange(false)
+                    }
+                    isPipCutoutSheetVisible = false
+                    isPipMaskSheetVisible = false
+                    isPipCropSheetVisible = true
                 },
                 onAddOverlayClick = openOverlayPicker,
                 onAudioClick = {
@@ -3248,6 +3287,20 @@ fun EditorScreen(
             )
         }
 
+        // PIP Advanced GPU Tools BottomSheets (Phase 7: Mask, Crop, Cutout)
+        PipAdvancedSheetsHost(
+            isMaskVisible = isPipMaskSheetVisible,
+            isCropVisible = isPipCropSheetVisible,
+            isCutoutVisible = isPipCutoutSheetVisible,
+            selectedOverlayId = vmUiState?.selectedOverlayId,
+            resolvedViewModel = resolvedViewModel,
+            previewRenderer = previewRenderer,
+            onWakeFrameDriver = { frameDriver.wake() },
+            onDismissMask = { isPipMaskSheetVisible = false },
+            onDismissCrop = { isPipCropSheetVisible = false },
+            onDismissCutout = { isPipCutoutSheetVisible = false }
+        )
+
         // Opacity BottomSheet (0% to 100%) for selected clip
         if (isOpacitySheetVisible && selectedClipIndex != null) {
             OpacitySheet(
@@ -3276,434 +3329,72 @@ fun EditorScreen(
             )
         }
 
-        // Opacity BottomSheet (0% to 100%) for selected overlay item
-        if (isOpacitySheetVisible && selectedClipIndex == null && vmUiState?.selectedOverlayId != null) {
-            val activeOverlayId = vmUiState.selectedOverlayId
-            val activeOverlay = resolvedViewModel?.getOverlayItem(activeOverlayId)
-            if (activeOverlay != null) {
-                val origOpacity = remember(activeOverlayId) { activeOverlay.transform.opacity }
-                var sliderOpacity by remember(activeOverlayId) { mutableFloatStateOf(origOpacity) }
-                var isCommitted by remember { mutableStateOf(false) }
+        // Opacity BottomSheet for selected overlay item
+        OverlayOpacitySheetHost(
+            isOpacitySheetVisible = isOpacitySheetVisible,
+            selectedClipIndex = selectedClipIndex,
+            selectedOverlayId = vmUiState?.selectedOverlayId,
+            resolvedViewModel = resolvedViewModel,
+            previewRenderer = previewRenderer,
+            onWakeFrameDriver = { frameDriver.wake() },
+            onDismiss = { isOpacitySheetVisible = false }
+        )
 
-                BackHandler {
-                    if (!isCommitted) {
-                        resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                    }
-                    isOpacitySheetVisible = false
-                }
-
-                DisposableEffect(activeOverlayId) {
-                    onDispose {
-                        if (!isCommitted) {
-                            resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
-                            previewRenderer.requestRender()
-                            frameDriver.wake()
-                        }
-                    }
-                }
-
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.BottomCenter)
-                        .windowInsetsPadding(WindowInsets.navigationBars),
-                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                    color = colors.surface1,
-                    shadowElevation = 16.dp,
-                    border = BorderStroke(1.dp, colors.border)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 16.dp)
-                    ) {
-                        // Header: Close (✕), Title + live %, Reset (100%), Done (✓)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            IconButton(
-                                onClick = {
-                                    resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
-                                    previewRenderer.requestRender()
-                                    frameDriver.wake()
-                                    isOpacitySheetVisible = false
-                                },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Close",
-                                    tint = colors.textSecondary
-                                )
-                            }
-
-                            val percent = (sliderOpacity * 100f).roundToInt()
-                            Text(
-                                text = "Opacity $percent%",
-                                color = colors.textPrimary,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                TextButton(
-                                    onClick = {
-                                        sliderOpacity = 1.0f
-                                        resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, 1.0f)
-                                        previewRenderer.requestRender()
-                                        frameDriver.wake()
-                                    }
-                                ) {
-                                    Text(
-                                        text = "Reset",
-                                        color = colors.accent,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-
-                                IconButton(
-                                    onClick = {
-                                        isCommitted = true
-                                        resolvedViewModel?.commitOverlayOpacity(activeOverlayId, sliderOpacity)
-                                        previewRenderer.requestRender()
-                                        frameDriver.wake()
-                                        isOpacitySheetVisible = false
-                                    },
-                                    modifier = Modifier.size(36.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = "Done",
-                                        tint = colors.accent
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        // Slider: 0% to 100%
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "0%",
-                                color = colors.textSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Slider(
-                                value = sliderOpacity,
-                                onValueChange = { newOp ->
-                                    sliderOpacity = newOp
-                                    resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, newOp)
-                                    previewRenderer.requestRender()
-                                    frameDriver.wake()
-                                },
-                                onValueChangeFinished = {
-                                    resolvedViewModel?.commitOverlayOpacity(activeOverlayId, sliderOpacity)
-                                    previewRenderer.requestRender()
-                                    frameDriver.wake()
-                                },
-                                valueRange = 0.0f..1.0f,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = colors.accent,
-                                    activeTrackColor = colors.accent,
-                                    inactiveTrackColor = colors.surface2
-                                ),
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Text(
-                                text = "100%",
-                                color = colors.textSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Text Editor BottomSheet (Phase 3 Overlays)
-        if (isTextSheetVisible && editingTextOverlayId != null) {
-            val targetId = editingTextOverlayId!!
-            val textItem = resolvedViewModel?.getOverlayItem(targetId)
-            if (textItem != null) {
-                val origText = remember(targetId) { textItem.text }
-                val origColor = remember(targetId) { textItem.textColorArgb }
-                val origStyle = remember(targetId) { textItem.bgStyle }
-
-                TextEditorSheet(
-                    initialText = textItem.text,
-                    initialColorArgb = textItem.textColorArgb,
-                    initialBgStyle = textItem.bgStyle,
-                    onLiveChange = { txt, col, sty ->
-                        resolvedViewModel?.liveUpdateTextOverlay(targetId, txt, col, sty)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                    },
-                    onDone = { txt, col, sty ->
-                        resolvedViewModel?.updateTextOverlay(targetId, txt, col, sty)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextSheetVisible = false
-                        editingTextOverlayId = null
-                        isNewTextOverlay = false
-                    },
-                    onCancel = {
-                        if (isNewTextOverlay) {
-                            resolvedViewModel?.removeLayerItem(targetId)
-                        } else {
-                            resolvedViewModel?.liveUpdateTextOverlay(targetId, origText, origColor, origStyle)
-                        }
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextSheetVisible = false
-                        editingTextOverlayId = null
-                        isNewTextOverlay = false
-                    }
-                )
-            } else {
+        // Text & Sticker BottomSheets (Phase 3 Typography Suite)
+        TextAndStickerSheetsHost(
+            isTextSheetVisible = isTextSheetVisible,
+            editingTextOverlayId = editingTextOverlayId,
+            isNewTextOverlay = isNewTextOverlay,
+            isStickerSheetVisible = isStickerSheetVisible,
+            isTextColorSheetVisible = isTextColorSheetVisible,
+            isTextFontSheetVisible = isTextFontSheetVisible,
+            isTextAnimationSheetVisible = isTextAnimationSheetVisible,
+            isTextAdjustSheetVisible = isTextAdjustSheetVisible,
+            activeTextOverlayId = activeTextOverlayId,
+            customFontPaths = customFontPaths,
+            playheadUs = playbackController.playhead.timeUs,
+            resolvedViewModel = resolvedViewModel,
+            previewRenderer = previewRenderer,
+            onWakeFrameDriver = { frameDriver.wake() },
+            onCloseTextEditor = {
                 isTextSheetVisible = false
                 editingTextOverlayId = null
                 isNewTextOverlay = false
-            }
-        }
-
-        // Sticker Picker BottomSheet (Phase 3 Overlays)
-        if (isStickerSheetVisible) {
-            StickerPickerSheet(
-                onSelectSticker = { glyph ->
-                    val playheadUs = playbackController.playhead.timeUs
-                    resolvedViewModel?.addStickerOverlay(glyph, playheadUs, 3_000_000L)
-                    previewRenderer.requestRender()
-                    frameDriver.wake()
-                    isStickerSheetVisible = false
-                },
-                onAddImageClick = {
-                    isStickerSheetVisible = false
+            },
+            onCloseStickerPicker = { isStickerSheetVisible = false },
+            onPickStickerImage = {
+                try {
+                    stickerImagePickerLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                } catch (_: Exception) {
                     try {
-                        stickerImagePickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
+                        overlayFallbackLauncher.launch("image/*")
                     } catch (_: Exception) {
-                        try {
-                            overlayFallbackLauncher.launch("image/*")
-                        } catch (_: Exception) {
-                            Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
-                        }
+                        Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
                     }
-                },
-                onDismiss = { isStickerSheetVisible = false }
-            )
-        }
-
-        // Text Color BottomSheet (Phase 3 Typography Suite)
-        if (isTextColorSheetVisible && activeTextOverlayId != null) {
-            val targetId = activeTextOverlayId!!
-            val textItem = resolvedViewModel?.getOverlayItem(targetId)
-            if (textItem != null) {
-                val origTextColor = remember(targetId) { textItem.textColorArgb }
-                val origTextAlpha = remember(targetId) { textItem.textAlpha }
-                val origLabelColor = remember(targetId) { textItem.labelColorArgb }
-                val origLabelAlpha = remember(targetId) { textItem.labelAlpha }
-                val origBorderColor = remember(targetId) { textItem.borderColorArgb }
-                val origBorderAlpha = remember(targetId) { textItem.borderAlpha }
-                val origShadowColor = remember(targetId) { textItem.shadowColorArgb }
-                val origShadowAlpha = remember(targetId) { textItem.shadowAlpha }
-
-                TextColorSheet(
-                    initialTextColor = textItem.textColorArgb,
-                    initialTextAlpha = textItem.textAlpha,
-                    initialLabelColor = textItem.labelColorArgb,
-                    initialLabelAlpha = textItem.labelAlpha,
-                    initialBorderColor = textItem.borderColorArgb,
-                    initialBorderAlpha = textItem.borderAlpha,
-                    initialShadowColor = textItem.shadowColorArgb,
-                    initialShadowAlpha = textItem.shadowAlpha,
-                    onLiveChange = { tc, ta, lc, la, bc, ba, sc, sa ->
-                        resolvedViewModel?.liveUpdateTextColorAndAlpha(targetId, tc, ta, lc, la, bc, ba, sc, sa)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                    },
-                    onDone = { tc, ta, lc, la, bc, ba, sc, sa ->
-                        resolvedViewModel?.updateTextColorAndAlpha(targetId, tc, ta, lc, la, bc, ba, sc, sa)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextColorSheetVisible = false
-                        activeTextOverlayId = null
-                    },
-                    onCancel = {
-                        resolvedViewModel?.liveUpdateTextColorAndAlpha(
-                            targetId,
-                            origTextColor, origTextAlpha,
-                            origLabelColor, origLabelAlpha,
-                            origBorderColor, origBorderAlpha,
-                            origShadowColor, origShadowAlpha
-                        )
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextColorSheetVisible = false
-                        activeTextOverlayId = null
-                    }
-                )
-            } else {
+                }
+            },
+            onCloseTextColor = {
                 isTextColorSheetVisible = false
                 activeTextOverlayId = null
-            }
-        }
-
-        // Text Font BottomSheet (Phase 3 Typography Suite)
-        if (isTextFontSheetVisible && activeTextOverlayId != null) {
-            val targetId = activeTextOverlayId!!
-            val textItem = resolvedViewModel?.getOverlayItem(targetId)
-            if (textItem != null) {
-                val origFontName = remember(targetId) { textItem.fontName }
-                val origCustomPath = remember(targetId) { textItem.customFontPath }
-
-                TextFontSheet(
-                    initialFontName = textItem.fontName,
-                    initialCustomFontPath = textItem.customFontPath,
-                    customFonts = customFontPaths,
-                    onPickCustomFont = {
-                        fontPickerLauncher.launch(arrayOf("font/*", "application/x-font-ttf", "application/x-font-otf", "*/*"))
-                    },
-                    onLiveChange = { fontName, customFontPath ->
-                        resolvedViewModel?.updateTextFont(targetId, fontName, customFontPath)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                    },
-                    onDone = { fontName, customFontPath ->
-                        resolvedViewModel?.updateTextFont(targetId, fontName, customFontPath)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextFontSheetVisible = false
-                        activeTextOverlayId = null
-                    },
-                    onCancel = {
-                        resolvedViewModel?.updateTextFont(targetId, origFontName, origCustomPath)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextFontSheetVisible = false
-                        activeTextOverlayId = null
-                    }
-                )
-            } else {
+            },
+            onCloseTextFont = {
                 isTextFontSheetVisible = false
                 activeTextOverlayId = null
-            }
-        }
-
-        // Text Animation BottomSheet (Phase 3 Typography Suite)
-        if (isTextAnimationSheetVisible && activeTextOverlayId != null) {
-            val targetId = activeTextOverlayId!!
-            val textItem = resolvedViewModel?.getOverlayItem(targetId)
-            if (textItem != null) {
-                val origInType = remember(targetId) { textItem.animInType }
-                val origInDur = remember(targetId) { textItem.animInDurationUs }
-                val origOutType = remember(targetId) { textItem.animOutType }
-                val origOutDur = remember(targetId) { textItem.animOutDurationUs }
-                val origLoopType = remember(targetId) { textItem.animLoopType }
-
-                TextAnimationSheet(
-                    initialAnimInType = textItem.animInType,
-                    initialAnimInDurationUs = textItem.animInDurationUs,
-                    initialAnimOutType = textItem.animOutType,
-                    initialAnimOutDurationUs = textItem.animOutDurationUs,
-                    initialAnimLoopType = textItem.animLoopType,
-                    onLiveChange = { inType, inDur, outType, outDur, loopType ->
-                        resolvedViewModel?.liveUpdateTextAnimation(targetId, inType, inDur, outType, outDur, loopType)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                    },
-                    onDone = { inType, inDur, outType, outDur, loopType ->
-                        resolvedViewModel?.updateTextAnimation(targetId, inType, inDur, outType, outDur, loopType)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextAnimationSheetVisible = false
-                        activeTextOverlayId = null
-                    },
-                    onCancel = {
-                        resolvedViewModel?.liveUpdateTextAnimation(targetId, origInType, origInDur, origOutType, origOutDur, origLoopType)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextAnimationSheetVisible = false
-                        activeTextOverlayId = null
-                    }
-                )
-            } else {
+            },
+            onPickCustomFont = {
+                fontPickerLauncher.launch(arrayOf("font/*", "application/x-font-ttf", "application/x-font-otf", "*/*"))
+            },
+            onCloseTextAnimation = {
                 isTextAnimationSheetVisible = false
                 activeTextOverlayId = null
-            }
-        }
-
-        // Text Adjust BottomSheet (Phase 3 Typography Suite)
-        if (isTextAdjustSheetVisible && activeTextOverlayId != null) {
-            val targetId = activeTextOverlayId!!
-            val textItem = resolvedViewModel?.getOverlayItem(targetId)
-            if (textItem != null) {
-                val origAlign = remember(targetId) { textItem.textAlign }
-                val origLetter = remember(targetId) { textItem.letterSpacing }
-                val origLine = remember(targetId) { textItem.lineSpacing }
-                val origAlpha = remember(targetId) { textItem.textAlpha }
-                val origBold = remember(targetId) { textItem.isBold }
-                val origItalic = remember(targetId) { textItem.isItalic }
-                val origUnderline = remember(targetId) { textItem.isUnderline }
-                val origUppercase = remember(targetId) { textItem.isUppercase }
-
-                TextAdjustSheet(
-                    initialTextAlign = textItem.textAlign,
-                    initialLetterSpacing = textItem.letterSpacing,
-                    initialLineSpacing = textItem.lineSpacing,
-                    initialTextAlpha = textItem.textAlpha,
-                    initialIsBold = textItem.isBold,
-                    initialIsItalic = textItem.isItalic,
-                    initialIsUnderline = textItem.isUnderline,
-                    initialIsUppercase = textItem.isUppercase,
-                    onLiveChange = { align, letter, line, alpha, bold, italic, underline, uppercase ->
-                        resolvedViewModel?.liveUpdateTextAdjust(targetId, align, letter, line, alpha, bold, italic, underline, uppercase)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                    },
-                    onDone = { align, letter, line, alpha, bold, italic, underline, uppercase ->
-                        resolvedViewModel?.updateTextAdjust(targetId, align, letter, line, alpha, bold, italic, underline, uppercase)
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextAdjustSheetVisible = false
-                        activeTextOverlayId = null
-                    },
-                    onCancel = {
-                        resolvedViewModel?.liveUpdateTextAdjust(
-                            targetId,
-                            origAlign, origLetter, origLine, origAlpha,
-                            origBold, origItalic, origUnderline, origUppercase
-                        )
-                        previewRenderer.requestRender()
-                        frameDriver.wake()
-                        isTextAdjustSheetVisible = false
-                        activeTextOverlayId = null
-                    }
-                )
-            } else {
+            },
+            onCloseTextAdjust = {
                 isTextAdjustSheetVisible = false
                 activeTextOverlayId = null
             }
-        }
+        )
 
         // Overlapping Layer Conflict Picker Dialog (Matching reference image_2d9184.png)
         if (overlappingConflictItemIds != null) {
@@ -5827,5 +5518,559 @@ private fun TransportControlsRow(
                 }
             }
         )
+    }
+}
+
+/**
+ * Dedicated Host for PIP Advanced GPU Tools BottomSheets (Phase 7: Mask, Crop, Cutout / Chroma Key).
+ * Isolated into a separate composable method to avoid JVM 64KB MethodTooLargeException in EditorScreen.
+ */
+@Composable
+private fun PipAdvancedSheetsHost(
+    isMaskVisible: Boolean,
+    isCropVisible: Boolean,
+    isCutoutVisible: Boolean,
+    selectedOverlayId: String?,
+    resolvedViewModel: com.flowcut.app.editor.EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    onWakeFrameDriver: () -> Unit,
+    onDismissMask: () -> Unit,
+    onDismissCrop: () -> Unit,
+    onDismissCutout: () -> Unit
+) {
+    if (selectedOverlayId == null) return
+    val overlayItem = resolvedViewModel?.getOverlayItem(selectedOverlayId) ?: return
+
+    if (isMaskVisible) {
+        val origMaskType = remember(selectedOverlayId) { overlayItem.maskType }
+        val origMaskFeather = remember(selectedOverlayId) { overlayItem.maskFeather }
+        val origMaskInvert = remember(selectedOverlayId) { overlayItem.maskInvert }
+        PipMaskSheet(
+            initialMaskType = overlayItem.maskType,
+            initialMaskFeather = overlayItem.maskFeather,
+            initialMaskInvert = overlayItem.maskInvert,
+            onLiveChange = { maskType, feather, invert ->
+                resolvedViewModel?.liveUpdatePipMask(selectedOverlayId, maskType, feather, invert)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+            },
+            onDone = { maskType, feather, invert ->
+                resolvedViewModel?.updatePipMask(selectedOverlayId, maskType, feather, invert)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onDismissMask()
+            },
+            onCancel = {
+                resolvedViewModel?.liveUpdatePipMask(selectedOverlayId, origMaskType, origMaskFeather, origMaskInvert)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onDismissMask()
+            }
+        )
+    }
+
+    if (isCropVisible) {
+        val origLeft = remember(selectedOverlayId) { overlayItem.cropLeft }
+        val origTop = remember(selectedOverlayId) { overlayItem.cropTop }
+        val origRight = remember(selectedOverlayId) { overlayItem.cropRight }
+        val origBottom = remember(selectedOverlayId) { overlayItem.cropBottom }
+        PipCropSheet(
+            initialCropLeft = overlayItem.cropLeft,
+            initialCropTop = overlayItem.cropTop,
+            initialCropRight = overlayItem.cropRight,
+            initialCropBottom = overlayItem.cropBottom,
+            intrinsicWidth = overlayItem.intrinsicWidth,
+            intrinsicHeight = overlayItem.intrinsicHeight,
+            onLiveChange = { left, top, right, bottom ->
+                resolvedViewModel?.liveUpdatePipCrop(selectedOverlayId, left, top, right, bottom)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+            },
+            onDone = { left, top, right, bottom ->
+                resolvedViewModel?.updatePipCrop(selectedOverlayId, left, top, right, bottom)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onDismissCrop()
+            },
+            onCancel = {
+                resolvedViewModel?.liveUpdatePipCrop(selectedOverlayId, origLeft, origTop, origRight, origBottom)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onDismissCrop()
+            }
+        )
+    }
+
+    if (isCutoutVisible) {
+        val origEnabled = remember(selectedOverlayId) { overlayItem.chromaEnabled }
+        val origColor = remember(selectedOverlayId) { overlayItem.chromaColorArgb }
+        val origThreshold = remember(selectedOverlayId) { overlayItem.chromaThreshold }
+        val origBlend = remember(selectedOverlayId) { overlayItem.chromaBlend }
+        PipCutoutSheet(
+            initialChromaEnabled = overlayItem.chromaEnabled,
+            initialChromaColorArgb = overlayItem.chromaColorArgb,
+            initialChromaThreshold = overlayItem.chromaThreshold,
+            initialChromaBlend = overlayItem.chromaBlend,
+            onLiveChange = { enabled, colorArgb, threshold, blend ->
+                resolvedViewModel?.liveUpdatePipCutout(selectedOverlayId, enabled, colorArgb, threshold, blend)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+            },
+            onDone = { enabled, colorArgb, threshold, blend ->
+                resolvedViewModel?.updatePipCutout(selectedOverlayId, enabled, colorArgb, threshold, blend)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onDismissCutout()
+            },
+            onCancel = {
+                resolvedViewModel?.liveUpdatePipCutout(selectedOverlayId, origEnabled, origColor, origThreshold, origBlend)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onDismissCutout()
+            }
+        )
+    }
+}
+
+/**
+ * Dedicated Host for Overlay Opacity BottomSheet.
+ * Isolated into a separate composable method to avoid JVM 64KB MethodTooLargeException in EditorScreen.
+ */
+@Composable
+private fun OverlayOpacitySheetHost(
+    isOpacitySheetVisible: Boolean,
+    selectedClipIndex: Int?,
+    selectedOverlayId: String?,
+    resolvedViewModel: com.flowcut.app.editor.EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    onWakeFrameDriver: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    if (!isOpacitySheetVisible || selectedClipIndex != null || selectedOverlayId == null) return
+    val activeOverlayId = selectedOverlayId
+    val activeOverlay = resolvedViewModel?.getOverlayItem(activeOverlayId) ?: return
+
+    val colors = FlowCutTheme.colors
+    val origOpacity = remember(activeOverlayId) { activeOverlay.transform.opacity }
+    var sliderOpacity by remember(activeOverlayId) { mutableFloatStateOf(origOpacity) }
+    var isCommitted by remember { mutableStateOf(false) }
+
+    BackHandler {
+        if (!isCommitted) {
+            resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
+            previewRenderer.requestRender()
+            onWakeFrameDriver()
+        }
+        onDismiss()
+    }
+
+    DisposableEffect(activeOverlayId) {
+        onDispose {
+            if (!isCommitted) {
+                resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars),
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            color = colors.surface1,
+            shadowElevation = 16.dp,
+            border = BorderStroke(1.dp, colors.border)
+        ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp)
+        ) {
+            // Header: Close (✕), Title + live %, Reset (100%), Done (✓)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = {
+                        resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, origOpacity)
+                        previewRenderer.requestRender()
+                        onWakeFrameDriver()
+                        onDismiss()
+                    },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = colors.textSecondary
+                    )
+                }
+
+                val percent = (sliderOpacity * 100f).roundToInt()
+                Text(
+                    text = "Opacity $percent%",
+                    color = colors.textPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = {
+                            sliderOpacity = 1.0f
+                            resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, 1.0f)
+                            previewRenderer.requestRender()
+                            onWakeFrameDriver()
+                        }
+                    ) {
+                        Text(
+                            text = "Reset",
+                            color = colors.accent,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            isCommitted = true
+                            resolvedViewModel?.commitOverlayOpacity(activeOverlayId, sliderOpacity)
+                            previewRenderer.requestRender()
+                            onWakeFrameDriver()
+                            onDismiss()
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Done",
+                            tint = colors.accent
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Slider: 0% to 100%
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "0%",
+                    color = colors.textSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Slider(
+                    value = sliderOpacity,
+                    onValueChange = { newOp ->
+                        sliderOpacity = newOp
+                        resolvedViewModel?.setOverlayOpacityLive(activeOverlayId, newOp)
+                        previewRenderer.requestRender()
+                        onWakeFrameDriver()
+                    },
+                    onValueChangeFinished = {
+                        resolvedViewModel?.commitOverlayOpacity(activeOverlayId, sliderOpacity)
+                        previewRenderer.requestRender()
+                        onWakeFrameDriver()
+                    },
+                    valueRange = 0.0f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accent,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.surface2
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Text(
+                    text = "100%",
+                    color = colors.textSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+}
+
+/**
+ * Dedicated Host for Text & Sticker BottomSheets (Phase 3 Typography Suite).
+ * Isolated into a separate composable method to avoid JVM 64KB MethodTooLargeException in EditorScreen.
+ */
+@Composable
+private fun TextAndStickerSheetsHost(
+    isTextSheetVisible: Boolean,
+    editingTextOverlayId: String?,
+    isNewTextOverlay: Boolean,
+    isStickerSheetVisible: Boolean,
+    isTextColorSheetVisible: Boolean,
+    isTextFontSheetVisible: Boolean,
+    isTextAnimationSheetVisible: Boolean,
+    isTextAdjustSheetVisible: Boolean,
+    activeTextOverlayId: String?,
+    customFontPaths: List<String>,
+    playheadUs: Long,
+    resolvedViewModel: com.flowcut.app.editor.EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    onWakeFrameDriver: () -> Unit,
+    onCloseTextEditor: () -> Unit,
+    onCloseStickerPicker: () -> Unit,
+    onPickStickerImage: () -> Unit,
+    onCloseTextColor: () -> Unit,
+    onCloseTextFont: () -> Unit,
+    onPickCustomFont: () -> Unit,
+    onCloseTextAnimation: () -> Unit,
+    onCloseTextAdjust: () -> Unit
+) {
+    // Text Editor BottomSheet (Phase 3 Overlays)
+    if (isTextSheetVisible && editingTextOverlayId != null) {
+        val targetId = editingTextOverlayId
+        val textItem = resolvedViewModel?.getOverlayItem(targetId)
+        if (textItem != null) {
+            val origText = remember(targetId) { textItem.text }
+            val origColor = remember(targetId) { textItem.textColorArgb }
+            val origStyle = remember(targetId) { textItem.bgStyle }
+
+            TextEditorSheet(
+                initialText = textItem.text,
+                initialColorArgb = textItem.textColorArgb,
+                initialBgStyle = textItem.bgStyle,
+                onLiveChange = { txt, col, sty ->
+                    resolvedViewModel?.liveUpdateTextOverlay(targetId, txt, col, sty)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                },
+                onDone = { txt, col, sty ->
+                    resolvedViewModel?.updateTextOverlay(targetId, txt, col, sty)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextEditor()
+                },
+                onCancel = {
+                    if (isNewTextOverlay) {
+                        resolvedViewModel?.removeLayerItem(targetId)
+                    } else {
+                        resolvedViewModel?.liveUpdateTextOverlay(targetId, origText, origColor, origStyle)
+                    }
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextEditor()
+                }
+            )
+        } else {
+            onCloseTextEditor()
+        }
+    }
+
+    // Sticker Picker BottomSheet (Phase 3 Overlays)
+    if (isStickerSheetVisible) {
+        StickerPickerSheet(
+            onSelectSticker = { glyph ->
+                resolvedViewModel?.addStickerOverlay(glyph, playheadUs, 3_000_000L)
+                previewRenderer.requestRender()
+                onWakeFrameDriver()
+                onCloseStickerPicker()
+            },
+            onAddImageClick = {
+                onCloseStickerPicker()
+                onPickStickerImage()
+            },
+            onDismiss = onCloseStickerPicker
+        )
+    }
+
+    // Text Color BottomSheet (Phase 3 Typography Suite)
+    if (isTextColorSheetVisible && activeTextOverlayId != null) {
+        val targetId = activeTextOverlayId
+        val textItem = resolvedViewModel?.getOverlayItem(targetId)
+        if (textItem != null) {
+            val origTextColor = remember(targetId) { textItem.textColorArgb }
+            val origTextAlpha = remember(targetId) { textItem.textAlpha }
+            val origLabelColor = remember(targetId) { textItem.labelColorArgb }
+            val origLabelAlpha = remember(targetId) { textItem.labelAlpha }
+            val origBorderColor = remember(targetId) { textItem.borderColorArgb }
+            val origBorderAlpha = remember(targetId) { textItem.borderAlpha }
+            val origShadowColor = remember(targetId) { textItem.shadowColorArgb }
+            val origShadowAlpha = remember(targetId) { textItem.shadowAlpha }
+
+            TextColorSheet(
+                initialTextColor = textItem.textColorArgb,
+                initialTextAlpha = textItem.textAlpha,
+                initialLabelColor = textItem.labelColorArgb,
+                initialLabelAlpha = textItem.labelAlpha,
+                initialBorderColor = textItem.borderColorArgb,
+                initialBorderAlpha = textItem.borderAlpha,
+                initialShadowColor = textItem.shadowColorArgb,
+                initialShadowAlpha = textItem.shadowAlpha,
+                onLiveChange = { tc, ta, lc, la, bc, ba, sc, sa ->
+                    resolvedViewModel?.liveUpdateTextColorAndAlpha(targetId, tc, ta, lc, la, bc, ba, sc, sa)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                },
+                onDone = { tc, ta, lc, la, bc, ba, sc, sa ->
+                    resolvedViewModel?.updateTextColorAndAlpha(targetId, tc, ta, lc, la, bc, ba, sc, sa)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextColor()
+                },
+                onCancel = {
+                    resolvedViewModel?.liveUpdateTextColorAndAlpha(
+                        targetId,
+                        origTextColor, origTextAlpha,
+                        origLabelColor, origLabelAlpha,
+                        origBorderColor, origBorderAlpha,
+                        origShadowColor, origShadowAlpha
+                    )
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextColor()
+                }
+            )
+        } else {
+            onCloseTextColor()
+        }
+    }
+
+    // Text Font BottomSheet (Phase 3 Typography Suite)
+    if (isTextFontSheetVisible && activeTextOverlayId != null) {
+        val targetId = activeTextOverlayId
+        val textItem = resolvedViewModel?.getOverlayItem(targetId)
+        if (textItem != null) {
+            val origFontName = remember(targetId) { textItem.fontName }
+            val origCustomPath = remember(targetId) { textItem.customFontPath }
+
+            TextFontSheet(
+                initialFontName = textItem.fontName,
+                initialCustomFontPath = textItem.customFontPath,
+                customFonts = customFontPaths,
+                onPickCustomFont = onPickCustomFont,
+                onLiveChange = { fontName, customFontPath ->
+                    resolvedViewModel?.updateTextFont(targetId, fontName, customFontPath)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                },
+                onDone = { fontName, customFontPath ->
+                    resolvedViewModel?.updateTextFont(targetId, fontName, customFontPath)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextFont()
+                },
+                onCancel = {
+                    resolvedViewModel?.updateTextFont(targetId, origFontName, origCustomPath)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextFont()
+                }
+            )
+        } else {
+            onCloseTextFont()
+        }
+    }
+
+    // Text Animation BottomSheet (Phase 3 Typography Suite)
+    if (isTextAnimationSheetVisible && activeTextOverlayId != null) {
+        val targetId = activeTextOverlayId
+        val textItem = resolvedViewModel?.getOverlayItem(targetId)
+        if (textItem != null) {
+            val origInType = remember(targetId) { textItem.animInType }
+            val origInDur = remember(targetId) { textItem.animInDurationUs }
+            val origOutType = remember(targetId) { textItem.animOutType }
+            val origOutDur = remember(targetId) { textItem.animOutDurationUs }
+            val origLoopType = remember(targetId) { textItem.animLoopType }
+
+            TextAnimationSheet(
+                initialAnimInType = textItem.animInType,
+                initialAnimInDurationUs = textItem.animInDurationUs,
+                initialAnimOutType = textItem.animOutType,
+                initialAnimOutDurationUs = textItem.animOutDurationUs,
+                initialAnimLoopType = textItem.animLoopType,
+                onLiveChange = { inType, inDur, outType, outDur, loopType ->
+                    resolvedViewModel?.liveUpdateTextAnimation(targetId, inType, inDur, outType, outDur, loopType)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                },
+                onDone = { inType, inDur, outType, outDur, loopType ->
+                    resolvedViewModel?.updateTextAnimation(targetId, inType, inDur, outType, outDur, loopType)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextAnimation()
+                },
+                onCancel = {
+                    resolvedViewModel?.liveUpdateTextAnimation(targetId, origInType, origInDur, origOutType, origOutDur, origLoopType)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextAnimation()
+                }
+            )
+        } else {
+            onCloseTextAnimation()
+        }
+    }
+
+    // Text Adjust BottomSheet (Phase 3 Typography Suite)
+    if (isTextAdjustSheetVisible && activeTextOverlayId != null) {
+        val targetId = activeTextOverlayId
+        val textItem = resolvedViewModel?.getOverlayItem(targetId)
+        if (textItem != null) {
+            val origAlign = remember(targetId) { textItem.textAlign }
+            val origLetter = remember(targetId) { textItem.letterSpacing }
+            val origLine = remember(targetId) { textItem.lineSpacing }
+            val origAlpha = remember(targetId) { textItem.textAlpha }
+            val origBold = remember(targetId) { textItem.isBold }
+            val origItalic = remember(targetId) { textItem.isItalic }
+            val origUnderline = remember(targetId) { textItem.isUnderline }
+            val origUppercase = remember(targetId) { textItem.isUppercase }
+
+            TextAdjustSheet(
+                initialTextAlign = textItem.textAlign,
+                initialLetterSpacing = textItem.letterSpacing,
+                initialLineSpacing = textItem.lineSpacing,
+                initialTextAlpha = textItem.textAlpha,
+                initialIsBold = textItem.isBold,
+                initialIsItalic = textItem.isItalic,
+                initialIsUnderline = textItem.isUnderline,
+                initialIsUppercase = textItem.isUppercase,
+                onLiveChange = { align, letter, line, alpha, bold, italic, underline, uppercase ->
+                    resolvedViewModel?.liveUpdateTextAdjust(targetId, align, letter, line, alpha, bold, italic, underline, uppercase)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                },
+                onDone = { align, letter, line, alpha, bold, italic, underline, uppercase ->
+                    resolvedViewModel?.updateTextAdjust(targetId, align, letter, line, alpha, bold, italic, underline, uppercase)
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextAdjust()
+                },
+                onCancel = {
+                    resolvedViewModel?.liveUpdateTextAdjust(
+                        targetId,
+                        origAlign, origLetter, origLine, origAlpha,
+                        origBold, origItalic, origUnderline, origUppercase
+                    )
+                    previewRenderer.requestRender()
+                    onWakeFrameDriver()
+                    onCloseTextAdjust()
+                }
+            )
+        } else {
+            onCloseTextAdjust()
+        }
     }
 }

@@ -96,6 +96,14 @@ class TransitionRenderer {
     private var uOverlayMatLoc = -1
     private var uOverlayTexLoc = -1
     private var uOverlayOpacityLoc = -1
+    private var uCropBoundsLoc = -1
+    private var uMaskTypeLoc = -1
+    private var uMaskFeatherLoc = -1
+    private var uMaskInvertLoc = -1
+    private var uChromaEnabledLoc = -1
+    private var uChromaKeyRgbLoc = -1
+    private var uChromaThresholdLoc = -1
+    private var uChromaBlendLoc = -1
     private val overlayMvp = FloatArray(16)
 
     // Pre-allocated fallback arrays for zero allocations (Rule R10)
@@ -503,10 +511,16 @@ class TransitionRenderer {
         layout(location = 0) in vec4 aPos;
         layout(location = 1) in vec2 aUV;
         uniform mat4 uOverlayMat;
-        out vec2 vUV;
+        uniform vec4 uCropBounds;
+        out vec2 vTexUV;
+        out vec2 vLocalUV;
         void main() {
             gl_Position = uOverlayMat * aPos;
-            vUV = vec2(aUV.x, 1.0 - aUV.y);
+            vLocalUV = aUV;
+            vTexUV = vec2(
+                mix(uCropBounds.x, uCropBounds.z, aUV.x),
+                mix(uCropBounds.y, uCropBounds.w, 1.0 - aUV.y)
+            );
         }
     """.trimIndent()
 
@@ -515,11 +529,91 @@ class TransitionRenderer {
         precision highp float;
         uniform sampler2D uOverlayTex;
         uniform float uOverlayOpacity;
-        in vec2 vUV;
+
+        // Chroma Key Uniforms
+        uniform int uChromaEnabled;
+        uniform vec3 uChromaKeyRgb;
+        uniform float uChromaThreshold;
+        uniform float uChromaBlend;
+
+        // Mask Uniforms
+        uniform int uMaskType;
+        uniform float uMaskFeather;
+        uniform int uMaskInvert;
+
+        in vec2 vTexUV;
+        in vec2 vLocalUV;
         out vec4 outColor;
+
+        float sdHeart(vec2 p) {
+            p.y = -p.y + 0.25;
+            p.x = abs(p.x) * 1.15;
+            if (p.y + p.x > 1.0) {
+                return sqrt(dot(p - vec2(0.25, 0.75), p - vec2(0.25, 0.75))) - 0.35355;
+            }
+            return sqrt(min(dot(p - vec2(0.0, 1.0), p - vec2(0.0, 1.0)),
+                            dot(p - 0.5 * max(p.x + p.y, 0.0), p - 0.5 * max(p.x + p.y, 0.0)))) * sign(p.x - p.y);
+        }
+
+        float sdStar5(vec2 p, float r, float rf) {
+            const vec2 k1 = vec2(0.809016994375, -0.587785252292);
+            const vec2 k2 = vec2(-k1.x, k1.y);
+            p.x = abs(p.x);
+            p -= 2.0 * max(dot(k1, p), 0.0) * k1;
+            p -= 2.0 * max(dot(k2, p), 0.0) * k2;
+            p.x = abs(p.x);
+            p.y -= r;
+            vec2 ba = rf * vec2(-k1.y, k1.x) - vec2(0.0, 1.0);
+            float h = clamp(dot(p, ba) / dot(ba, ba), 0.0, r);
+            return length(p - ba * h) * sign(p.y * ba.x - p.x * ba.y);
+        }
+
         void main() {
-            vec4 texColor = texture(uOverlayTex, vUV);
-            outColor = vec4(texColor.rgb, texColor.a * clamp(uOverlayOpacity, 0.0, 1.0));
+            vec4 texColor = texture(uOverlayTex, vTexUV);
+
+            // Chroma Key (Cutout)
+            float chromaAlpha = 1.0;
+            if (uChromaEnabled == 1) {
+                vec3 diff = texColor.rgb - uChromaKeyRgb;
+                float colorDist = sqrt(dot(diff * vec3(0.299, 0.587, 0.114), diff));
+                float blend = max(uChromaBlend, 0.005);
+                chromaAlpha = smoothstep(uChromaThreshold, uChromaThreshold + blend, colorDist);
+            }
+
+            // Procedural Mask SDF
+            float maskAlpha = 1.0;
+            if (uMaskType > 0) {
+                vec2 p = (vLocalUV - 0.5) * 2.0;
+                float d = 0.0;
+                if (uMaskType == 1) {
+                    // Circle
+                    d = length(p) - 0.85;
+                } else if (uMaskType == 2) {
+                    // Rounded Rect
+                    vec2 q = abs(p) - vec2(0.70);
+                    d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.15;
+                } else if (uMaskType == 3) {
+                    // Heart
+                    d = sdHeart(p);
+                } else if (uMaskType == 4) {
+                    // Star (5 points)
+                    d = sdStar5(p, 0.85, 0.45);
+                } else if (uMaskType == 5) {
+                    // Linear Split
+                    d = p.y;
+                } else if (uMaskType == 6) {
+                    // Mirror Band
+                    d = abs(p.y) - 0.45;
+                }
+                float feather = max(uMaskFeather, 0.001);
+                maskAlpha = 1.0 - smoothstep(-feather, feather + 0.005, d);
+                if (uMaskInvert == 1) {
+                    maskAlpha = 1.0 - maskAlpha;
+                }
+            }
+
+            float finalAlpha = texColor.a * clamp(uOverlayOpacity, 0.0, 1.0) * chromaAlpha * maskAlpha;
+            outColor = vec4(texColor.rgb, finalAlpha);
         }
     """.trimIndent()
 
@@ -577,6 +671,14 @@ class TransitionRenderer {
         uOverlayMatLoc = GLES30.glGetUniformLocation(overlayProgramId, "uOverlayMat")
         uOverlayTexLoc = GLES30.glGetUniformLocation(overlayProgramId, "uOverlayTex")
         uOverlayOpacityLoc = GLES30.glGetUniformLocation(overlayProgramId, "uOverlayOpacity")
+        uCropBoundsLoc = GLES30.glGetUniformLocation(overlayProgramId, "uCropBounds")
+        uMaskTypeLoc = GLES30.glGetUniformLocation(overlayProgramId, "uMaskType")
+        uMaskFeatherLoc = GLES30.glGetUniformLocation(overlayProgramId, "uMaskFeather")
+        uMaskInvertLoc = GLES30.glGetUniformLocation(overlayProgramId, "uMaskInvert")
+        uChromaEnabledLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaEnabled")
+        uChromaKeyRgbLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaKeyRgb")
+        uChromaThresholdLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaThreshold")
+        uChromaBlendLoc = GLES30.glGetUniformLocation(overlayProgramId, "uChromaBlend")
 
         // Setup VAO & VBO
         val vaos = IntArray(1)
@@ -703,13 +805,24 @@ class TransitionRenderer {
         transform: ClipTransform,
         opacity: Float = 1.0f,
         displayWidth: Int = 1080,
-        displayHeight: Int = 1920
+        displayHeight: Int = 1920,
+        cropLeft: Float = 0.0f,
+        cropTop: Float = 0.0f,
+        cropRight: Float = 1.0f,
+        cropBottom: Float = 1.0f,
+        maskType: Int = 0,
+        maskFeather: Float = 0.05f,
+        maskInvert: Boolean = false,
+        chromaEnabled: Boolean = false,
+        chromaColorArgb: Int = 0xFF00FF00.toInt(),
+        chromaThreshold: Float = 0.25f,
+        chromaBlend: Float = 0.10f
     ) {
         if (texId <= 0) return
         val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
         if (effectiveOpacity <= 0.001f) return
 
-        if (isOverlayOffScreen(transform, texWidth, texHeight, displayWidth, displayHeight)) {
+        if (isOverlayOffScreen(transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom)) {
             return
         }
 
@@ -722,7 +835,24 @@ class TransitionRenderer {
         GLES30.glUniform1i(uOverlayTexLoc, 0)
         GLES30.glUniform1f(uOverlayOpacityLoc, effectiveOpacity)
 
-        computeOverlayMvp(overlayMvp, transform, texWidth, texHeight, displayWidth, displayHeight)
+        // UV Crop Bounds
+        GLES30.glUniform4f(uCropBoundsLoc, cropLeft, cropTop, cropRight, cropBottom)
+
+        // Mask Uniforms
+        GLES30.glUniform1i(uMaskTypeLoc, maskType)
+        GLES30.glUniform1f(uMaskFeatherLoc, maskFeather)
+        GLES30.glUniform1i(uMaskInvertLoc, if (maskInvert) 1 else 0)
+
+        // Chroma Cutout Uniforms
+        GLES30.glUniform1i(uChromaEnabledLoc, if (chromaEnabled) 1 else 0)
+        val r = ((chromaColorArgb shr 16) and 0xFF) / 255.0f
+        val g = ((chromaColorArgb shr 8) and 0xFF) / 255.0f
+        val b = (chromaColorArgb and 0xFF) / 255.0f
+        GLES30.glUniform3f(uChromaKeyRgbLoc, r, g, b)
+        GLES30.glUniform1f(uChromaThresholdLoc, chromaThreshold)
+        GLES30.glUniform1f(uChromaBlendLoc, chromaBlend)
+
+        computeOverlayMvp(overlayMvp, transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom)
         GLES30.glUniformMatrix4fv(uOverlayMatLoc, 1, false, overlayMvp, 0)
 
         GLES30.glBindVertexArray(vaoId)
@@ -813,12 +943,18 @@ class TransitionRenderer {
             texWidth: Int = 1,
             texHeight: Int = 1,
             displayWidth: Int = 1080,
-            displayHeight: Int = 1920
+            displayHeight: Int = 1920,
+            cropLeft: Float = 0.0f,
+            cropTop: Float = 0.0f,
+            cropRight: Float = 1.0f,
+            cropBottom: Float = 1.0f
         ): Boolean {
             val aScreen = if (displayHeight > 0) displayWidth.toFloat() / displayHeight.toFloat() else (9.0f / 16.0f)
             val tw = if (texWidth > 0) texWidth.toFloat() else 1f
             val th = if (texHeight > 0) texHeight.toFloat() else 1f
-            val aTex = (tw / th).coerceIn(0.01f, 100f)
+            val cropW = (cropRight - cropLeft).coerceIn(0.01f, 1.0f)
+            val cropH = (cropBottom - cropTop).coerceIn(0.01f, 1.0f)
+            val aTex = ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
 
             var hw = 0.6f
             var hh = hw / aTex
@@ -850,12 +986,18 @@ class TransitionRenderer {
             texWidth: Int = 1,
             texHeight: Int = 1,
             displayWidth: Int = 1080,
-            displayHeight: Int = 1920
+            displayHeight: Int = 1920,
+            cropLeft: Float = 0.0f,
+            cropTop: Float = 0.0f,
+            cropRight: Float = 1.0f,
+            cropBottom: Float = 1.0f
         ) {
             val aScreen = if (displayHeight > 0) displayWidth.toFloat() / displayHeight.toFloat() else (9.0f / 16.0f)
             val tw = if (texWidth > 0) texWidth.toFloat() else 1f
             val th = if (texHeight > 0) texHeight.toFloat() else 1f
-            val aTex = (tw / th).coerceIn(0.01f, 100f)
+            val cropW = (cropRight - cropLeft).coerceIn(0.01f, 1.0f)
+            val cropH = (cropBottom - cropTop).coerceIn(0.01f, 1.0f)
+            val aTex = ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
 
             var hw = 0.6f
             var hh = hw / aTex

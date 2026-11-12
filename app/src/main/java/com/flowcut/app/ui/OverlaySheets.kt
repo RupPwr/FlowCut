@@ -34,6 +34,11 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Circle
+import androidx.compose.material.icons.filled.CropSquare
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Splitscreen
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FormatAlignCenter
@@ -2482,6 +2487,642 @@ fun EffectSheet(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated PIP Mask BottomSheet with live preview and zero heap allocations on render loop.
+ * Supported Shapes:
+ * 0: None, 1: Circle, 2: Rect (Rounded Rect), 3: Heart, 4: Star, 5: Linear Split, 6: Mirror Band
+ */
+@Composable
+fun PipMaskSheet(
+    initialMaskType: Int,
+    initialMaskFeather: Float,
+    initialMaskInvert: Boolean,
+    onLiveChange: (maskType: Int, feather: Float, invert: Boolean) -> Unit,
+    onDone: (maskType: Int, feather: Float, invert: Boolean) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var selectedMaskType by remember { mutableIntStateOf(initialMaskType) }
+    var feather by remember { mutableFloatStateOf(initialMaskFeather.coerceIn(0.0f, 0.5f)) }
+    var invert by remember { mutableStateOf(initialMaskInvert) }
+
+    fun notifyChange() {
+        onLiveChange(selectedMaskType, feather, invert)
+    }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .background(DARK_SHEET_BG)
+                    .border(BorderStroke(0.5.dp, DARK_SURFACE_BORDER), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                ) {
+                    // Header Row: Cancel (✕), "Mask", Invert chip, Done (✓)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.White)
+                        }
+                        Text(
+                            text = "Mask",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        // Invert toggle chip
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (invert) PINK_RED_ACCENT else DARK_CARD_BG)
+                                .border(BorderStroke(1.dp, if (invert) PINK_RED_ACCENT else DARK_SURFACE_BORDER), RoundedCornerShape(12.dp))
+                                .clickable {
+                                    invert = !invert
+                                    notifyChange()
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Invert",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        IconButton(
+                            onClick = { onDone(selectedMaskType, feather, invert) },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = "Done", tint = PINK_RED_ACCENT)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Feather Slider Row
+                    if (selectedMaskType > 0) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Feather",
+                                color = Color.White.copy(alpha = 0.8f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.width(60.dp)
+                            )
+                            Slider(
+                                value = feather / 0.5f,
+                                onValueChange = { norm ->
+                                    feather = norm * 0.5f
+                                    notifyChange()
+                                },
+                                valueRange = 0f..1f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = PINK_RED_ACCENT,
+                                    activeTrackColor = PINK_RED_ACCENT,
+                                    inactiveTrackColor = Color(0xFF3A3A3C)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "${(feather / 0.5f * 100f).roundToInt()}%",
+                                color = PINK_RED_ACCENT,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.width(42.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+
+                    // 7 Shape Cards Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        val maskShapes = listOf(
+                            Triple(0, "None", Icons.Default.Block),
+                            Triple(1, "Circle", Icons.Default.Circle),
+                            Triple(2, "Rect", Icons.Default.CropSquare),
+                            Triple(3, "Heart", Icons.Default.Favorite),
+                            Triple(4, "Star", Icons.Default.Star),
+                            Triple(5, "Linear", Icons.Default.Splitscreen),
+                            Triple(6, "Mirror", Icons.Default.ViewAgenda)
+                        )
+                        for ((typeId, label, icon) in maskShapes) {
+                            val isSelected = selectedMaskType == typeId
+                            Column(
+                                modifier = Modifier
+                                    .size(width = 64.dp, height = 76.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(
+                                        BorderStroke(
+                                            if (isSelected) 2.dp else 0.5.dp,
+                                            if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER
+                                        ),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .background(DARK_CARD_BG)
+                                    .clickable {
+                                        selectedMaskType = typeId
+                                        notifyChange()
+                                    }
+                                    .padding(6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(42.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.2f) else Color(0xFF202022)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = label,
+                                        tint = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                Text(
+                                    text = label,
+                                    color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated PIP Crop BottomSheet with aspect ratio presets and 4 normalized edge trim sliders.
+ * UV bounds: [cropLeft..cropRight, cropTop..cropBottom]
+ */
+@Composable
+fun PipCropSheet(
+    initialCropLeft: Float,
+    initialCropTop: Float,
+    initialCropRight: Float,
+    initialCropBottom: Float,
+    intrinsicWidth: Int = 1080,
+    intrinsicHeight: Int = 1920,
+    onLiveChange: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
+    onDone: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var cropLeft by remember { mutableFloatStateOf(initialCropLeft.coerceIn(0f, 0.45f)) }
+    var cropTop by remember { mutableFloatStateOf(initialCropTop.coerceIn(0f, 0.45f)) }
+    var cropRight by remember { mutableFloatStateOf(initialCropRight.coerceIn(0.55f, 1f)) }
+    var cropBottom by remember { mutableFloatStateOf(initialCropBottom.coerceIn(0.55f, 1f)) }
+
+    fun notifyChange() {
+        onLiveChange(cropLeft, cropTop, cropRight, cropBottom)
+    }
+
+    fun applyPreset(targetAspect: Float?) {
+        if (targetAspect == null) {
+            // Reset to full
+            cropLeft = 0.0f
+            cropTop = 0.0f
+            cropRight = 1.0f
+            cropBottom = 1.0f
+            notifyChange()
+            return
+        }
+        val mediaW = if (intrinsicWidth > 0) intrinsicWidth.toFloat() else 1080f
+        val mediaH = if (intrinsicHeight > 0) intrinsicHeight.toFloat() else 1920f
+        val mediaAspect = mediaW / mediaH
+
+        if (mediaAspect > targetAspect) {
+            // Media is wider than target aspect: crop left and right
+            val effectiveW = targetAspect / mediaAspect
+            val margin = ((1.0f - effectiveW) / 2.0f).coerceIn(0f, 0.45f)
+            cropLeft = margin
+            cropRight = 1.0f - margin
+            cropTop = 0.0f
+            cropBottom = 1.0f
+        } else {
+            // Media is taller than target aspect: crop top and bottom
+            val effectiveH = mediaAspect / targetAspect
+            val margin = ((1.0f - effectiveH) / 2.0f).coerceIn(0f, 0.45f)
+            cropLeft = 0.0f
+            cropRight = 1.0f
+            cropTop = margin
+            cropBottom = 1.0f - margin
+        }
+        notifyChange()
+    }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .background(DARK_SHEET_BG)
+                    .border(BorderStroke(0.5.dp, DARK_SURFACE_BORDER), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                ) {
+                    // Header Row: Cancel (✕), "Crop", Reset chip, Done (✓)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.White)
+                        }
+                        Text(
+                            text = "Crop",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(DARK_CARD_BG)
+                                .border(BorderStroke(1.dp, DARK_SURFACE_BORDER), RoundedCornerShape(12.dp))
+                                .clickable { applyPreset(null) }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Reset",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        IconButton(
+                            onClick = { onDone(cropLeft, cropTop, cropRight, cropBottom) },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = "Done", tint = PINK_RED_ACCENT)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Preset Buttons Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val presets = listOf(
+                            "Free" to null,
+                            "1:1" to 1.0f,
+                            "9:16" to (9f / 16f),
+                            "16:9" to (16f / 9f),
+                            "4:5" to (4f / 5f),
+                            "3:4" to (3f / 4f)
+                        )
+                        for ((label, aspectVal) in presets) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(DARK_CARD_BG)
+                                    .border(BorderStroke(1.dp, DARK_SURFACE_BORDER), RoundedCornerShape(8.dp))
+                                    .clickable { applyPreset(aspectVal) }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 4 Sliders (Left, Top, Right, Bottom)
+                    // Left Trim
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Left", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, modifier = Modifier.width(48.dp))
+                        Slider(
+                            value = cropLeft,
+                            onValueChange = { v ->
+                                cropLeft = v.coerceIn(0f, (cropRight - 0.1f).coerceAtLeast(0f))
+                                notifyChange()
+                            },
+                            valueRange = 0f..0.45f,
+                            colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text("${(cropLeft * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
+                    }
+
+                    // Top Trim
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Top", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, modifier = Modifier.width(48.dp))
+                        Slider(
+                            value = cropTop,
+                            onValueChange = { v ->
+                                cropTop = v.coerceIn(0f, (cropBottom - 0.1f).coerceAtLeast(0f))
+                                notifyChange()
+                            },
+                            valueRange = 0f..0.45f,
+                            colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text("${(cropTop * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
+                    }
+
+                    // Right Trim
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Right", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, modifier = Modifier.width(48.dp))
+                        Slider(
+                            value = cropRight,
+                            onValueChange = { v ->
+                                cropRight = v.coerceIn((cropLeft + 0.1f).coerceAtMost(1f), 1f)
+                                notifyChange()
+                            },
+                            valueRange = 0.55f..1f,
+                            colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text("${(cropRight * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
+                    }
+
+                    // Bottom Trim
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Bottom", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, modifier = Modifier.width(48.dp))
+                        Slider(
+                            value = cropBottom,
+                            onValueChange = { v ->
+                                cropBottom = v.coerceIn((cropTop + 0.1f).coerceAtMost(1f), 1f)
+                                notifyChange()
+                            },
+                            valueRange = 0.55f..1f,
+                            colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text("${(cropBottom * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated PIP Cutout / Chroma Key BottomSheet.
+ * Supports color selection swatches (Green, Blue, Black, White, Red, Yellow, Cyan, Magenta),
+ * threshold intensity, and edge smoothing blend.
+ */
+@Composable
+fun PipCutoutSheet(
+    initialChromaEnabled: Boolean,
+    initialChromaColorArgb: Int,
+    initialChromaThreshold: Float,
+    initialChromaBlend: Float,
+    onLiveChange: (enabled: Boolean, colorArgb: Int, threshold: Float, blend: Float) -> Unit,
+    onDone: (enabled: Boolean, colorArgb: Int, threshold: Float, blend: Float) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var chromaEnabled by remember { mutableStateOf(initialChromaEnabled) }
+    var selectedColorArgb by remember { mutableIntStateOf(initialChromaColorArgb) }
+    var threshold by remember { mutableFloatStateOf(initialChromaThreshold.coerceIn(0.0f, 0.8f)) }
+    var blend by remember { mutableFloatStateOf(initialChromaBlend.coerceIn(0.01f, 0.4f)) }
+
+    fun notifyChange() {
+        onLiveChange(chromaEnabled, selectedColorArgb, threshold, blend)
+    }
+
+    val swatches = listOf(
+        "Green" to 0xFF00FF00.toInt(),
+        "Blue" to 0xFF0000FF.toInt(),
+        "Black" to 0xFF000000.toInt(),
+        "White" to 0xFFFFFFFF.toInt(),
+        "Red" to 0xFFFF0000.toInt(),
+        "Yellow" to 0xFFFFFF00.toInt(),
+        "Cyan" to 0xFF00FFFF.toInt(),
+        "Magenta" to 0xFFFF00FF.toInt()
+    )
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .background(DARK_SHEET_BG)
+                    .border(BorderStroke(0.5.dp, DARK_SURFACE_BORDER), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                ) {
+                    // Header Row: Cancel (✕), "Cutout / Chroma", Switch chip, Done (✓)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.White)
+                        }
+                        Text(
+                            text = "Cutout / Chroma",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (chromaEnabled) PINK_RED_ACCENT else DARK_CARD_BG)
+                                .border(BorderStroke(1.dp, if (chromaEnabled) PINK_RED_ACCENT else DARK_SURFACE_BORDER), RoundedCornerShape(12.dp))
+                                .clickable {
+                                    chromaEnabled = !chromaEnabled
+                                    notifyChange()
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (chromaEnabled) "Active" else "Disabled",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        IconButton(
+                            onClick = { onDone(chromaEnabled, selectedColorArgb, threshold, blend) },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = "Done", tint = PINK_RED_ACCENT)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Color Swatches Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        for ((name, colorInt) in swatches) {
+                            val isSelected = selectedColorArgb == colorInt
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(colorInt))
+                                    .border(
+                                        BorderStroke(
+                                            if (isSelected) 3.dp else 1.dp,
+                                            if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.3f)
+                                        ),
+                                        CircleShape
+                                    )
+                                    .clickable {
+                                        selectedColorArgb = colorInt
+                                        if (!chromaEnabled) chromaEnabled = true
+                                        notifyChange()
+                                    }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Intensity Slider (Threshold: 0.0f..0.8f)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Intensity",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(68.dp)
+                        )
+                        Slider(
+                            value = threshold / 0.8f,
+                            onValueChange = { norm ->
+                                threshold = norm * 0.8f
+                                notifyChange()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${(threshold / 0.8f * 100f).roundToInt()}%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(42.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Edge Feather Slider (Blend: 0.01f..0.4f)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Feather",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(68.dp)
+                        )
+                        Slider(
+                            value = (blend - 0.01f) / 0.39f,
+                            onValueChange = { norm ->
+                                blend = 0.01f + norm * 0.39f
+                                notifyChange()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = PINK_RED_ACCENT,
+                                activeTrackColor = PINK_RED_ACCENT,
+                                inactiveTrackColor = Color(0xFF3A3A3C)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${((blend - 0.01f) / 0.39f * 100f).roundToInt()}%",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(42.dp)
+                        )
                     }
                 }
             }

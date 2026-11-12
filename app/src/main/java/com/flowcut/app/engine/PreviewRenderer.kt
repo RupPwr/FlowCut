@@ -1119,7 +1119,18 @@ class PreviewRenderer(
                     transform = effTransform,
                     opacity = effTransform.opacity,
                     displayWidth = viewportWidth,
-                    displayHeight = viewportHeight
+                    displayHeight = viewportHeight,
+                    cropLeft = item.cropLeft,
+                    cropTop = item.cropTop,
+                    cropRight = item.cropRight,
+                    cropBottom = item.cropBottom,
+                    maskType = item.maskType,
+                    maskFeather = item.maskFeather,
+                    maskInvert = item.maskInvert,
+                    chromaEnabled = item.chromaEnabled,
+                    chromaColorArgb = item.chromaColorArgb,
+                    chromaThreshold = item.chromaThreshold,
+                    chromaBlend = item.chromaBlend
                 )
             }
         }
@@ -1143,7 +1154,18 @@ class PreviewRenderer(
                             transform = effTransform,
                             opacity = effTransform.opacity,
                             displayWidth = viewportWidth,
-                            displayHeight = viewportHeight
+                            displayHeight = viewportHeight,
+                            cropLeft = item.cropLeft,
+                            cropTop = item.cropTop,
+                            cropRight = item.cropRight,
+                            cropBottom = item.cropBottom,
+                            maskType = item.maskType,
+                            maskFeather = item.maskFeather,
+                            maskInvert = item.maskInvert,
+                            chromaEnabled = item.chromaEnabled,
+                            chromaColorArgb = item.chromaColorArgb,
+                            chromaThreshold = item.chromaThreshold,
+                            chromaBlend = item.chromaBlend
                         )
                     }
                 }
