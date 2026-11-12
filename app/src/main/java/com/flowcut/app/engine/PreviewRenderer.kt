@@ -254,7 +254,9 @@ class PreviewRenderer(
     }
 
     private val renderer = TransitionRenderer()
-    private val overlayTextureCache = OverlayTextureCache()
+    private val overlayTextureCache = OverlayTextureCache().apply {
+        onFrameReady = { requestRender() }
+    }
     private val animEvaluator = AnimatedTransformEvaluator()
     private var surfaceTextureA: SurfaceTexture? = null
     private var surfaceTextureB: SurfaceTexture? = null
@@ -1104,7 +1106,11 @@ class PreviewRenderer(
             }
             val effTransform = animEvaluator.evaluate(item, tUs)
             if (effTransform.opacity <= 0.001f) continue
-            val cached = overlayTextureCache.getOrBakeTexture(item) ?: continue
+            val cached = if (item.type == LayerType.VIDEO) {
+                overlayTextureCache.getOrUpdateVideoTexture(item, tUs, isSynchronous = false)
+            } else {
+                overlayTextureCache.getOrBakeTexture(item)
+            } ?: continue
             if (cached.texId > 0) {
                 renderer.drawOverlayQuad(
                     texId = cached.texId,
@@ -1124,7 +1130,11 @@ class PreviewRenderer(
             if (item != null) {
                 val effTransform = animEvaluator.evaluate(item, tUs)
                 if (effTransform.opacity > 0.001f) {
-                    val cached = overlayTextureCache.getOrBakeTexture(item)
+                    val cached = if (item.type == LayerType.VIDEO) {
+                        overlayTextureCache.getOrUpdateVideoTexture(item, tUs, isSynchronous = false)
+                    } else {
+                        overlayTextureCache.getOrBakeTexture(item)
+                    }
                     if (cached != null && cached.texId > 0) {
                         renderer.drawOverlayQuad(
                             texId = cached.texId,

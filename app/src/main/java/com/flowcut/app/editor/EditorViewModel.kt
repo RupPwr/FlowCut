@@ -159,7 +159,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val items = _layerItems.toList()
         val plan = CompiledLayerPlan.compile(items)
         PreviewRenderer.setLayerPlan(plan)
-        val audioOverlays = items.filter { it.type == LayerType.AUDIO }
+        val audioOverlays = items.filter { it.type == LayerType.AUDIO || (it.type == LayerType.VIDEO && it.volume > 0.001f) }
         ClipAudioContributor.syncAudioOverlays(audioOverlays)
         for (item in audioOverlays) {
             if (item.mediaPath.isNotEmpty()) {
@@ -1479,7 +1479,28 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val item = _layerItems[idx]
         val clampedSpeed = speed.coerceIn(0.2f, 4.0f)
         pushUndoState()
-        _layerItems[idx] = item.copy(speed = clampedSpeed)
+
+        val newEndUs = if (item.type == LayerType.VIDEO) {
+            val totalProjectDurationUs = msToUs(_uiState.value.project.clips.sumOf { it.durationMs })
+                .coerceAtLeast(OverlayItem.MIN_DURATION_US)
+            val currentItemDurationUs = (item.endUs - item.startUs).coerceAtLeast(OverlayItem.MIN_DURATION_US)
+            val currentSpeed = if (item.speed > 0f) item.speed.toDouble() else 1.0
+            val sourceDurationUs = (currentItemDurationUs.toDouble() * currentSpeed).toLong()
+            val newDurationUs = (sourceDurationUs.toDouble() / clampedSpeed.toDouble()).toLong()
+                .coerceAtLeast(OverlayItem.MIN_DURATION_US)
+
+            // Clamp against neighbor items on the same PIP row (laneIndex)
+            val nextNeighbor = _layerItems.filter {
+                it.laneIndex == item.laneIndex && it.id != item.id && it.startUs >= item.endUs
+            }.minByOrNull { it.startUs }
+            val maxAllowedEndUs = nextNeighbor?.startUs ?: totalProjectDurationUs
+            minOf(item.startUs + newDurationUs, maxAllowedEndUs)
+                .coerceAtLeast(item.startUs + OverlayItem.MIN_DURATION_US)
+        } else {
+            item.endUs
+        }
+
+        _layerItems[idx] = item.copy(speed = clampedSpeed, endUs = newEndUs)
         syncLayerPlan()
         updateProject(_uiState.value.project, recordUndo = false)
         return true

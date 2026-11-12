@@ -7,12 +7,15 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.media.ExifInterface
+import android.media.MediaMetadataRetriever
 import android.opengl.GLES20
 import android.opengl.GLUtils
+import android.os.Build
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import java.io.File
+import java.util.concurrent.Executors
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -34,7 +37,21 @@ class CachedOverlayTex(
 class OverlayTextureCache {
 
     private val cache = HashMap<String, CachedOverlayTex>()
+    private val videoStates = HashMap<String, VideoPipState>()
     private val tempTexIds = IntArray(1)
+    private val retrieverPool = RetrieverPool(maxEntries = 4)
+
+    /**
+     * Dedicated background executor for non-blocking preview PIP video frame decoding.
+     */
+    private val pipDecodeExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "FlowCut-PipDecode")
+    }
+
+    /**
+     * Callback invoked whenever a new video overlay frame has been decoded on the background thread.
+     */
+    var onFrameReady: (() -> Unit)? = null
 
     /**
      * Computes deterministic content hash for an overlay item.
@@ -73,6 +90,9 @@ class OverlayTextureCache {
      * during playback (Rule R10).
      */
     fun getOrBakeTexture(item: OverlayItem): CachedOverlayTex? {
+        if (item.type == LayerType.VIDEO) {
+            return getOrUpdateVideoTexture(item, item.startUs, isSynchronous = false)
+        }
         val targetHash = computeContentHash(item)
         val existing = cache[item.id]
         if (existing != null && existing.contentHash == targetHash && existing.texId > 0) {
@@ -382,11 +402,198 @@ class OverlayTextureCache {
         return oriented
     }
 
+    /**
+     * Computes target dimensions for PIP video frame extraction capped at max 640px.
+     */
+    private fun computePipTargetDimensions(item: OverlayItem): Pair<Int, Int> {
+        val inW = if (item.intrinsicWidth > 0) item.intrinsicWidth else 640
+        val inH = if (item.intrinsicHeight > 0) item.intrinsicHeight else 360
+        val maxDim = 640
+        val targetW: Int
+        val targetH: Int
+        if (inW >= inH) {
+            targetW = maxDim
+            targetH = ((maxDim.toLong() * inH.toLong()) / inW.toLong()).toInt().coerceAtLeast(16)
+        } else {
+            targetH = maxDim
+            targetW = ((maxDim.toLong() * inW.toLong()) / inH.toLong()).toInt().coerceAtLeast(16)
+        }
+        return Pair((targetW / 2) * 2, (targetH / 2) * 2)
+    }
+
+    /**
+     * Extracts a scaled video frame from the bounded retriever pool.
+     */
+    private fun extractScaledVideoFrame(
+        path: String,
+        targetSourceUs: Long,
+        targetW: Int,
+        targetH: Int
+    ): Bitmap? {
+        if (path.isEmpty()) return null
+        val retriever = retrieverPool.getRetriever(path) ?: return null
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                retriever.getScaledFrameAtTime(
+                    targetSourceUs.coerceAtLeast(0L),
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    targetW,
+                    targetH
+                ) ?: retriever.getFrameAtTime(
+                    targetSourceUs.coerceAtLeast(0L),
+                    MediaMetadataRetriever.OPTION_CLOSEST
+                )
+            } else {
+                retriever.getFrameAtTime(
+                    targetSourceUs.coerceAtLeast(0L),
+                    MediaMetadataRetriever.OPTION_CLOSEST
+                )
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Dynamic frame-accurate video overlay texture retrieval.
+     * - Quantizes to 30fps buckets (33_333 us) so texture only updates when frame advances.
+     * - Offline Export: Synchronously extracts frame at targetSourceUs and updates GL texture.
+     * - Live Preview: Non-blocking background decode on pipDecodeExecutor with zero GL thread allocations (Rule R10).
+     */
+    fun getOrUpdateVideoTexture(
+        item: OverlayItem,
+        timelineUs: Long,
+        isSynchronous: Boolean = false
+    ): CachedOverlayTex? {
+        if (item.mediaPath.isEmpty()) return null
+        val localUs = (timelineUs - item.startUs).coerceAtLeast(0L)
+        val speedVal = if (item.speed > 0f) item.speed.toDouble() else 1.0
+        val targetSourceUs = item.sourceInUs + (localUs.toDouble() * speedVal).toLong()
+        val frameBucket = targetSourceUs / 33_333L
+
+        if (isSynchronous) {
+            // Offline Export: frame-accurate synchronous decode
+            val state = videoStates.getOrPut(item.id) { VideoPipState(item.id) }
+            if (state.currentBucket != frameBucket || state.texEntry.texId == 0) {
+                val (targetW, targetH) = computePipTargetDimensions(item)
+                val bmp = extractScaledVideoFrame(item.mediaPath, targetSourceUs, targetW, targetH)
+                if (bmp != null && !bmp.isRecycled) {
+                    val w = bmp.width
+                    val h = bmp.height
+                    val targetTexId = if (state.texEntry.texId > 0) {
+                        state.texEntry.texId
+                    } else {
+                        GLES20.glGenTextures(1, tempTexIds, 0)
+                        tempTexIds[0]
+                    }
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, targetTexId)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+                    bmp.recycle()
+
+                    state.texEntry.texId = targetTexId
+                    state.texEntry.width = w
+                    state.texEntry.height = h
+                    state.currentBucket = frameBucket
+                }
+            }
+            return if (state.texEntry.texId > 0) state.texEntry else null
+        }
+
+        // Live Preview: Non-blocking asynchronous decoding
+        var state = videoStates[item.id]
+        if (state == null) {
+            val newState = VideoPipState(item.id)
+            newState.decodeTask = Runnable {
+                val (dstW, dstH) = computePipTargetDimensions(item)
+                val decoded = extractScaledVideoFrame(item.mediaPath, newState.targetSourceUs, dstW, dstH)
+                if (decoded != null && !decoded.isRecycled) {
+                    synchronized(newState.lock) {
+                        val old = newState.backBitmap
+                        newState.backBitmap = decoded
+                        newState.hasDirtyBitmap = true
+                        if (old != null && old != decoded && !old.isRecycled) {
+                            old.recycle()
+                        }
+                    }
+                    onFrameReady?.invoke()
+                }
+                newState.isDecoding = false
+            }
+            videoStates[item.id] = newState
+            state = newState
+        }
+
+        // Upload ready decoded frame on GL thread
+        if (state.hasDirtyBitmap) {
+            var bmpToUpload: Bitmap? = null
+            synchronized(state.lock) {
+                bmpToUpload = state.backBitmap
+                state.backBitmap = null
+                state.hasDirtyBitmap = false
+            }
+            if (bmpToUpload != null && !bmpToUpload!!.isRecycled) {
+                val w = bmpToUpload!!.width
+                val h = bmpToUpload!!.height
+                val targetTexId = if (state.texEntry.texId > 0) {
+                    state.texEntry.texId
+                } else {
+                    GLES20.glGenTextures(1, tempTexIds, 0)
+                    tempTexIds[0]
+                }
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, targetTexId)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmpToUpload, 0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+                bmpToUpload!!.recycle()
+
+                state.texEntry.texId = targetTexId
+                state.texEntry.width = w
+                state.texEntry.height = h
+                state.currentBucket = state.targetBucket
+            }
+        }
+
+        // Trigger background decoding if timestamp bucket advanced
+        if (state.currentBucket != frameBucket && !state.isDecoding) {
+            state.targetBucket = frameBucket
+            state.targetSourceUs = targetSourceUs
+            state.isDecoding = true
+            try {
+                pipDecodeExecutor.execute(state.decodeTask)
+            } catch (_: Throwable) {
+                state.isDecoding = false
+            }
+        }
+
+        return if (state.texEntry.texId > 0) state.texEntry else null
+    }
+
     fun remove(itemId: String) {
-        val cached = cache.remove(itemId) ?: return
-        if (cached.texId > 0) {
+        val cached = cache.remove(itemId)
+        if (cached != null && cached.texId > 0) {
             GLES20.glDeleteTextures(1, intArrayOf(cached.texId), 0)
             cached.texId = 0
+        }
+        val vState = videoStates.remove(itemId)
+        if (vState != null) {
+            if (vState.texEntry.texId > 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(vState.texEntry.texId), 0)
+                vState.texEntry.texId = 0
+            }
+            synchronized(vState.lock) {
+                vState.backBitmap?.recycle()
+                vState.backBitmap = null
+            }
         }
     }
 
@@ -398,10 +605,91 @@ class OverlayTextureCache {
             }
         }
         cache.clear()
+
+        for (vState in videoStates.values) {
+            if (vState.texEntry.texId > 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(vState.texEntry.texId), 0)
+                vState.texEntry.texId = 0
+            }
+            synchronized(vState.lock) {
+                vState.backBitmap?.recycle()
+                vState.backBitmap = null
+            }
+        }
+        videoStates.clear()
     }
 
     fun release() {
         clear()
+        retrieverPool.release()
+        try {
+            pipDecodeExecutor.shutdownNow()
+        } catch (_: Throwable) {}
+    }
+}
+
+private class VideoPipState(
+    val itemId: String,
+    val texEntry: CachedOverlayTex = CachedOverlayTex(),
+    var currentBucket: Long = -1L,
+    @Volatile var targetBucket: Long = -1L,
+    @Volatile var targetSourceUs: Long = 0L,
+    @Volatile var isDecoding: Boolean = false,
+    @Volatile var hasDirtyBitmap: Boolean = false,
+    var backBitmap: Bitmap? = null,
+    val lock: Any = Any()
+) {
+    var decodeTask: Runnable? = null
+}
+
+private class RetrieverPool(private val maxEntries: Int = 4) {
+    private val entries = ArrayList<RetrieverEntry>(maxEntries)
+
+    class RetrieverEntry(
+        var path: String = "",
+        val retriever: MediaMetadataRetriever = MediaMetadataRetriever(),
+        var lastUsedTime: Long = 0L
+    )
+
+    @Synchronized
+    fun getRetriever(path: String): MediaMetadataRetriever? {
+        if (path.isEmpty()) return null
+        val now = System.currentTimeMillis()
+        val existing = entries.firstOrNull { it.path == path }
+        if (existing != null) {
+            existing.lastUsedTime = now
+            return existing.retriever
+        }
+        if (entries.size < maxEntries) {
+            val entry = RetrieverEntry(path, MediaMetadataRetriever(), now)
+            try {
+                entry.retriever.setDataSource(path)
+                entries.add(entry)
+                return entry.retriever
+            } catch (_: Throwable) {
+                try { entry.retriever.release() } catch (_: Throwable) {}
+                return null
+            }
+        }
+        val lru = entries.minByOrNull { it.lastUsedTime } ?: entries[0]
+        try {
+            lru.retriever.setDataSource(path)
+            lru.path = path
+            lru.lastUsedTime = now
+            return lru.retriever
+        } catch (_: Throwable) {
+            return null
+        }
+    }
+
+    @Synchronized
+    fun release() {
+        for (e in entries) {
+            try {
+                e.retriever.release()
+            } catch (_: Throwable) {}
+        }
+        entries.clear()
     }
 }
 

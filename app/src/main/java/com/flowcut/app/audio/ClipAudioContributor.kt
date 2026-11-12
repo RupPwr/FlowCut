@@ -513,7 +513,8 @@ class ClipAudioContributor(
 
         for (k in 0 until overlayCount) {
             val item = overlays[k]
-            if (item.type != LayerType.AUDIO) continue
+            if (item.type != LayerType.AUDIO && item.type != LayerType.VIDEO) continue
+            if (item.volume <= 0.001f) continue
             val path = item.mediaPath
             if (path.isEmpty()) continue
             if (item.startUs >= endTimelineUs || item.endUs <= startTimelineUs) continue
@@ -552,7 +553,7 @@ class ClipAudioContributor(
                 for (j in 0 until overlayCount) {
                     if (j == k) continue
                     val other = overlays[j]
-                    if (other.type == LayerType.AUDIO && other.laneIndex == item.laneIndex && other.mediaPath == path) {
+                    if ((other.type == item.type) && other.laneIndex == item.laneIndex && other.mediaPath == path) {
                         if (other.endUs == item.startUs) hasPrecedingTouching = true
                         if (other.startUs == item.endUs) hasFollowingTouching = true
                     }

@@ -72,6 +72,7 @@ fun BottomToolbar(
     isPipOverlaySelected: Boolean = false,
     isPipActive: Boolean = false,
     isPipItemSelected: Boolean = false,
+    isPipVideo: Boolean = false,
     canSplitPip: Boolean = true,
     isAudioActive: Boolean = false,
     isAudioItemSelected: Boolean = false,
@@ -178,6 +179,7 @@ fun BottomToolbar(
         } else if (isPipActive) {
             PipToolbarContent(
                 isPipItemSelected = isPipItemSelected,
+                isPipVideo = isPipVideo,
                 canSplitPip = canSplitPip,
                 onClearSelection = onClearSelection,
                 onAddOverlayClick = onAddOverlayClick,
@@ -185,6 +187,8 @@ fun BottomToolbar(
                 onAnimationClick = onAnimationClick,
                 onDeleteClipClick = onDeleteClipClick,
                 onOpacityClick = onOpacityClick,
+                onVolumeClick = onVolumeClick,
+                onSpeedClick = onSpeedClick,
                 onCopyClick = onCopyClick,
                 onRotateClick = onRotateClick,
                 onFlipClick = onFlipClick
@@ -1228,6 +1232,7 @@ private fun FilterEffectToolbarContent(
 @Composable
 private fun PipToolbarContent(
     isPipItemSelected: Boolean,
+    isPipVideo: Boolean,
     canSplitPip: Boolean,
     onClearSelection: () -> Unit,
     onAddOverlayClick: () -> Unit,
@@ -1235,12 +1240,15 @@ private fun PipToolbarContent(
     onAnimationClick: () -> Unit,
     onDeleteClipClick: (() -> Unit)?,
     onOpacityClick: () -> Unit,
+    onVolumeClick: () -> Unit,
+    onSpeedClick: () -> Unit,
     onCopyClick: () -> Unit,
     onRotateClick: () -> Unit,
     onFlipClick: () -> Unit
 ) {
     val colors = FlowCutTheme.colors
     val itemToolsEnabled = isPipItemSelected
+    val volumeSpeedEnabled = isPipItemSelected && isPipVideo
     val splitEnabled = isPipItemSelected && canSplitPip
             Row(
                 modifier = Modifier
@@ -1368,7 +1376,65 @@ private fun PipToolbarContent(
                         )
                     }
 
-                    // 4. SPLIT
+                    // 4. VOLUME
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (volumeSpeedEnabled) 1.0f else 0.35f)
+                            .then(if (volumeSpeedEnabled) Modifier.clickable { onVolumeClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = "VOLUME",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "VOLUME",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 5. SPEED
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 52.dp)
+                            .fillMaxHeight()
+                            .alpha(if (volumeSpeedEnabled) 1.0f else 0.35f)
+                            .then(if (volumeSpeedEnabled) Modifier.clickable { onSpeedClick() } else Modifier)
+                            .padding(horizontal = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = "SPEED",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "SPEED",
+                            color = colors.textPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // 6. SPLIT
                     Column(
                         modifier = Modifier
                             .widthIn(min = 52.dp)

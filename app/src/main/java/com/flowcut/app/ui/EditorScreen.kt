@@ -2581,6 +2581,7 @@ fun EditorScreen(
                 vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S2_PIP_ITEM
             val isPipItemSelected = vmUiState?.focusMode is com.flowcut.app.ui.timeline.TimelineFocusState.S2_PIP_ITEM
             val selectedPipItem = if (isPipItemSelected) activeOverlayForToolbar else null
+            val isPipVideo = selectedPipItem?.type == com.flowcut.app.engine.LayerType.VIDEO
             val currentPlayheadUs = playbackController.playhead.timeUs
             val canSplitPip = selectedPipItem != null &&
                 currentPlayheadUs >= (selectedPipItem.startUs + 200_000L) &&
@@ -2609,6 +2610,7 @@ fun EditorScreen(
                 isPipOverlaySelected = isPipOverlay,
                 isPipActive = isPipActive,
                 isPipItemSelected = isPipItemSelected,
+                isPipVideo = isPipVideo,
                 canSplitPip = canSplitPip,
                 isAudioActive = isAudioActive,
                 isAudioItemSelected = isAudioItemSelected,
@@ -2685,7 +2687,7 @@ fun EditorScreen(
                 },
                 onTrimClick = handleOpenTrim,
                 onVolumeClick = {
-                    if (isAudioItemSelected) {
+                    if (isAudioItemSelected || (isPipItemSelected && isPipVideo)) {
                         isAudioVolumeSheetVisible = true
                     } else {
                         isAdjustSheetVisible = false
@@ -2697,7 +2699,7 @@ fun EditorScreen(
                     }
                 },
                 onSpeedClick = {
-                    if (isAudioItemSelected) {
+                    if (isAudioItemSelected || (isPipItemSelected && isPipVideo)) {
                         isAudioSpeedSheetVisible = true
                     } else {
                         handleOpenSpeed()

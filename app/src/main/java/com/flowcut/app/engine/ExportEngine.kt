@@ -202,7 +202,7 @@ class ExportEngine(private val context: Context) {
         val activeLayerSet = ActiveLayerSet()
 
         val plan = PreviewRenderer.currentLayerPlan
-        val audioOverlays = plan.items.filter { it.type == LayerType.AUDIO }
+        val audioOverlays = plan.items.filter { it.type == LayerType.AUDIO || (it.type == LayerType.VIDEO && it.volume > 0.001f) }
         if (audioOverlays.isNotEmpty()) {
             ClipAudioContributor.syncAudioOverlays(audioOverlays)
             for (item in audioOverlays) {
@@ -725,7 +725,11 @@ class ExportEngine(private val context: Context) {
                             val item = plan.items.getOrNull(itemIndex) ?: continue
                             val effTransform = animEvaluator.evaluate(item, res.tUs)
                             if (effTransform.opacity <= 0.001f) continue
-                            val cached = otc.getOrBakeTexture(item) ?: continue
+                            val cached = if (item.type == LayerType.VIDEO) {
+                                otc.getOrUpdateVideoTexture(item, res.tUs, isSynchronous = true)
+                            } else {
+                                otc.getOrBakeTexture(item)
+                            } ?: continue
                             if (cached.texId > 0) {
                                 rnd.drawOverlayQuad(
                                     texId = cached.texId,
