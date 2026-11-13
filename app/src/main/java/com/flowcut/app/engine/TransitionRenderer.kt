@@ -1257,7 +1257,8 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         lazyCompileBudgetRemaining = 1
 
         val isSlotBPrimary = (spec.opacityA <= 0.001f && spec.opacityB > 0.001f) ||
-                (spec.transitionType == 1 && spec.easedP >= 0.999f)
+                (spec.transitionType > 0 && spec.easedP >= 0.999f) ||
+                (spec.type != TransitionType.NONE && spec.easedP >= 0.999f)
         val isRealTransition = !isSlotBPrimary &&
                 ((spec.transitionType > 0 && spec.easedP > 0.001f && spec.easedP < 0.999f) ||
                  (spec.type != TransitionType.NONE && spec.easedP > 0.001f && spec.easedP < 0.999f))
@@ -1378,7 +1379,7 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         GLES30.glUniform2fv(transitionUniforms.uCropBLoc, 1, spec.cropB, 0)
         GLES30.glUniform1f(transitionUniforms.uPLoc, spec.easedP)
 
-        val glType = if (spec.transitionType >= 0) {
+        val glType = if (spec.transitionType > 0) {
             spec.transitionType
         } else {
             when (spec.type) {

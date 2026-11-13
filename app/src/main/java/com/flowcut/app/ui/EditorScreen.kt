@@ -109,6 +109,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.flowcut.app.ALL_FEATURES
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -300,10 +301,6 @@ fun EditorScreen(
     }
 
     val snapshotHolder = remember { SnapshotHolder(TimelineSnapshot(1L, coreProject)) }
-    LaunchedEffect(coreProject) {
-        snapshotHolder.current = TimelineSnapshot(System.nanoTime(), coreProject)
-    }
-
     val audioContributor = remember(snapshotHolder) { ClipAudioContributor(snapshotHolder) }
     val featureRegistry = remember(audioContributor) {
         DefaultFeatureRegistry().apply {
@@ -404,6 +401,12 @@ fun EditorScreen(
                 }
             }
         )
+    }
+
+    LaunchedEffect(coreProject) {
+        snapshotHolder.current = TimelineSnapshot(System.nanoTime(), coreProject)
+        previewRenderer.requestRender()
+        frameDriver.wake()
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -3158,22 +3161,17 @@ fun EditorScreen(
             )
         }
 
-        // Duration Sheet
-        if (durationSheetVisible && selectedJunctionIndex != null) {
-            val j = selectedJunctionIndex
-            val transition = timeline.project.transitions.getOrNull(j)
-            if (transition != null && transition.type != TransitionType.NONE) {
-                DurationSheet(
-                    transitionType = transition.type,
-                    currentDurationMs = transition.durationMs,
-                    maxDurationMs = timeline.maxDuration(j),
-                    onDurationChange = onUpdateTransitionDuration,
-                    onDurationChangeFinished = onCommitTransitionDuration,
-                    onRemoveTransition = onRemoveTransition,
-                    onDismiss = onCloseDurationSheet
-                )
-            }
-        }
+        // Interactive Clip-to-Clip Transition Sheet (Phase 10)
+        TransitionSheetHost(
+            selectedJunctionIndex = selectedJunctionIndex,
+            resolvedViewModel = resolvedViewModel,
+            snapshotHolder = snapshotHolder,
+            playbackController = playbackController,
+            frameDriver = frameDriver,
+            previewRenderer = previewRenderer,
+            coroutineScope = coroutineScope,
+            onDeselectAll = onDeselectAll
+        )
 
         // Export Sheet
         if (exportSheetVisible) {
@@ -6344,4 +6342,100 @@ private object FirstClipThumbnailCache {
             null
         }
     }
+}
+
+@Composable
+private fun TransitionSheetHost(
+    selectedJunctionIndex: Int?,
+    resolvedViewModel: EditorViewModel?,
+    snapshotHolder: SnapshotHolder,
+    playbackController: PlaybackController,
+    frameDriver: FrameDriver,
+    previewRenderer: PreviewRenderer,
+    coroutineScope: CoroutineScope,
+    onDeselectAll: () -> Unit
+) {
+    if (selectedJunctionIndex == null) return
+    val j = selectedJunctionIndex
+    val initialMode = resolvedViewModel?.getJunctionTransitionMode(j) ?: 0
+    val maxDur = resolvedViewModel?.getMaxTransitionDuration(j) ?: 1000L
+    val initialDur = resolvedViewModel?.uiState?.value?.project?.transitions?.getOrNull(j)?.durationMs
+        ?.coerceIn(200L, maxDur) ?: 600L
+
+    var previewJob by remember { mutableStateOf<Job?>(null) }
+
+    fun triggerAutoPreview() {
+        previewJob?.cancel()
+        val s = snapshotHolder.current
+        if (j in 0 until s.main.n - 1) {
+            val transStartUs = msToUs(s.main.startMs[j + 1])
+            val transEndUs = msToUs(s.main.endMs[j])
+            val seekUs = maxOf(0L, transStartUs - 200_000L)
+            playbackController.seekTo(seekUs)
+            playbackController.play()
+            frameDriver.wake()
+            previewJob = coroutineScope.launch {
+                val totalPlayMs = usToMs(transEndUs - seekUs) + 300L
+                delay(totalPlayMs.coerceIn(400L, 2500L))
+                playbackController.pause()
+                frameDriver.wake()
+            }
+        }
+    }
+
+    TransitionSheet(
+        activeJunctionIndex = j,
+        initialMode = initialMode,
+        initialDurationMs = initialDur,
+        maxDurationMs = maxDur,
+        onTransitionChanged = { mode, durMs ->
+            resolvedViewModel?.setTransitionLive(j, mode, durMs)
+            resolvedViewModel?.let { vm ->
+                snapshotHolder.current = vm.getSnapshot()
+            }
+            previewRenderer.requestRender()
+            frameDriver.wake()
+            if (mode > 0) {
+                triggerAutoPreview()
+            }
+        },
+        onApplyToAll = { mode, durMs ->
+            resolvedViewModel?.commitApplyTransitionToAll(mode, durMs)
+            resolvedViewModel?.let { vm ->
+                snapshotHolder.current = vm.getSnapshot()
+            }
+            previewRenderer.requestRender()
+            frameDriver.wake()
+            onDeselectAll()
+        },
+        onDone = { mode, durMs ->
+            resolvedViewModel?.commitTransition(j, mode, durMs)
+            resolvedViewModel?.let { vm ->
+                snapshotHolder.current = vm.getSnapshot()
+            }
+            previewRenderer.requestRender()
+            frameDriver.wake()
+            onDeselectAll()
+        },
+        onCancel = {
+            previewJob?.cancel()
+            resolvedViewModel?.cancelTransition()
+            resolvedViewModel?.let { vm ->
+                snapshotHolder.current = vm.getSnapshot()
+            }
+            previewRenderer.requestRender()
+            frameDriver.wake()
+            onDeselectAll()
+        },
+        onDismiss = {
+            previewJob?.cancel()
+            resolvedViewModel?.cancelTransition()
+            resolvedViewModel?.let { vm ->
+                snapshotHolder.current = vm.getSnapshot()
+            }
+            previewRenderer.requestRender()
+            frameDriver.wake()
+            onDeselectAll()
+        }
+    )
 }

@@ -3933,7 +3933,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setTransitionLive(junctionIndex: Int, mode: Int, durationMs: Long) {
         val currentProject = _uiState.value.project
-        if (junctionIndex !in currentProject.transitions.indices) return
+        val targetSize = maxOf(0, currentProject.clips.size - 1)
+        val newTransitions = currentProject.transitions.toMutableList()
+        while (newTransitions.size < targetSize) {
+            newTransitions.add(Transition())
+        }
+        if (junctionIndex !in newTransitions.indices) return
         if (mode <= 0) {
             junctionTransitionModes.remove(junctionIndex)
             PreviewRenderer.setJunctionTransitionType(junctionIndex, 0)
@@ -3943,8 +3948,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         val maxDur = getMaxTransitionDuration(junctionIndex)
         val clampedDur = if (mode <= 0) 0L else durationMs.coerceIn(200L, maxDur)
-        val newTransitions = currentProject.transitions.toMutableList()
-        newTransitions[junctionIndex] = Transition(mapTransitionModeToModel(mode), clampedDur)
+        val modelType = if (mode <= 0) TransitionType.NONE else mapTransitionModeToModel(mode)
+        newTransitions[junctionIndex] = Transition(modelType, clampedDur)
         val newProject = currentProject.copy(transitions = newTransitions)
         updateProject(newProject, recordUndo = false)
     }
@@ -3968,10 +3973,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun commitApplyTransitionToAll(mode: Int, durationMs: Long) {
         val currentProject = _uiState.value.project
-        if (currentProject.transitions.isEmpty()) return
+        val targetSize = maxOf(0, currentProject.clips.size - 1)
+        if (targetSize <= 0) return
         undoStack.push(currentProject)
         val newTransitions = currentProject.transitions.toMutableList()
-        val modelType = mapTransitionModeToModel(mode)
+        while (newTransitions.size < targetSize) {
+            newTransitions.add(Transition())
+        }
+        val modelType = if (mode <= 0) TransitionType.NONE else mapTransitionModeToModel(mode)
         for (j in newTransitions.indices) {
             val maxDur = getMaxTransitionDuration(j)
             val clampedDur = if (mode <= 0) 0L else durationMs.coerceIn(200L, maxDur)
