@@ -231,9 +231,9 @@ class FrameSource(
         try {
             val bufferInfo = MediaCodec.BufferInfo()
 
-            // Feed up to 4 input buffers (0L non-blocking)
+            // Feed up to 8 input buffers (0L non-blocking)
             var fed = 0
-            while (fed < 4 && !inputEos) {
+            while (fed < 8 && !inputEos) {
                 fed++
                 val inIndex = dec.dequeueInputBuffer(0L)
                 if (inIndex >= 0) {
@@ -254,10 +254,10 @@ class FrameSource(
                 }
             }
 
-            // Drain up to 4 output buffers (first drain with 2,000us timeout, subsequent 0L)
+            // Drain up to 4 output buffers (first drain with 3,000us timeout, subsequent 0L)
             var drained = 0
             while (drained < 4 && !outputEos) {
-                val timeoutUs = if (drained == 0) 2_000L else 0L
+                val timeoutUs = if (drained == 0) 3_000L else 0L
                 drained++
                 val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
                 if (outIndex >= 0) {
@@ -288,6 +288,33 @@ class FrameSource(
         return prewarmStage >= 3
     }
 
+    fun ensureDecodedAt(targetUs: Long): Boolean {
+        if (prewarmStage >= 3 && codec != null) return true
+        if (isPrepared && currentPtsUs != -1L && kotlin.math.abs(targetUs - currentPtsUs) <= 45_000L) {
+            prewarmStage = 3
+            return true
+        }
+        if (prewarmStage < 1 || extractor == null || videoFormat == null) {
+            if (!prepareExtractorOnly()) return false
+        }
+        if (prewarmStage < 2 || codec == null) {
+            if (!startCodecAndSeek(targetUs)) return false
+        }
+        val fastKeyframe = targetUs <= 100_000L
+        val didRender = seekTo(targetUs, fastKeyframeOnly = fastKeyframe)
+        if (didRender) {
+            prewarmStage = 3
+            return true
+        }
+        for (i in 0 until 5) {
+            if (stepPrewarmTo(targetUs)) {
+                prewarmStage = 3
+                return true
+            }
+        }
+        return prewarmStage >= 3
+    }
+
     fun prepare() {
         if (isPrepared) return
         if (prewarmStage < 1) {
@@ -308,7 +335,10 @@ class FrameSource(
     val currentPath: String get() = clip.path
 
     fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false): Boolean {
-        if (fastKeyframeOnly && isPrepared && lastSeekTargetUs != -1L && kotlin.math.abs(localUs - lastSeekTargetUs) < 60_000L) {
+        if (isPrepared && currentPtsUs != -1L && kotlin.math.abs(localUs - currentPtsUs) <= 45_000L) {
+            return false
+        }
+        if (fastKeyframeOnly && isPrepared && currentPtsUs != -1L && lastSeekTargetUs != -1L && kotlin.math.abs(localUs - lastSeekTargetUs) < 60_000L) {
             return false
         }
         val ext = extractor ?: return false
@@ -429,7 +459,23 @@ class FrameSource(
 
             // Case 2: Playback / Paused mode
             // If already accurately latched on this target in PAUSED mode, do zero work!
-            if (isAccuratePausedFrameLatched && localUs == lastRenderedLocalUs) {
+            if (isAccuratePausedFrameLatched && kotlin.math.abs(localUs - lastRenderedLocalUs) <= 5_000L) {
+                return false
+            }
+
+            if (outputEos) {
+                isAccuratePausedFrameLatched = true
+                return false
+            }
+
+            val isInitial = currentPtsUs == -1L
+            // Backward jump > 50ms
+            val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 50_000L
+
+            // Decode whenever localUs >= currentPtsUs + 8_000L (8ms threshold instead of 25ms) so 30fps and 60fps clips never skip a frame during a fast transition
+            if (!isInitial && !isBackwardJump && currentPtsUs != -1L && localUs < currentPtsUs + 8_000L) {
+                lastRenderedLocalUs = localUs
+                isAccuratePausedFrameLatched = true
                 return false
             }
 
@@ -437,18 +483,6 @@ class FrameSource(
             if (isCatchingUpFromSeek && currentPtsUs >= lastSeekTargetUs - 50_000L) {
                 isCatchingUpFromSeek = false
             }
-
-            // Case C: Slow-motion / close frame pacing (12ms tolerance or forward within 500ms)
-            if (currentPtsUs != -1L && ((kotlin.math.abs(localUs - currentPtsUs) < 12_000L) ||
-                (currentPtsUs >= localUs - 4_000L && currentPtsUs <= localUs + 500_000L))) {
-                lastRenderedLocalUs = localUs
-                isAccuratePausedFrameLatched = true
-                return false
-            }
-
-            val isInitial = currentPtsUs == -1L
-            // Backward jump > 500ms
-            val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 500_000L
 
             if (isInitial || isBackwardJump) {
                 lastForwardKeyframeHopUs = -1L

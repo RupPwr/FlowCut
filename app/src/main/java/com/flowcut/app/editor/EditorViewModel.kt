@@ -3915,7 +3915,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (junctionIndex < 0 || junctionIndex >= clips.size - 1) return 1000L
         val d1 = clips[junctionIndex].durationMs
         val d2 = clips[junctionIndex + 1].durationMs
-        return maxOf(200L, minOf(d1, d2) / 2L)
+        return maxOf(200L, minOf(d1, d2) - 100L)
     }
 
     fun getJunctionTransitionMode(junctionIndex: Int): Int {
@@ -3947,7 +3947,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             PreviewRenderer.setJunctionTransitionType(junctionIndex, mode)
         }
         val maxDur = getMaxTransitionDuration(junctionIndex)
-        val clampedDur = if (mode <= 0) 0L else durationMs.coerceIn(200L, maxDur)
+        val defaultDur = (maxDur / 2L).coerceAtLeast(100L)
+        val effectiveDur = if (durationMs <= 0L) defaultDur else durationMs
+        val clampedDur = if (mode <= 0) 0L else effectiveDur.coerceIn(100L, maxDur)
         val modelType = if (mode <= 0) TransitionType.NONE else mapTransitionModeToModel(mode)
         newTransitions[junctionIndex] = Transition(modelType, clampedDur)
         val newProject = currentProject.copy(transitions = newTransitions)
@@ -3983,7 +3985,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val modelType = if (mode <= 0) TransitionType.NONE else mapTransitionModeToModel(mode)
         for (j in newTransitions.indices) {
             val maxDur = getMaxTransitionDuration(j)
-            val clampedDur = if (mode <= 0) 0L else durationMs.coerceIn(200L, maxDur)
+            val defaultDur = (maxDur / 2L).coerceAtLeast(100L)
+            val effectiveDur = if (durationMs <= 0L) defaultDur else durationMs
+            val clampedDur = if (mode <= 0) 0L else effectiveDur.coerceIn(100L, maxDur)
             newTransitions[j] = Transition(modelType, clampedDur)
             if (mode <= 0) {
                 junctionTransitionModes.remove(j)

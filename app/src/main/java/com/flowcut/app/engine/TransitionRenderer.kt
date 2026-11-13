@@ -24,6 +24,7 @@ data class DrawSpec(
     var type: TransitionType = TransitionType.NONE,
     var transitionType: Int = -1,
     var easedP: Float = 0f,
+    var swapTextures: Boolean = false,
     var matA: FloatArray = FloatArray(16),
     var matB: FloatArray = FloatArray(16),
     var cropA: FloatArray = FloatArray(2),
@@ -1068,6 +1069,9 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         baseUniforms.programId = buildProgram("BasePassthrough", vertexShaderSource, baseFragmentShaderSource)
         initBaseUniforms()
 
+        // Precompile Transition program during init() so entering a transition has 0.0ms compile latency
+        getOrCompileTransitionProgram(forceCompile = true)
+
         // Setup VAO & VBO
         val vaos = IntArray(1)
         GLES30.glGenVertexArrays(1, vaos, 0)
@@ -1152,10 +1156,12 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         return gradeEffectUniforms.programId
     }
 
-    private fun getOrCompileTransitionProgram(): Int {
+    private var lastLoggedTransP: Float = -1f
+
+    fun getOrCompileTransitionProgram(forceCompile: Boolean = false): Int {
         if (transitionUniforms.programId != 0) return transitionUniforms.programId
-        if (lazyCompileBudgetRemaining <= 0) return baseUniforms.programId
-        lazyCompileBudgetRemaining--
+        if (!forceCompile && lazyCompileBudgetRemaining <= 0) return baseUniforms.programId
+        if (!forceCompile) lazyCompileBudgetRemaining--
         transitionUniforms.programId = buildProgram("Transition", vertexShaderSource, transitionFragmentShaderSource)
         val p = transitionUniforms.programId
         transitionUniforms.uTexALoc = GLES30.glGetUniformLocation(p, "uTexA")
@@ -1256,12 +1262,8 @@ class TransitionRenderer(private val cacheDir: File? = null) {
     fun draw(spec: DrawSpec) {
         lazyCompileBudgetRemaining = 1
 
-        val isSlotBPrimary = (spec.opacityA <= 0.001f && spec.opacityB > 0.001f) ||
-                (spec.transitionType > 0 && spec.easedP >= 0.999f) ||
-                (spec.type != TransitionType.NONE && spec.easedP >= 0.999f)
-        val isRealTransition = !isSlotBPrimary &&
-                ((spec.transitionType > 0 && spec.easedP > 0.001f && spec.easedP < 0.999f) ||
-                 (spec.type != TransitionType.NONE && spec.easedP > 0.001f && spec.easedP < 0.999f))
+        val isSlotBPrimary = (spec.opacityA <= 0.001f && spec.opacityB > 0.001f)
+        val isRealTransition = (spec.transitionType > 0 || spec.type != TransitionType.NONE)
 
         if (isRealTransition) {
             val prog = getOrCompileTransitionProgram()
@@ -1365,12 +1367,15 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         val p = transitionUniforms.programId
         GLES30.glUseProgram(p)
 
+        val outgoingTex = if (spec.swapTextures) texBId else texAId
+        val incomingTex = if (spec.swapTextures) texAId else texBId
+
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texAId)
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, outgoingTex)
         GLES30.glUniform1i(transitionUniforms.uTexALoc, 0)
 
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texBId)
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, incomingTex)
         GLES30.glUniform1i(transitionUniforms.uTexBLoc, 1)
 
         GLES30.glUniformMatrix4fv(transitionUniforms.uMatALoc, 1, false, spec.matA, 0)
@@ -1391,6 +1396,10 @@ class TransitionRenderer(private val cacheDir: File? = null) {
             }
         }
         GLES30.glUniform1i(transitionUniforms.uTypeLoc, glType)
+        if (kotlin.math.abs(spec.easedP - lastLoggedTransP) >= 0.05f) {
+            lastLoggedTransP = spec.easedP
+            android.util.Log.d("FlowCutTrans", "type=${spec.transitionType} glType=$glType p=${spec.easedP}")
+        }
         GLES30.glUniform1f(transitionUniforms.uAspectLoc, spec.aspectRatio)
         GLES30.glUniform4fv(transitionUniforms.uAdjA0Loc, 1, spec.adjA0 ?: defaultAdj, 0)
         GLES30.glUniform4fv(transitionUniforms.uAdjA1Loc, 1, spec.adjA1 ?: defaultAdj, 0)

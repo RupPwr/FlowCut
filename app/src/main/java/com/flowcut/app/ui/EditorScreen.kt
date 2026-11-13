@@ -113,8 +113,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.withFrameNanos
 import com.flowcut.app.audio.AudioEngine
 import com.flowcut.app.audio.AudioFeature
 import com.flowcut.app.audio.ClipAudioContributor
@@ -6359,10 +6361,22 @@ private fun TransitionSheetHost(
     val j = selectedJunctionIndex
     val initialMode = resolvedViewModel?.getJunctionTransitionMode(j) ?: 0
     val maxDur = resolvedViewModel?.getMaxTransitionDuration(j) ?: 1000L
-    val initialDur = resolvedViewModel?.uiState?.value?.project?.transitions?.getOrNull(j)?.durationMs
-        ?.coerceIn(200L, maxDur) ?: 600L
+    val defaultDur = (maxDur / 2L).coerceAtLeast(100L)
+    val existingDur = resolvedViewModel?.uiState?.value?.project?.transitions?.getOrNull(j)?.durationMs
+    val initialDur = if (initialMode <= 0 || existingDur == null || existingDur <= 0L) {
+        defaultDur
+    } else {
+        existingDur.coerceIn(100L, maxDur)
+    }
 
     var previewJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(j) {
+        onDispose {
+            previewJob?.cancel()
+            previewJob = null
+        }
+    }
 
     fun triggerAutoPreview() {
         previewJob?.cancel()
@@ -6370,15 +6384,26 @@ private fun TransitionSheetHost(
         if (j in 0 until s.main.n - 1) {
             val transStartUs = msToUs(s.main.startMs[j + 1])
             val transEndUs = msToUs(s.main.endMs[j])
-            val seekUs = maxOf(0L, transStartUs - 200_000L)
-            playbackController.seekTo(seekUs)
-            playbackController.play()
+            val previewStartUs = (transStartUs - 1_000_000L).coerceAtLeast(0L)
+            playbackController.pause()
+            playbackController.seekTo(previewStartUs)
+            previewRenderer.requestRender()
             frameDriver.wake()
             previewJob = coroutineScope.launch {
-                val totalPlayMs = usToMs(transEndUs - seekUs) + 300L
-                delay(totalPlayMs.coerceIn(400L, 2500L))
-                playbackController.pause()
+                delay(80L)
+                playbackController.play()
                 frameDriver.wake()
+                while (isActive) {
+                    withFrameNanos { }
+                    if (playbackController.playhead.mode != PlayMode.PLAYING) {
+                        break
+                    }
+                    if (playbackController.playhead.timeUs >= transEndUs) {
+                        playbackController.pause()
+                        frameDriver.wake()
+                        break
+                    }
+                }
             }
         }
     }
@@ -6400,6 +6425,8 @@ private fun TransitionSheetHost(
             }
         },
         onApplyToAll = { mode, durMs ->
+            previewJob?.cancel()
+            previewJob = null
             resolvedViewModel?.commitApplyTransitionToAll(mode, durMs)
             resolvedViewModel?.let { vm ->
                 snapshotHolder.current = vm.getSnapshot()
@@ -6409,6 +6436,9 @@ private fun TransitionSheetHost(
             onDeselectAll()
         },
         onDone = { mode, durMs ->
+            previewJob?.cancel()
+            previewJob = null
+            resolvedViewModel?.setTransitionLive(j, mode, durMs)
             resolvedViewModel?.commitTransition(j, mode, durMs)
             resolvedViewModel?.let { vm ->
                 snapshotHolder.current = vm.getSnapshot()

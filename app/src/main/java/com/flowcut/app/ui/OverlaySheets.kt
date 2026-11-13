@@ -4237,12 +4237,14 @@ fun TransitionSheet(
     var selectedMode by androidx.compose.runtime.remember(activeJunctionIndex) {
         androidx.compose.runtime.mutableIntStateOf(initialMode)
     }
+    val defaultDurMs = (maxDurationMs / 2L).coerceAtLeast(100L)
     var currentDurationMs by androidx.compose.runtime.remember(activeJunctionIndex) {
-        androidx.compose.runtime.mutableLongStateOf(initialDurationMs.coerceIn(200L, maxDurationMs))
+        val startDur = if (initialMode <= 0 || initialDurationMs <= 0L) defaultDurMs else initialDurationMs.coerceIn(100L, maxDurationMs)
+        androidx.compose.runtime.mutableLongStateOf(startDur)
     }
 
-    val maxSec = (maxDurationMs / 1000f).coerceAtLeast(0.3f)
-    val durSec = (currentDurationMs / 1000f).coerceIn(0.2f, maxSec)
+    val maxSec = (maxDurationMs / 1000f).coerceAtLeast(0.2f)
+    val durSec = (currentDurationMs / 1000f).coerceIn(0.1f, maxSec)
 
     val transitionItems = listOf(
         Triple(0, "None", Icons.Default.Block),
@@ -4336,7 +4338,7 @@ fun TransitionSheet(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Duration: ${String.format(java.util.Locale.US, "%.1fs", durSec)}",
+                        text = "Duration: ${String.format(java.util.Locale.US, "%.1fs", durSec)} / ${String.format(java.util.Locale.US, "%.1fs", maxSec)} max",
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
@@ -4366,11 +4368,10 @@ fun TransitionSheet(
                 Slider(
                     value = durSec,
                     onValueChange = { newSec ->
-                        val newMs = (newSec * 1000f).toLong().coerceIn(200L, maxDurationMs)
+                        val newMs = (newSec * 1000f).toLong().coerceIn(100L, maxDurationMs)
                         currentDurationMs = newMs
-                        onTransitionChanged(selectedMode, newMs)
                     },
-                    valueRange = 0.2f..maxSec,
+                    valueRange = 0.1f..maxSec,
                     enabled = selectedMode > 0,
                     colors = SliderDefaults.colors(
                         thumbColor = PINK_RED_ACCENT,
@@ -4402,7 +4403,11 @@ fun TransitionSheet(
                                     shape = RoundedCornerShape(10.dp)
                                 )
                                 .clickable {
+                                    val prevMode = selectedMode
                                     selectedMode = mode
+                                    if (mode > 0 && prevMode == 0) {
+                                        currentDurationMs = defaultDurMs
+                                    }
                                     onTransitionChanged(mode, currentDurationMs)
                                 }
                                 .padding(vertical = 8.dp, horizontal = 4.dp),

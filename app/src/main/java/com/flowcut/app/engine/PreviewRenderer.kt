@@ -314,6 +314,10 @@ class PreviewRenderer(
     private var standbySlotReadyForClipId: String? = null
     private var standbyPreparedPath: String? = null
     private var standbyPreparedInUs: Long = -1L
+    private var lastTransitionIncomingSlot: Int = -1
+    private var lastTransitionIncomingClipIndex: Int = -1
+    private var lastRenderedTransitionJunction: Int = -1
+    private var smoothedTransitionP: Float = 0f
 
     // Pre-allocated arrays and structures (Rule R10: Zero heap allocations on hot path)
     @Volatile var trimPreviewTimeUs: Long = -1L
@@ -662,64 +666,139 @@ class PreviewRenderer(
             if (frame.isTransition && frame.clipBIndex >= 0) {
                 val clipB = s.project.clips.getOrNull(frame.clipBIndex)
                 if (clipB != null) {
-                    // Ensure Clip A is on Slot A (non-blocking step)
-                    val clipAChanged = frameSourceA == null ||
-                            currentClipIndexA != frame.clipAIndex ||
-                            frameSourceA?.clip?.path != clipA.path
+                    val isOutgoingOnSlotB = (currentClipIndexB == frame.clipAIndex && frameSourceB?.clip?.id == clipA.id && currentClipIndexA != frame.clipAIndex)
+                    drawSpec.swapTextures = isOutgoingOnSlotB
 
-                    if (clipAChanged) {
-                        if (frameSourceA == null || frameSourceA?.clip?.path != clipA.path) {
+                    val transformA = getClipTransform(clipA.id)
+                    val transformB = getClipTransform(clipB.id)
+
+                    if (isOutgoingOnSlotB) {
+                        // Outgoing clipA is on Slot B (stB)
+                        val clipAChanged = frameSourceB == null ||
+                                currentClipIndexB != frame.clipAIndex ||
+                                frameSourceB?.clip?.id != clipA.id
+                        if (clipAChanged) {
+                            frameSourceB?.release()
+                            frameSourceB = FrameSource(toLegacyClip(clipA), stB)
+                            currentClipIndexB = frame.clipAIndex
+                        }
+                        val fsOutgoing = frameSourceB
+                        if (fsOutgoing != null && fsOutgoing.prewarmStage < 3) {
+                            fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
+                        }
+                        val renderedA = try {
+                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) ?: false
+                        } catch (_: Exception) { false }
+                        if (renderedA || hasPendingSurfaceFrameB.getAndSet(false)) {
+                            try {
+                                stB.updateTexImage()
+                                stB.getTransformMatrix(rawMatB)
+                                isFirstFrameLatched = true
+                            } catch (_: Exception) {}
+                        }
+
+                        // Incoming clipB is on Slot A (stA)
+                        val clipBChanged = frameSourceA == null ||
+                                currentClipIndexA != frame.clipBIndex ||
+                                frameSourceA?.clip?.id != clipB.id
+                        if (clipBChanged) {
+                            frameSourceA?.release()
+                            frameSourceA = FrameSource(toLegacyClip(clipB), stA)
+                            currentClipIndexA = frame.clipBIndex
+                        }
+                        val fsIncoming = frameSourceA
+                        if (fsIncoming != null && fsIncoming.prewarmStage < 3) {
+                            fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
+                        }
+                        val renderedB = try {
+                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing) ?: false
+                        } catch (_: Exception) { false }
+                        if (renderedB || hasPendingSurfaceFrameA.getAndSet(false)) {
+                            try {
+                                stA.updateTexImage()
+                                stA.getTransformMatrix(rawMatA)
+                                isFirstFrameLatched = true
+                            } catch (_: Exception) {}
+                        }
+
+                        computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
+                        System.arraycopy(rawMatB, 0, matA, 0, 16)
+                        calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
+                        computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                        Matrix.multiplyMM(bgMatA, 0, rawMatB, 0, bgNormMat, 0)
+
+                        computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
+                        System.arraycopy(rawMatA, 0, matB, 0, 16)
+                        calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
+                        computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                        Matrix.multiplyMM(bgMatB, 0, rawMatA, 0, bgNormMat, 0)
+                    } else {
+                        // Outgoing clipA is on Slot A (stA)
+                        val clipAChanged = frameSourceA == null ||
+                                currentClipIndexA != frame.clipAIndex ||
+                                frameSourceA?.clip?.id != clipA.id
+                        if (clipAChanged) {
                             frameSourceA?.release()
                             frameSourceA = FrameSource(toLegacyClip(clipA), stA)
                             currentClipIndexA = frame.clipAIndex
                         }
-                        val fsA = frameSourceA
-                        if (fsA != null) {
-                            when (fsA.prewarmStage) {
-                                0 -> {
-                                    fsA.prepareExtractorOnly()
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                1 -> {
-                                    fsA.startCodecAndSeek(frame.clipASourceUs)
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                2 -> {
-                                    fsA.stepPrewarmTo(frame.clipASourceUs)
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                else -> {
-                                    try {
-                                        fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
-                                    } catch (_: Exception) {}
-                                }
-                            }
+                        val fsOutgoing = frameSourceA
+                        if (fsOutgoing != null && fsOutgoing.prewarmStage < 3) {
+                            fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
-                    } else {
-                        try {
-                            frameSourceA?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
-                        } catch (_: Exception) {}
+                        val renderedA = try {
+                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) ?: false
+                        } catch (_: Exception) { false }
+                        if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
+                            try {
+                                stA.updateTexImage()
+                                stA.getTransformMatrix(rawMatA)
+                                isFirstFrameLatched = true
+                            } catch (_: Exception) {}
+                        }
+
+                        // Incoming clipB is on Slot B (stB)
+                        val clipBChanged = frameSourceB == null ||
+                                currentClipIndexB != frame.clipBIndex ||
+                                frameSourceB?.clip?.id != clipB.id
+                        if (clipBChanged) {
+                            frameSourceB?.release()
+                            frameSourceB = FrameSource(toLegacyClip(clipB), stB)
+                            currentClipIndexB = frame.clipBIndex
+                        }
+                        val fsIncoming = frameSourceB
+                        if (fsIncoming != null && fsIncoming.prewarmStage < 3) {
+                            fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
+                        }
+                        val renderedB = try {
+                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing) ?: false
+                        } catch (_: Exception) { false }
+                        if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
+                            try {
+                                stB.updateTexImage()
+                                stB.getTransformMatrix(rawMatB)
+                                isFirstFrameLatched = true
+                            } catch (_: Exception) {}
+                        }
+
+                        computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
+                        System.arraycopy(rawMatA, 0, matA, 0, 16)
+                        calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
+                        computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                        Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
+
+                        computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
+                        System.arraycopy(rawMatB, 0, matB, 0, 16)
+                        calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
+                        computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                        Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
                     }
-                    if (hasPendingSurfaceFrameA.getAndSet(false)) {
-                        try {
-                            stA.updateTexImage()
-                            stA.getTransformMatrix(rawMatA)
-                            isFirstFrameLatched = true
-                        } catch (_: Exception) {}
-                    }
-                    val transformA = getClipTransform(clipA.id)
-                    computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
-                    System.arraycopy(rawMatA, 0, matA, 0, 16)
-                    calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
-                    computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
-                    Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
+
+                    val aScreen = if (canvasAspectRatio > 0f) canvasAspectRatio else (9f / 16f)
+
                     val bgA = getClipBackground(clipA.id)
                     var bgModeA = packBackground(bgA, bgParamsA)
                     val videoAspectA = computeVideoAspect(clipA.displayWidth, clipA.displayHeight, transformA)
-                    val aScreen = if (canvasAspectRatio > 0f) canvasAspectRatio else (9f / 16f)
                     if (bgModeA == 0 && (kotlin.math.abs(videoAspectA - aScreen) > 0.01f || transformA.scale < 0.999f)) {
                         bgModeA = 2
                         bgParamsA[0] = 0f
@@ -731,60 +810,6 @@ class PreviewRenderer(
                         bgModeA = 0
                     }
 
-                    // Ensure Clip B is on Slot B (non-blocking step)
-                    val clipBChanged = frameSourceB == null ||
-                            currentClipIndexB != frame.clipBIndex ||
-                            frameSourceB?.clip?.path != clipB.path
-
-                    if (clipBChanged) {
-                        if (frameSourceB == null || frameSourceB?.clip?.path != clipB.path) {
-                            frameSourceB?.release()
-                            frameSourceB = FrameSource(toLegacyClip(clipB), stB)
-                            currentClipIndexB = frame.clipBIndex
-                        }
-                        val fsB = frameSourceB
-                        if (fsB != null) {
-                            when (fsB.prewarmStage) {
-                                0 -> {
-                                    fsB.prepareExtractorOnly()
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                1 -> {
-                                    fsB.startCodecAndSeek(frame.clipBSourceUs)
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                2 -> {
-                                    fsB.stepPrewarmTo(frame.clipBSourceUs)
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                else -> {
-                                    try {
-                                        fsB.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing)
-                                    } catch (_: Exception) {}
-                                }
-                            }
-                        }
-                    } else {
-                        try {
-                            frameSourceB?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing)
-                        } catch (_: Exception) {}
-                    }
-                    if (hasPendingSurfaceFrameB.getAndSet(false)) {
-                        try {
-                            stB.updateTexImage()
-                            stB.getTransformMatrix(rawMatB)
-                            isFirstFrameLatched = true
-                        } catch (_: Exception) {}
-                    }
-                    val transformB = getClipTransform(clipB.id)
-                    computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
-                    System.arraycopy(rawMatB, 0, matB, 0, 16)
-                    calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
-                    computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
-                    Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
                     val bgB = getClipBackground(clipB.id)
                     var bgModeB = packBackground(bgB, bgParamsB)
                     val videoAspectB = computeVideoAspect(clipB.displayWidth, clipB.displayHeight, transformB)
@@ -799,84 +824,145 @@ class PreviewRenderer(
                         bgModeB = 0
                     }
 
-                    val isSlotBReady = (frameSourceB?.prewarmStage ?: 0) >= 3
-                    val transType = getJunctionTransitionType(frame.clipAIndex)
-                    val easedP = if (isSlotBReady || ((transType == 2 || transType == 3) && frame.linearP <= 0.5f)) {
-                        ProgramTimeline.ease(frame.linearP)
+                    val targetLinearP = frame.linearP.coerceIn(0.0f, 1.0f)
+                    val effectiveLinearP: Float
+                    if (playhead.mode == PlayMode.PLAYING && !isScrubbing) {
+                        if (lastRenderedTransitionJunction != frame.clipAIndex) {
+                            lastRenderedTransitionJunction = frame.clipAIndex
+                            smoothedTransitionP = 0f
+                        }
+                        smoothedTransitionP = if (targetLinearP > smoothedTransitionP) {
+                            (smoothedTransitionP + 0.25f).coerceAtMost(targetLinearP)
+                        } else {
+                            targetLinearP
+                        }
+                        effectiveLinearP = smoothedTransitionP
                     } else {
-                        0.0f
+                        lastRenderedTransitionJunction = frame.clipAIndex
+                        smoothedTransitionP = targetLinearP
+                        effectiveLinearP = targetLinearP
                     }
-                val legacyType = when (frame.transitionType) {
-                    TransitionType.NONE -> com.flowcut.app.model.TransitionType.NONE
-                    TransitionType.SLIDE -> com.flowcut.app.model.TransitionType.SLIDE
-                    TransitionType.CIRCLE -> com.flowcut.app.model.TransitionType.CIRCLE
-                    TransitionType.ZOOM -> com.flowcut.app.model.TransitionType.ZOOM
-                    TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
-                }
+                    val easedP = ProgramTimeline.ease(effectiveLinearP)
+                    val legacyType = when (frame.transitionType) {
+                        TransitionType.NONE -> com.flowcut.app.model.TransitionType.NONE
+                        TransitionType.SLIDE -> com.flowcut.app.model.TransitionType.SLIDE
+                        TransitionType.CIRCLE -> com.flowcut.app.model.TransitionType.CIRCLE
+                        TransitionType.ZOOM -> com.flowcut.app.model.TransitionType.ZOOM
+                        TransitionType.FADE -> com.flowcut.app.model.TransitionType.FADE
+                    }
 
-                val needsScissor = (bgModeA == 0 && bgModeB == 0) &&
-                    computeScissorRect(viewportWidth, viewportHeight, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
-                if (needsScissor) {
-                    GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
-                    GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
-                }
-                try {
-                    val adjustA = getClipColorAdjust(clipA.id)
-                    packAdjust(adjustA, adjA0, adjA1, adjA2)
-                    val adjustB = getClipColorAdjust(clipB.id)
-                    packAdjust(adjustB, adjB0, adjB1, adjB2)
-
-                    drawSpec.type = legacyType
-                    drawSpec.transitionType = getJunctionTransitionType(frame.clipAIndex)
-                    drawSpec.easedP = easedP
-                    drawSpec.matA = matA
-                    drawSpec.matB = matB
-                    drawSpec.cropA = cropA
-                    drawSpec.cropB = cropB
-                    drawSpec.opacityA = transformA.opacity
-                    drawSpec.opacityB = transformB.opacity
-                    drawSpec.adjA0 = adjA0
-                    drawSpec.adjA1 = adjA1
-                    drawSpec.adjA2 = adjA2
-                    drawSpec.adjB0 = adjB0
-                    drawSpec.adjB1 = adjB1
-                    drawSpec.adjB2 = adjB2
-                    drawSpec.texelSize = texelSize
-                    drawSpec.fgNormMatA = fgNormMatA
-                    drawSpec.fgNormMatB = fgNormMatB
-                    drawSpec.bgMatA = bgMatA
-                    drawSpec.bgMatB = bgMatB
-                    drawSpec.bgModeA = bgModeA
-                    drawSpec.bgModeB = bgModeB
-                    drawSpec.bgParamsA = bgParamsA
-                    drawSpec.bgParamsB = bgParamsB
-                    drawSpec.aspectRatio = if (canvasAspectRatio > 0f) canvasAspectRatio else if (viewportHeight > 0) viewportWidth.toFloat() / viewportHeight.toFloat() else (9.0f / 16.0f)
-                    lastActiveVideoTexId = renderer.textureIdA()
-                    Matrix.multiplyMM(lastActiveVideoMat, 0, rawMatA, 0, fgNormMatA, 0)
-                    lastActiveCrop[0] = cropA[0]
-                    lastActiveCrop[1] = cropA[1]
-
-                    resolveFilterAndEffect(clipA.id, frame.tUs)
-                    renderer.draw(drawSpec)
-                } catch (_: Exception) {
-                } finally {
+                    val needsScissor = (bgModeA == 0 && bgModeB == 0) &&
+                        computeScissorRect(viewportWidth, viewportHeight, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                     if (needsScissor) {
-                        GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                        GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+                        GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
                     }
+                    try {
+                        val adjustA = getClipColorAdjust(clipA.id)
+                        packAdjust(adjustA, adjA0, adjA1, adjA2)
+                        val adjustB = getClipColorAdjust(clipB.id)
+                        packAdjust(adjustB, adjB0, adjB1, adjB2)
+
+                        drawSpec.type = legacyType
+                        drawSpec.transitionType = getJunctionTransitionType(frame.clipAIndex)
+                        drawSpec.easedP = easedP
+                        drawSpec.matA = matA
+                        drawSpec.matB = matB
+                        drawSpec.cropA = cropA
+                        drawSpec.cropB = cropB
+                        drawSpec.opacityA = transformA.opacity
+                        drawSpec.opacityB = transformB.opacity
+                        drawSpec.adjA0 = adjA0
+                        drawSpec.adjA1 = adjA1
+                        drawSpec.adjA2 = adjA2
+                        drawSpec.adjB0 = adjB0
+                        drawSpec.adjB1 = adjB1
+                        drawSpec.adjB2 = adjB2
+                        drawSpec.texelSize = texelSize
+                        drawSpec.fgNormMatA = fgNormMatA
+                        drawSpec.fgNormMatB = fgNormMatB
+                        drawSpec.bgMatA = bgMatA
+                        drawSpec.bgMatB = bgMatB
+                        drawSpec.bgModeA = bgModeA
+                        drawSpec.bgModeB = bgModeB
+                        drawSpec.bgParamsA = bgParamsA
+                        drawSpec.bgParamsB = bgParamsB
+                        drawSpec.aspectRatio = if (canvasAspectRatio > 0f) canvasAspectRatio else if (viewportHeight > 0) viewportWidth.toFloat() / viewportHeight.toFloat() else (9.0f / 16.0f)
+
+                        if (isOutgoingOnSlotB) {
+                            if (easedP < 0.5f) {
+                                lastActiveVideoTexId = renderer.textureIdB()
+                                Matrix.multiplyMM(lastActiveVideoMat, 0, rawMatB, 0, fgNormMatA, 0)
+                                lastActiveCrop[0] = cropA[0]
+                                lastActiveCrop[1] = cropA[1]
+                            } else {
+                                lastActiveVideoTexId = renderer.textureIdA()
+                                Matrix.multiplyMM(lastActiveVideoMat, 0, rawMatA, 0, fgNormMatB, 0)
+                                lastActiveCrop[0] = cropB[0]
+                                lastActiveCrop[1] = cropB[1]
+                            }
+                        } else {
+                            if (easedP < 0.5f) {
+                                lastActiveVideoTexId = renderer.textureIdA()
+                                Matrix.multiplyMM(lastActiveVideoMat, 0, rawMatA, 0, fgNormMatA, 0)
+                                lastActiveCrop[0] = cropA[0]
+                                lastActiveCrop[1] = cropA[1]
+                            } else {
+                                lastActiveVideoTexId = renderer.textureIdB()
+                                Matrix.multiplyMM(lastActiveVideoMat, 0, rawMatB, 0, fgNormMatB, 0)
+                                lastActiveCrop[0] = cropB[0]
+                                lastActiveCrop[1] = cropB[1]
+                            }
+                        }
+
+                        resolveFilterAndEffect(clipA.id, frame.tUs)
+                        renderer.draw(drawSpec)
+                    } catch (_: Exception) {
+                    } finally {
+                        if (needsScissor) {
+                            GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                        }
+                    }
+
+                    lastTransitionIncomingSlot = if (isOutgoingOnSlotB) 0 else 1
+                    lastTransitionIncomingClipIndex = frame.clipBIndex
+
+                    renderOverlays(frame.tUs)
+                    if (playhead.mode == PlayMode.PLAYING) {
+                        onRenderRequested?.invoke()
+                        glSurfaceView?.requestRender()
+                    }
+                    return
                 }
-
-                // Transition completes into Slot B as primary
-                primarySlot = 1
-                standbySlotReadyForClipId = null
-                renderOverlays(frame.tUs)
-                return
             }
-        }
 
-        // Case 2: Single clip playback with Ping-Pong Primary & Standby Slots (Hard Cut)
+            // Case 2: Single clip playback with Ping-Pong Primary & Standby Slots (Hard Cut)
+        // Handover from Case 1 Transition exit:
+        if (lastTransitionIncomingClipIndex != -1) {
+            if (lastTransitionIncomingClipIndex == frame.clipAIndex) {
+                primarySlot = lastTransitionIncomingSlot
+                if (primarySlot == 0) {
+                    frameSourceB?.release()
+                    frameSourceB = null
+                    currentClipIndexB = -1
+                } else {
+                    frameSourceA?.release()
+                    frameSourceA = null
+                    currentClipIndexA = -1
+                }
+                standbySlotReadyForClipId = null
+                standbyPreparedPath = null
+                standbyPreparedInUs = -1L
+            }
+            lastTransitionIncomingClipIndex = -1
+        }
+        lastRenderedTransitionJunction = -1
+        smoothedTransitionP = 0f
+
         // 0ms Instant Cut Handover at the Boundary:
         if (primarySlot == 0) {
-            if ((standbySlotReadyForClipId == clipA.id || standbyPreparedPath == clipA.path) && frameSourceB != null && frameSourceB?.currentPath == clipA.path) {
+            if ((standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexB == frame.clipAIndex)) &&
+                frameSourceB != null && (frameSourceB?.clip?.id == clipA.id || currentClipIndexB == frame.clipAIndex)) {
                 primarySlot = 1
                 standbySlotReadyForClipId = null
                 standbyPreparedPath = null
@@ -886,7 +972,14 @@ class PreviewRenderer(
                 currentClipIndexA = -1
             }
         } else {
-            if ((standbySlotReadyForClipId == clipA.id || standbyPreparedPath == clipA.path) && frameSourceA != null && frameSourceA?.currentPath == clipA.path) {
+            // primarySlot == 1: Release frameSourceA if it still held an old clip from before the transition
+            if (frameSourceA != null && frameSourceA?.clip?.id != clipA.id && currentClipIndexA < frame.clipAIndex) {
+                frameSourceA?.release()
+                frameSourceA = null
+                currentClipIndexA = -1
+            }
+            if ((standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexA == frame.clipAIndex)) &&
+                frameSourceA != null && (frameSourceA?.clip?.id == clipA.id || currentClipIndexA == frame.clipAIndex)) {
                 primarySlot = 0
                 standbySlotReadyForClipId = null
                 standbyPreparedPath = null
@@ -899,7 +992,7 @@ class PreviewRenderer(
 
         if (primarySlot == 0) {
             // --- Slot A is Primary (stA / texAId) ---
-            val clipAChanged = frameSourceA == null || frameSourceA?.currentPath != clipA.path
+            val clipAChanged = frameSourceA == null || frameSourceA?.clip?.id != clipA.id || currentClipIndexA != frame.clipAIndex
 
             if (clipAChanged) {
                 frameSourceA?.release()
@@ -947,55 +1040,73 @@ class PreviewRenderer(
             System.arraycopy(rawMatA, 0, matA, 0, 16)
             calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
 
-            // Standby Slot B: 3-Stage Incremental Pre-warm of upcoming clip within 1.5s
+            // Standby Slot B: 3-Stage Incremental Pre-warm of upcoming clip within 3.0s
             val m = frame.clipAIndex + 1
             if (m in s.project.clips.indices && !isScrubbing) {
                 val nextClip = s.project.clips[m]
-                val nextStartUs = msToUs(s.main.startMs[m])
-                val junctionIndex = frame.clipAIndex
-                val transitionDurUs = if (junctionIndex in s.main.dMs.indices) msToUs(s.main.dMs[junctionIndex]) else 0L
-                val transitionStartUs = nextStartUs - transitionDurUs
+                val transitionStartUs = msToUs(s.main.startMs[m])
                 val timeUntilTransitionUs = transitionStartUs - frame.tUs
-                if (timeUntilTransitionUs in -500_000L..1_500_000L) {
+                if (timeUntilTransitionUs in -500_000L..3_000_000L) {
                     val nextClipInUs = nextClip.map().inUs
                     val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
                             (standbySlotReadyForClipId == nextClip.id && (frameSourceB?.prewarmStage ?: 0) >= 3)
                     if (!alreadyPrepared) {
-                        if (frameSourceB == null || frameSourceB?.currentPath != nextClip.path || currentClipIndexB != m) {
+                        if (frameSourceB == null || frameSourceB?.clip?.id != nextClip.id || currentClipIndexB != m) {
                             frameSourceB?.release()
                             frameSourceB = FrameSource(toLegacyClip(nextClip), stB)
                             currentClipIndexB = m
                         }
                         val fsB = frameSourceB
                         if (fsB != null) {
-                            when (fsB.prewarmStage) {
-                                0 -> {
-                                    fsB.prepareExtractorOnly()
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
+                            val isNearTransition = timeUntilTransitionUs <= 800_000L || playhead.mode == PlayMode.PAUSED
+                            if (isNearTransition) {
+                                if (fsB.prewarmStage < 1) fsB.prepareExtractorOnly()
+                                if (fsB.prewarmStage < 2) fsB.startCodecAndSeek(nextClipInUs)
+                                if (fsB.prewarmStage < 3) fsB.stepPrewarmTo(nextClipInUs)
+                                if (fsB.prewarmStage < 3) fsB.ensureDecodedAt(nextClipInUs)
+                                if (hasPendingSurfaceFrameB.getAndSet(false) || fsB.prewarmStage >= 3) {
+                                    try {
+                                        stB.updateTexImage()
+                                        stB.getTransformMatrix(rawMatB)
+                                    } catch (_: Exception) {}
+                                    val nextTransform = getClipTransform(nextClip.id)
+                                    System.arraycopy(rawMatB, 0, matB, 0, 16)
+                                    applyTransformMatrix(matB, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
+                                    calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropB)
+                                    standbySlotReadyForClipId = nextClip.id
+                                    standbyPreparedPath = nextClip.path
+                                    standbyPreparedInUs = nextClipInUs
                                 }
-                                1 -> {
-                                    fsB.startCodecAndSeek(nextClipInUs)
-                                    onRenderRequested?.invoke()
-                                    glSurfaceView?.requestRender()
-                                }
-                                2 -> {
-                                    val ready = fsB.stepPrewarmTo(nextClipInUs)
-                                    if (ready || hasPendingSurfaceFrameB.getAndSet(false)) {
-                                        try {
-                                            stB.updateTexImage()
-                                            stB.getTransformMatrix(rawMatB)
-                                        } catch (_: Exception) {}
-                                        val nextTransform = getClipTransform(nextClip.id)
-                                        System.arraycopy(rawMatB, 0, matB, 0, 16)
-                                        applyTransformMatrix(matB, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
-                                        calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropB)
-                                        standbySlotReadyForClipId = nextClip.id
-                                        standbyPreparedPath = nextClip.path
-                                        standbyPreparedInUs = nextClipInUs
-                                    } else {
+                            } else {
+                                when (fsB.prewarmStage) {
+                                    0 -> {
+                                        fsB.prepareExtractorOnly()
                                         onRenderRequested?.invoke()
                                         glSurfaceView?.requestRender()
+                                    }
+                                    1 -> {
+                                        fsB.startCodecAndSeek(nextClipInUs)
+                                        onRenderRequested?.invoke()
+                                        glSurfaceView?.requestRender()
+                                    }
+                                    2 -> {
+                                        val ready = fsB.stepPrewarmTo(nextClipInUs)
+                                        if (ready || hasPendingSurfaceFrameB.getAndSet(false)) {
+                                            try {
+                                                stB.updateTexImage()
+                                                stB.getTransformMatrix(rawMatB)
+                                            } catch (_: Exception) {}
+                                            val nextTransform = getClipTransform(nextClip.id)
+                                            System.arraycopy(rawMatB, 0, matB, 0, 16)
+                                            applyTransformMatrix(matB, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
+                                            calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropB)
+                                            standbySlotReadyForClipId = nextClip.id
+                                            standbyPreparedPath = nextClip.path
+                                            standbyPreparedInUs = nextClipInUs
+                                        } else {
+                                            onRenderRequested?.invoke()
+                                            glSurfaceView?.requestRender()
+                                        }
                                     }
                                 }
                             }
@@ -1043,12 +1154,13 @@ class PreviewRenderer(
                 drawSpec.type = com.flowcut.app.model.TransitionType.NONE
                 drawSpec.transitionType = 0
                 drawSpec.easedP = 0.0f
+                drawSpec.swapTextures = false
                 drawSpec.matA = matA
                 drawSpec.matB = matB
                 drawSpec.cropA = cropA
                 drawSpec.cropB = cropB
                 drawSpec.opacityA = transformA.opacity
-                drawSpec.opacityB = 1.0f
+                drawSpec.opacityB = 0.0f
                 drawSpec.adjA0 = adjA0
                 drawSpec.adjA1 = adjA1
                 drawSpec.adjA2 = adjA2
@@ -1081,7 +1193,7 @@ class PreviewRenderer(
             renderOverlays(frame.tUs)
         } else {
             // --- Slot B is Primary (stB / texBId) ---
-            val clipBChanged = frameSourceB == null || frameSourceB?.currentPath != clipA.path
+            val clipBChanged = frameSourceB == null || frameSourceB?.clip?.id != clipA.id || currentClipIndexB != frame.clipAIndex
 
             if (clipBChanged) {
                 frameSourceB?.release()
@@ -1129,44 +1241,86 @@ class PreviewRenderer(
             System.arraycopy(rawMatB, 0, matB, 0, 16)
             calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformB, cropB)
 
-            // Prewarm & Handover Slot A in the background so transitions never freeze!
-            if (!isScrubbing) {
-                if (frameSourceA == null || frameSourceA?.currentPath != clipA.path) {
-                    frameSourceA?.release()
-                    frameSourceA = FrameSource(toLegacyClip(clipA), stA)
-                    currentClipIndexA = frame.clipAIndex
-                }
-                val fsA = frameSourceA
-                if (fsA != null) {
-                    when (fsA.prewarmStage) {
-                        0 -> {
-                            fsA.prepareExtractorOnly()
-                            onRenderRequested?.invoke()
-                            glSurfaceView?.requestRender()
+            // Standby Slot A: Pre-warm upcoming clip m = frame.clipAIndex + 1 within 3.0s (true symmetrical ping-pong)
+            val m = frame.clipAIndex + 1
+            if (m in s.project.clips.indices && !isScrubbing) {
+                val nextClip = s.project.clips[m]
+                val transitionStartUs = msToUs(s.main.startMs[m])
+                val timeUntilTransitionUs = transitionStartUs - frame.tUs
+                if (timeUntilTransitionUs in -500_000L..3_000_000L) {
+                    val nextClipInUs = nextClip.map().inUs
+                    val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
+                            (standbySlotReadyForClipId == nextClip.id && (frameSourceA?.prewarmStage ?: 0) >= 3)
+                    if (!alreadyPrepared) {
+                        if (frameSourceA == null || frameSourceA?.clip?.id != nextClip.id || currentClipIndexA != m) {
+                            frameSourceA?.release()
+                            frameSourceA = FrameSource(toLegacyClip(nextClip), stA)
+                            currentClipIndexA = m
                         }
-                        1 -> {
-                            fsA.startCodecAndSeek(frame.clipASourceUs)
-                            onRenderRequested?.invoke()
-                            glSurfaceView?.requestRender()
-                        }
-                        2 -> {
-                            val ready = fsA.stepPrewarmTo(frame.clipASourceUs)
-                            if (ready || hasPendingSurfaceFrameA.getAndSet(false)) {
-                                try {
-                                    stA.updateTexImage()
-                                    stA.getTransformMatrix(rawMatA)
-                                } catch (_: Exception) {}
-                                primarySlot = 0
-                                frameSourceB?.release()
-                                frameSourceB = null
-                                currentClipIndexB = -1
+                        val fsA = frameSourceA
+                        if (fsA != null) {
+                            val isNearTransition = timeUntilTransitionUs <= 800_000L || playhead.mode == PlayMode.PAUSED
+                            if (isNearTransition) {
+                                if (fsA.prewarmStage < 1) fsA.prepareExtractorOnly()
+                                if (fsA.prewarmStage < 2) fsA.startCodecAndSeek(nextClipInUs)
+                                if (fsA.prewarmStage < 3) fsA.stepPrewarmTo(nextClipInUs)
+                                if (fsA.prewarmStage < 3) fsA.ensureDecodedAt(nextClipInUs)
+                                if (hasPendingSurfaceFrameA.getAndSet(false) || fsA.prewarmStage >= 3) {
+                                    try {
+                                        stA.updateTexImage()
+                                        stA.getTransformMatrix(rawMatA)
+                                    } catch (_: Exception) {}
+                                    val nextTransform = getClipTransform(nextClip.id)
+                                    System.arraycopy(rawMatA, 0, matA, 0, 16)
+                                    applyTransformMatrix(matA, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
+                                    calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropA)
+                                    standbySlotReadyForClipId = nextClip.id
+                                    standbyPreparedPath = nextClip.path
+                                    standbyPreparedInUs = nextClipInUs
+                                }
                             } else {
-                                onRenderRequested?.invoke()
-                                glSurfaceView?.requestRender()
+                                when (fsA.prewarmStage) {
+                                    0 -> {
+                                        fsA.prepareExtractorOnly()
+                                        onRenderRequested?.invoke()
+                                        glSurfaceView?.requestRender()
+                                    }
+                                    1 -> {
+                                        fsA.startCodecAndSeek(nextClipInUs)
+                                        onRenderRequested?.invoke()
+                                        glSurfaceView?.requestRender()
+                                    }
+                                    2 -> {
+                                        val ready = fsA.stepPrewarmTo(nextClipInUs)
+                                        if (ready || hasPendingSurfaceFrameA.getAndSet(false)) {
+                                            try {
+                                                stA.updateTexImage()
+                                                stA.getTransformMatrix(rawMatA)
+                                            } catch (_: Exception) {}
+                                            val nextTransform = getClipTransform(nextClip.id)
+                                            System.arraycopy(rawMatA, 0, matA, 0, 16)
+                                            applyTransformMatrix(matA, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
+                                            calculateClipCrop(nextClip.displayWidth, nextClip.displayHeight, nextTransform, cropA)
+                                            standbySlotReadyForClipId = nextClip.id
+                                            standbyPreparedPath = nextClip.path
+                                            standbyPreparedInUs = nextClipInUs
+                                        } else {
+                                            onRenderRequested?.invoke()
+                                            glSurfaceView?.requestRender()
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            } else if (!isScrubbing && standbySlotReadyForClipId != null && m !in s.project.clips.indices) {
+                frameSourceA?.release()
+                frameSourceA = null
+                currentClipIndexA = -1
+                standbySlotReadyForClipId = null
+                standbyPreparedPath = null
+                standbyPreparedInUs = -1L
             }
 
             computeFgNormMatrix(fgNormMatB, transformB, clipA.displayWidth, clipA.displayHeight)
@@ -1198,14 +1352,15 @@ class PreviewRenderer(
                 val adjustB = getClipColorAdjust(clipA.id)
                 packAdjust(adjustB, adjB0, adjB1, adjB2)
 
-                drawSpec.type = com.flowcut.app.model.TransitionType.FADE
-                drawSpec.transitionType = 1 // Dissolve/Fade to clip B
-                drawSpec.easedP = 1.0f
+                drawSpec.type = com.flowcut.app.model.TransitionType.NONE
+                drawSpec.transitionType = 0
+                drawSpec.easedP = 0.0f
+                drawSpec.swapTextures = false
                 drawSpec.matA = matA
                 drawSpec.matB = matB
                 drawSpec.cropA = cropA
                 drawSpec.cropB = cropB
-                drawSpec.opacityA = 1.0f
+                drawSpec.opacityA = 0.0f
                 drawSpec.opacityB = transformB.opacity
                 drawSpec.adjA0 = adjA0
                 drawSpec.adjA1 = adjA1
@@ -1432,6 +1587,10 @@ class PreviewRenderer(
 
         primarySlot = 0
         standbySlotReadyForClipId = null
+        lastTransitionIncomingSlot = -1
+        lastTransitionIncomingClipIndex = -1
+        lastRenderedTransitionJunction = -1
+        smoothedTransitionP = 0f
         Matrix.setIdentityM(rawMatA, 0)
         Matrix.setIdentityM(rawMatB, 0)
     }
