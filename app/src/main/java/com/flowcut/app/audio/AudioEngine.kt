@@ -34,6 +34,8 @@ class AudioEngine(
 
     @Volatile private var isPlaying: Boolean = false
     @Volatile private var isReleased: Boolean = false
+    @Volatile private var pendingPlay: Boolean = false
+    @Volatile private var pendingStop: Boolean = false
     private val lock = java.lang.Object()
 
     private var currentTimelineFrame: Long = 0L
@@ -83,15 +85,41 @@ class AudioEngine(
     }
 
     private fun runAudioLoop() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
 
         while (!isReleased) {
+            if (pendingStop) {
+                pendingStop = false
+                try {
+                    audioTrack.pause()
+                    audioTrack.flush()
+                } catch (_: Exception) {}
+            }
+
             synchronized(lock) {
-                while (!isPlaying && !isReleased) {
+                while (!isPlaying && !pendingStop && !isReleased) {
                     lock.wait()
                 }
             }
             if (isReleased) break
+
+            if (pendingStop) {
+                pendingStop = false
+                try {
+                    audioTrack.pause()
+                    audioTrack.flush()
+                } catch (_: Exception) {}
+                continue
+            }
+
+            if (pendingPlay) {
+                pendingPlay = false
+                try {
+                    audioTrack.play()
+                } catch (_: Exception) {}
+            }
+
+            if (!isPlaying) continue
 
             // Zero-allocation: fill pre-allocated buffer with 0.0f
             outBlock.fill(0f)
@@ -111,23 +139,26 @@ class AudioEngine(
                 currentTimelineFrame += BLOCK_FRAMES
             }
         }
-    }
-
-    fun release() {
-        synchronized(lock) {
-            isReleased = true
-            isPlaying = false
-            lock.notifyAll()
-        }
-        try {
-            audioThread.join(300)
-        } catch (_: Exception) {}
 
         try {
             audioTrack.pause()
             audioTrack.flush()
             audioTrack.stop()
         } catch (_: Exception) {}
+    }
+
+    fun release() {
+        synchronized(lock) {
+            isReleased = true
+            isPlaying = false
+            pendingPlay = false
+            pendingStop = false
+            lock.notifyAll()
+        }
+        try {
+            audioThread.join(300)
+        } catch (_: Exception) {}
+
         try {
             audioTrack.release()
         } catch (_: Exception) {}
@@ -164,10 +195,8 @@ class AudioEngine(
 
                 currentTimelineFrame = usToAudioFrames(fromUs)
 
-                try {
-                    audioTrack.play()
-                } catch (_: Exception) {}
-
+                pendingPlay = true
+                pendingStop = false
                 isPlaying = true
                 lock.notifyAll()
             }
@@ -177,10 +206,8 @@ class AudioEngine(
             synchronized(lock) {
                 if (isReleased) return
                 isPlaying = false
-                try {
-                    audioTrack.pause()
-                    audioTrack.flush()
-                } catch (_: Exception) {}
+                pendingStop = true
+                pendingPlay = false
                 sessionBaseFramePos = -1L
                 hasValidHardwareTimestamp = false
                 lock.notifyAll()

@@ -19,6 +19,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -86,6 +87,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -1142,6 +1144,12 @@ fun EditorScreen(
                         onAddVideoClick = onAddClipsClick,
                         glSurfaceView = if (USE_NEW_CORE && previewRenderer.glSurfaceView != null) previewRenderer.glSurfaceView else glSurfaceView,
                         modifier = Modifier.fillMaxSize()
+                    )
+
+                    // Instant thumbnail placeholder until first GL frame latches
+                    FirstClipThumbnailOverlay(
+                        isFirstFrameLatched = previewRenderer.isFirstFrameLatched,
+                        clips = timeline.project.clips
                     )
 
                     // Cover up floating 9:16 badge in PreviewBox
@@ -2439,6 +2447,7 @@ fun EditorScreen(
                                 when (sel) {
                                     is TimelineSelection.ClipSelected -> onSelectClip(sel.index)
                                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
+                                    is TimelineSelection.TransitionClicked -> onSelectJunction(sel.junctionIndex)
                                     is TimelineSelection.OverlaySelected -> {
                                         overlappingConflictItemIds = null
                                         resolvedViewModel?.selectOverlay(sel.itemId)
@@ -3485,142 +3494,17 @@ fun EditorScreen(
             onDismissAutoCaptions = { isAutoCaptionsSheetVisible = false }
         )
 
-        // Overlapping Layer Conflict Picker Dialog (Matching reference image_2d9184.png)
-        if (overlappingConflictItemIds != null) {
-            val conflictIds = overlappingConflictItemIds!!
-            val allLayers = resolvedViewModel?.layerItems ?: emptyList()
-            val conflictItems = remember(conflictIds, allLayers) {
-                conflictIds.mapNotNull { id -> allLayers.firstOrNull { it.id == id } }
-            }
-
-            if (conflictItems.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { overlappingConflictItemIds = null },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFF353538),
-                        border = BorderStroke(1.dp, Color(0x33FFFFFF)),
-                        shadowElevation = 8.dp,
-                        modifier = Modifier
-                            .padding(horizontal = 24.dp)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { /* Prevent dismissing when clicking the card itself */ }
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            val rows = conflictItems.chunked(5)
-                            rows.forEach { rowItems ->
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    rowItems.forEach { item ->
-                                        val isSelected = item.id == vmUiState?.selectedOverlayId
-                                        val isText = item.type == com.flowcut.app.engine.LayerType.TEXT
-                                        val isFilter = item.type == com.flowcut.app.engine.LayerType.FILTER
-                                        val isEffect = item.type == com.flowcut.app.engine.LayerType.EFFECT
-                                        val badgeBg = when (item.type) {
-                                            com.flowcut.app.engine.LayerType.TEXT -> Color(0xFFF59E0B)
-                                            com.flowcut.app.engine.LayerType.FILTER -> Color(0xFF06B6D4) // Cyan
-                                            com.flowcut.app.engine.LayerType.EFFECT -> Color(0xFFA855F7) // Purple
-                                            com.flowcut.app.engine.LayerType.MOSAIC -> Color(0xFFD97706) // Amber/Brown
-                                            else -> Color(0xFF68C95B) // Green
-                                        }
-
-                                        Surface(
-                                            modifier = Modifier
-                                                .size(width = 48.dp, height = 34.dp)
-                                                .clickable {
-                                                    resolvedViewModel?.selectOverlay(item.id)
-                                                    overlappingConflictItemIds = null
-                                                },
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = badgeBg,
-                                            border = if (isSelected) BorderStroke(2.dp, Color.White) else null
-                                        ) {
-                                            Box(
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                if (isText) {
-                                                    val textSnippet = if (item.text.isNotBlank()) {
-                                                        item.text.take(5)
-                                                    } else "Text"
-                                                    Text(
-                                                        text = textSnippet,
-                                                        color = Color.White,
-                                                        fontSize = 11.5.sp,
-                                                        fontWeight = FontWeight.Medium,
-                                                        maxLines = 1
-                                                    )
-                                                } else if (isFilter) {
-                                                    Text(
-                                                        text = "F",
-                                                        color = Color.White,
-                                                        fontSize = 14.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                } else if (isEffect) {
-                                                    Text(
-                                                        text = "E",
-                                                        color = Color.White,
-                                                        fontSize = 14.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                } else {
-                                                    if (item.type == com.flowcut.app.engine.LayerType.STICKER && item.text.isNotBlank() && item.text.length <= 4) {
-                                                        Text(
-                                                            text = item.text,
-                                                            fontSize = 14.sp
-                                                        )
-                                                    } else {
-                                                        Canvas(modifier = Modifier.size(20.dp, 16.dp)) {
-                                                            val strokeW = 1.4.dp.toPx()
-                                                            drawRoundRect(
-                                                                color = Color.White,
-                                                                topLeft = Offset.Zero,
-                                                                size = size,
-                                                                cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
-                                                                style = Stroke(width = strokeW)
-                                                            )
-                                                            drawCircle(
-                                                                color = Color.White,
-                                                                radius = 2.dp.toPx(),
-                                                                center = Offset(5.5.dp.toPx(), 5.dp.toPx())
-                                                            )
-                                                            val mountainPath = Path().apply {
-                                                                moveTo(3.dp.toPx(), size.height - 3.dp.toPx())
-                                                                lineTo(9.dp.toPx(), 8.dp.toPx())
-                                                                lineTo(13.dp.toPx(), 11.dp.toPx())
-                                                                lineTo(17.dp.toPx(), size.height - 3.dp.toPx())
-                                                            }
-                                                            drawPath(mountainPath, color = Color.White, style = Stroke(width = strokeW))
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Overlapping Layer Conflict Picker Dialog
+        OverlappingLayerConflictDialog(
+            conflictItemIds = overlappingConflictItemIds,
+            allLayers = resolvedViewModel?.layerItems ?: emptyList(),
+            selectedOverlayId = vmUiState?.selectedOverlayId,
+            onSelectOverlay = { id ->
+                resolvedViewModel?.selectOverlay(id)
+                overlappingConflictItemIds = null
+            },
+            onDismiss = { overlappingConflictItemIds = null }
+        )
 
         // -----------------------------------------------------------------------------------------
         // Audio BottomSheets (Phase C: 4-Row Audio System)
@@ -3734,27 +3618,44 @@ fun EditorScreen(
         }
 
         if (showCoverDialog) {
-            CoverSelectionSheet(
-                onSelectCurrentFrame = {
-                    val playheadUs = playbackController.playhead.timeUs
-                    resolvedViewModel?.setCoverFromTimelineFrame(playheadUs)
-                    resolvedViewModel?.showToast("Cover set from current frame")
-                    showCoverDialog = false
-                },
-                onChooseGallery = {
-                    try {
-                        galleryCoverPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    } catch (_: Exception) {
-                        Toast.makeText(context, "Cannot open image picker", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onDismiss = { showCoverDialog = false },
-                currentPlayheadTimeFormatted = formatTimeMs(usToMs(playbackController.playhead.timeUs))
+            CoverSelectionDialogHost(
+                context = context,
+                playbackController = playbackController,
+                resolvedViewModel = resolvedViewModel,
+                galleryCoverPicker = galleryCoverPicker,
+                onDismiss = { showCoverDialog = false }
             )
         }
     }
+}
+
+@Composable
+private fun CoverSelectionDialogHost(
+    context: android.content.Context,
+    playbackController: com.flowcut.app.core.playback.PlaybackController,
+    resolvedViewModel: EditorViewModel?,
+    galleryCoverPicker: androidx.activity.result.ActivityResultLauncher<androidx.activity.result.PickVisualMediaRequest>,
+    onDismiss: () -> Unit
+) {
+    CoverSelectionSheet(
+        onSelectCurrentFrame = {
+            val playheadUs = playbackController.playhead.timeUs
+            resolvedViewModel?.setCoverFromTimelineFrame(playheadUs)
+            resolvedViewModel?.showToast("Cover set from current frame")
+            onDismiss()
+        },
+        onChooseGallery = {
+            try {
+                galleryCoverPicker.launch(
+                    androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            } catch (_: Exception) {
+                android.widget.Toast.makeText(context, "Cannot open image picker", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        },
+        onDismiss = onDismiss,
+        currentPlayheadTimeFormatted = formatTimeMs(com.flowcut.app.core.time.usToMs(playbackController.playhead.timeUs))
+    )
 }
 
 @Composable
@@ -6237,5 +6138,210 @@ private fun Phase8SheetsHost(
             },
             onDismiss = onDismissAutoCaptions
         )
+    }
+}
+
+@Composable
+private fun OverlappingLayerConflictDialog(
+    conflictItemIds: List<String>?,
+    allLayers: List<com.flowcut.app.engine.OverlayItem>,
+    selectedOverlayId: String?,
+    onSelectOverlay: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    if (conflictItemIds == null) return
+    val conflictItems = remember(conflictItemIds, allLayers) {
+        conflictItemIds.mapNotNull { id -> allLayers.firstOrNull { it.id == id } }
+    }
+
+    if (conflictItems.isNotEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onDismiss() },
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xFF353538),
+                border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                shadowElevation = 8.dp,
+                modifier = Modifier
+                    .padding(horizontal = 24.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { /* Prevent dismissing when clicking the card itself */ }
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    val rows = conflictItems.chunked(5)
+                    rows.forEach { rowItems ->
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            rowItems.forEach { item ->
+                                val isSelected = item.id == selectedOverlayId
+                                val isText = item.type == com.flowcut.app.engine.LayerType.TEXT
+                                val isFilter = item.type == com.flowcut.app.engine.LayerType.FILTER
+                                val isEffect = item.type == com.flowcut.app.engine.LayerType.EFFECT
+                                val badgeBg = when (item.type) {
+                                    com.flowcut.app.engine.LayerType.TEXT -> Color(0xFFF59E0B)
+                                    com.flowcut.app.engine.LayerType.FILTER -> Color(0xFF06B6D4)
+                                    com.flowcut.app.engine.LayerType.EFFECT -> Color(0xFFA855F7)
+                                    com.flowcut.app.engine.LayerType.MOSAIC -> Color(0xFFD97706)
+                                    else -> Color(0xFF68C95B)
+                                }
+
+                                Surface(
+                                    modifier = Modifier
+                                        .size(width = 48.dp, height = 34.dp)
+                                        .clickable {
+                                            onSelectOverlay(item.id)
+                                        },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = badgeBg,
+                                    border = if (isSelected) BorderStroke(2.dp, Color.White) else null
+                                ) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isText) {
+                                            val textSnippet = if (item.text.isNotBlank()) {
+                                                item.text.take(5)
+                                            } else "Text"
+                                            Text(
+                                                text = textSnippet,
+                                                color = Color.White,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1
+                                            )
+                                        } else if (isFilter) {
+                                            Text(
+                                                text = "F",
+                                                color = Color.White,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        } else if (isEffect) {
+                                            Text(
+                                                text = "E",
+                                                color = Color.White,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        } else {
+                                            if (item.type == com.flowcut.app.engine.LayerType.STICKER && item.text.isNotBlank() && item.text.length <= 4) {
+                                                Text(
+                                                    text = item.text,
+                                                    fontSize = 14.sp
+                                                )
+                                            } else {
+                                                Canvas(modifier = Modifier.size(20.dp, 16.dp)) {
+                                                    val strokeW = 1.4.dp.toPx()
+                                                    drawRoundRect(
+                                                        color = Color.White,
+                                                        topLeft = Offset.Zero,
+                                                        size = size,
+                                                        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                                                        style = Stroke(width = strokeW)
+                                                    )
+                                                    drawCircle(
+                                                        color = Color.White,
+                                                        radius = 2.dp.toPx(),
+                                                        center = Offset(5.5.dp.toPx(), 5.dp.toPx())
+                                                    )
+                                                    val mountainPath = Path().apply {
+                                                        moveTo(3.dp.toPx(), size.height - 3.dp.toPx())
+                                                        lineTo(9.dp.toPx(), 8.dp.toPx())
+                                                        lineTo(13.dp.toPx(), 11.dp.toPx())
+                                                        lineTo(17.dp.toPx(), size.height - 3.dp.toPx())
+                                                    }
+                                                    drawPath(mountainPath, color = Color.White, style = Stroke(width = strokeW))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BoxScope.FirstClipThumbnailOverlay(
+    isFirstFrameLatched: Boolean,
+    clips: List<com.flowcut.app.model.Clip>
+) {
+    if (!USE_NEW_CORE || isFirstFrameLatched || clips.isEmpty()) return
+    val firstClipPath = clips.firstOrNull()?.path ?: return
+    var thumbBmp by remember(firstClipPath) {
+        mutableStateOf(FirstClipThumbnailCache.get(firstClipPath))
+    }
+    LaunchedEffect(firstClipPath) {
+        if (thumbBmp == null) {
+            withContext(Dispatchers.IO) {
+                val bmp = FirstClipThumbnailCache.get(firstClipPath)
+                withContext(Dispatchers.Main) {
+                    thumbBmp = bmp
+                }
+            }
+        }
+    }
+    thumbBmp?.let { bmp ->
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .aspectRatio(9f / 16f)
+                .align(Alignment.Center)
+                .clip(RectangleShape)
+        ) {
+            androidx.compose.foundation.Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit
+            )
+        }
+    }
+}
+
+private object FirstClipThumbnailCache {
+    private val cache = android.util.LruCache<String, android.graphics.Bitmap>(4)
+
+    fun get(path: String): android.graphics.Bitmap? {
+        if (path.isEmpty()) return null
+        val cached = cache.get(path)
+        if (cached != null) return cached
+        return try {
+            val file = java.io.File(path)
+            if (!file.exists()) return null
+            val bmp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                android.media.ThumbnailUtils.createVideoThumbnail(file, android.util.Size(540, 960), null)
+            } else {
+                @Suppress("DEPRECATION")
+                android.media.ThumbnailUtils.createVideoThumbnail(path, android.provider.MediaStore.Video.Thumbnails.MINI_KIND)
+            }
+            if (bmp != null) {
+                cache.put(path, bmp)
+            }
+            bmp
+        } catch (_: Throwable) {
+            null
+        }
     }
 }

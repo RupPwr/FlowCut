@@ -84,7 +84,11 @@ data class OverlayItem(
     // Phase 8: Per-Overlay Color Adjustment
     val adjustBrightness: Float = 0.0f, // -0.5f..0.5f
     val adjustContrast: Float = 1.0f, // 0.5f..1.8f
-    val adjustSaturation: Float = 1.0f // 0.0f..2.0f
+    val adjustSaturation: Float = 1.0f, // 0.0f..2.0f
+    // Phase 9: Mosaic / Privacy Blur Layer
+    val mosaicStyle: Int = 0, // 0 = Pixelate Grid, 1 = Frost/Box Blur, 2 = Halftone/Dot Matrix, 3 = Solid Blackout Censor Bar
+    val mosaicIntensity: Float = 0.5f, // 0.1f..1.0f controlling pixel block size / blur radius
+    val mosaicFeather: Float = 0.05f // 0.0f..0.3f soft edge blending
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L

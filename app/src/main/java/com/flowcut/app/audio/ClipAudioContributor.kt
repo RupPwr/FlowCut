@@ -75,6 +75,26 @@ class ClipAudioContributor(
 
         fun syncAudioOverlays(items: List<OverlayItem>) {
             activeAudioOverlays = items
+            if (sharedOverlayDecoders.size > 4) {
+                val activePaths = HashSet<String>()
+                for (i in items.indices) {
+                    val p = items[i].mediaPath
+                    if (p.isNotEmpty()) activePaths.add(p)
+                }
+                val it = sharedOverlayDecoders.entries.iterator()
+                while (it.hasNext()) {
+                    val entry = it.next()
+                    if (!activePaths.contains(entry.key)) {
+                        val d = entry.value
+                        it.remove()
+                        try {
+                            staticPrewarmExecutor.execute {
+                                try { d.release() } catch (_: Throwable) {}
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            }
         }
 
         fun getSharedOverlayDecoder(path: String): ClipAudioDecoder {
@@ -188,12 +208,11 @@ class ClipAudioContributor(
                         }
                     }
 
-                    // Prune excess decoders to prevent hardware codec exhaustion
-                    val activePaths = HashSet<String>(4)
-                    activePaths.add(clipA.path)
-                    if (bIndex in clips.indices) activePaths.add(clips[bIndex].path)
-                    if (m in clips.indices) activePaths.add(clips[m].path)
-                    pruneDecoders(activePaths)
+                    // Prune excess decoders to prevent hardware codec exhaustion (Rule R10: zero allocations)
+                    val pathA = clipA.path
+                    val pathB = if (bIndex in clips.indices) clips[bIndex].path else null
+                    val pathNext = if (m in clips.indices) clips[m].path else null
+                    pruneDecoders(pathA, pathB, pathNext)
 
                     var handledCutSplit = false
                     // Sub-Block Cut Splitting: If 10ms block straddles a hard cut boundary (TransitionType.NONE)
@@ -625,21 +644,22 @@ class ClipAudioContributor(
         }
     }
 
-    private fun pruneDecoders(activePaths: Set<String>) {
-        val totalExpected = activePaths.size + activeAudioOverlays.size + 2
-        val maxLimit = maxOf(8, totalExpected)
-        if (decoders.size > maxLimit) {
+    private fun pruneDecoders(pathA: String, pathB: String?, pathNext: String?) {
+        if (decoders.size > 2) {
             val iterator = decoders.entries.iterator()
             while (iterator.hasNext()) {
                 val entry = iterator.next()
-                if (!activePaths.contains(entry.key)) {
+                val k = entry.key
+                if (k != pathA && (pathB == null || k != pathB) && (pathNext == null || k != pathNext)) {
                     val oldDec = entry.value
                     iterator.remove()
-                    prewarmExecutor.execute {
-                        try {
-                            oldDec.release()
-                        } catch (_: Throwable) {}
-                    }
+                    try {
+                        prewarmExecutor.execute {
+                            try {
+                                oldDec.release()
+                            } catch (_: Throwable) {}
+                        }
+                    } catch (_: Throwable) {}
                 }
             }
         }

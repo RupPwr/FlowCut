@@ -68,6 +68,7 @@ import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.ui.draw.alpha
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -88,6 +89,7 @@ enum class ToolbarMode {
     S5_AUDIO_GROUP,
     S6_AUDIO_ITEM,
     S7_FILTER_EFFECT,
+    S8_MOSAIC,
     MAIN_CLIP,
     SELECTED_OVERLAY
 }
@@ -108,8 +110,12 @@ fun BottomToolbar(
     isTextToolbarActive: Boolean = false,
     isFilterOverlaySelected: Boolean = false,
     isEffectOverlaySelected: Boolean = false,
+    isMosaicSelected: Boolean = false,
     isStickerSelected: Boolean = false,
     canSplitSticker: Boolean = true,
+    onMosaicClick: () -> Unit = {},
+    onAddMosaicClick: () -> Unit = {},
+    onEditMosaicClick: () -> Unit = {},
     onAddStickerClick: () -> Unit = {},
     onStickerAnimationClick: () -> Unit = {},
     onStickerAdjustClick: () -> Unit = {},
@@ -164,6 +170,7 @@ fun BottomToolbar(
     val currentMode = when {
         isClipSelected -> ToolbarMode.MAIN_CLIP
         isTextToolbarActive || (isOverlaySelected && isTextOverlaySelected) -> ToolbarMode.S4_TEXT
+        isMosaicSelected -> ToolbarMode.S8_MOSAIC
         isStickerSelected -> ToolbarMode.S3_STICKER
         isOverlaySelected && (isFilterOverlaySelected || isEffectOverlaySelected) -> ToolbarMode.S7_FILTER_EFFECT
         isPipActive -> ToolbarMode.S1_S2_PIP
@@ -254,6 +261,16 @@ fun BottomToolbar(
                             onCopyClick = onCopyClick
                         )
                     }
+                    ToolbarMode.S8_MOSAIC -> {
+                        MosaicToolbarContent(
+                            onClearSelection = onClearSelection,
+                            onAddClick = onAddMosaicClick,
+                            onEditClick = onEditMosaicClick,
+                            onSplitClick = onSplitClick,
+                            onCopyClick = onCopyClick,
+                            onDeleteOverlayClick = { onDeleteClipClick?.invoke() }
+                        )
+                    }
                     ToolbarMode.S7_FILTER_EFFECT -> {
                         FilterEffectToolbarContent(
                             isFilter = isFilterOverlaySelected,
@@ -327,6 +344,7 @@ fun BottomToolbar(
                             onTrimClick = onTrimClick,
                             onTextClick = onTextClick,
                             onStickerClick = onStickerClick,
+                            onMosaicClick = onMosaicClick,
                             onOverlayClick = onOverlayClick,
                             onAudioClick = onAudioClick,
                             onFilterClick = onFilterClick,
@@ -1639,6 +1657,200 @@ private fun FilterEffectToolbarContent(
 }
 
 @Composable
+private fun MosaicToolbarContent(
+    onClearSelection: () -> Unit,
+    onAddClick: () -> Unit,
+    onEditClick: () -> Unit,
+    onSplitClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onDeleteOverlayClick: () -> Unit
+) {
+    val colors = FlowCutTheme.colors
+    val accentColor = Color(0xFFFF2D55)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 1. Back / Dismiss button on the far left (⌄)
+        Box(
+            modifier = Modifier
+                .width(48.dp)
+                .fillMaxHeight()
+                .clickable { onClearSelection() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Dismiss",
+                tint = colors.textPrimary,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        // Vertical separator
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .height(24.dp)
+                .background(colors.border)
+        )
+
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 1. ADD
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onAddClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "ADD",
+                    tint = accentColor,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "ADD",
+                    color = accentColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 2. STYLE / EDIT
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onEditClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = "STYLE / EDIT",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "STYLE / EDIT",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 3. SPLIT
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onSplitClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                    contentDescription = "SPLIT",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "SPLIT",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 4. COPY
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onCopyClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ContentCopy,
+                    contentDescription = "COPY",
+                    tint = colors.textPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "COPY",
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 5. DELETE
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 52.dp)
+                    .fillMaxHeight()
+                    .clickable { onDeleteOverlayClick() }
+                    .padding(horizontal = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "DELETE",
+                    tint = colors.accent,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "DELETE",
+                    color = colors.accent,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun PipToolbarContent(
     isPipItemSelected: Boolean,
     isPipVideo: Boolean,
@@ -2878,6 +3090,7 @@ private fun MainToolbarContent(
     onTrimClick: () -> Unit,
     onTextClick: () -> Unit,
     onStickerClick: () -> Unit,
+    onMosaicClick: () -> Unit,
     onOverlayClick: () -> Unit,
     onAudioClick: () -> Unit,
     onFilterClick: () -> Unit,
@@ -3100,6 +3313,33 @@ private fun MainToolbarContent(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Effect",
+                        color = colors.textPrimary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // 9. Mosaic (Phase 9)
+                Column(
+                    modifier = Modifier
+                        .widthIn(min = 52.dp)
+                        .clickable { onMosaicClick() }
+                        .padding(horizontal = 2.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.GridOn,
+                        contentDescription = "MOSAIC",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "MOSAIC",
                         color = colors.textPrimary,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,

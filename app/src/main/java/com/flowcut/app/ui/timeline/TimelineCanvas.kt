@@ -479,14 +479,15 @@ fun TimelineCanvas(
     val unselectedStroke = remember(density) { Stroke(width = 1f * density) }
     val playheadStrokeWidth = remember(density) { 2.5f * density }
 
-    val junctionBoxSizePx = remember(density) { TimelineHitTester.JUNCTION_BOX_SIZE_DP * density }
-    val junctionHalfBoxPx = remember(density) { junctionBoxSizePx / 2f }
-    val junctionCornerRadius = remember(density) { CornerRadius(4.5f * density, 4.5f * density) }
-    val junctionBoxSize = remember(density) { Size(junctionBoxSizePx, junctionBoxSizePx) }
+    val junctionBadgeSizePx = remember(density) { 18f * density }
+    val junctionHalfBoxPx = remember(density) { junctionBadgeSizePx / 2f }
+    val junctionCornerRadius = remember(density) { CornerRadius(4f * density, 4f * density) }
+    val junctionBoxSize = remember(density) { Size(junctionBadgeSizePx, junctionBadgeSizePx) }
     val junctionBoxBorderStroke = remember(density) { Stroke(width = 1f * density) }
     val junctionSelectedBorderStroke = remember(density) { Stroke(width = 2f * density) }
-    val slashStrokeWidthPx = remember(density) { 2f * density }
-    val slashInsetPx = remember(density) { 5.5f * density }
+    val slashStrokeWidthPx = remember(density) { 1.5f * density }
+    val slashInsetPx = remember(density) { 4.5f * density }
+    val junctionBowtiePath = remember { androidx.compose.ui.graphics.Path() }
 
     val whiteSelectionStroke = remember(density) { Stroke(width = 2f * density) }
     val chevronStroke = remember(density) { Stroke(width = 2f * density, cap = StrokeCap.Round) }
@@ -506,9 +507,11 @@ fun TimelineCanvas(
     val clipCellDividerColor = remember { Color(0x2EFFFFFF) }
     val clipSprocketColor = remember { Color(0x55FFFFFF) }
     val clipBorderColor = remember { Color(0xFF34495E) }
-    val junctionBgColor = remember { Color(0xFFE67E22) }
-    val junctionNoneColor = remember { Color(0xFF3E4A56) }
-    val junctionSelectedColor = remember { Color(0xFFFF5722) }
+    val junctionBgColor = remember { Color(0xFFFF2D55) }
+    val junctionNoneColor = remember { Color(0xFF1E1F26) }
+    val junctionSelectedColor = remember { Color(0xFFFF2D55) }
+    val junctionCharcoalBg = remember { Color(0xFF1E1F26) }
+    val junctionActivePinkBg = remember { Color(0xFFFF2D55) }
     val playheadColor = remember { Color(0xFFFF2D55) }
     val whiteColor = remember { Color.White }
     val chevronColor = remember { Color(0xFF141414) }
@@ -2179,49 +2182,8 @@ fun TimelineCanvas(
                 }
             }
 
-            // Transition Junction Icons
-            val junctionCenterY = rowCTop + (mainTrackHeightPx / 2f)
-            val selectedK = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
-            for (j in k0 until minOf(k1 + 1, n - 1)) {
-                if (selectedK >= 0 && (j == selectedK - 1 || j == selectedK)) continue
-                val centerMs = (snapshot.main.startMs[j + 1] + snapshot.main.endMs[j]) / 2L
-                val jx = zoomState.timeUsToX(msToUs(centerMs), offsetPx, halfWidthInt, pxPerUs)
-                if (jx in -50f..size.width + 50f) {
-                    val jType = snapshot.main.types.getOrNull(j) ?: TransitionType.NONE
-                    val isJunctionSelected = selection == TimelineSelection.JunctionSelected(j)
-                    val jBg = when {
-                        isJunctionSelected -> junctionSelectedColor
-                        jType != TransitionType.NONE -> junctionBgColor
-                        else -> junctionNoneColor
-                    }
-
-                    val boxTopLeft = Offset(jx - junctionHalfBoxPx, junctionCenterY - junctionHalfBoxPx)
-                    drawRoundRect(
-                        color = jBg,
-                        topLeft = boxTopLeft,
-                        size = junctionBoxSize,
-                        cornerRadius = junctionCornerRadius
-                    )
-                    drawRoundRect(
-                        color = if (isJunctionSelected) whiteColor else junctionBoxBorderColor,
-                        topLeft = boxTopLeft,
-                        size = junctionBoxSize,
-                        cornerRadius = junctionCornerRadius,
-                        style = if (isJunctionSelected) junctionSelectedBorderStroke else junctionBoxBorderStroke
-                    )
-
-                    val slashColorActual = if (isJunctionSelected) whiteColor else slashColor
-                    drawLine(
-                        color = slashColorActual,
-                        start = Offset(jx + junctionHalfBoxPx - slashInsetPx, junctionCenterY - junctionHalfBoxPx + slashInsetPx),
-                        end = Offset(jx - junctionHalfBoxPx + slashInsetPx, junctionCenterY + junctionHalfBoxPx - slashInsetPx),
-                        strokeWidth = slashStrokeWidthPx,
-                        cap = StrokeCap.Round
-                    )
-                }
-            }
-
             // Dedicated Pass: Selected Clip Crisp White Border & External Trim Handles
+            val selectedK = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
             if (selectedK in 0 until n) {
                 val selClipStartUs = msToUs(snapshot.main.startMs[selectedK])
                 val selClipEndUs = msToUs(snapshot.main.endMs[selectedK])
@@ -2287,6 +2249,61 @@ fun TimelineCanvas(
                     rightChevronPath.lineTo(rightCenterX + chevronHalfWPx, clipCenterY)
                     rightChevronPath.lineTo(rightCenterX - chevronHalfWPx, clipCenterY + chevronHalfHPx)
                     drawPath(path = rightChevronPath, color = chevronColor, style = chevronStroke)
+                }
+            }
+
+            // Dedicated Pass: Transition Junction Badges (Row C, 18.dp x 18.dp, 4.dp corner radius)
+            if (n > 1) {
+                val junctionCenterY = rowCTop + (mainTrackHeightPx / 2f)
+                for (j in 0 until (n - 1)) {
+                    val centerMs = (snapshot.main.startMs[j + 1] + snapshot.main.endMs[j]) / 2L
+                    val jx = zoomState.timeUsToX(msToUs(centerMs), offsetPx, halfWidthInt, pxPerUs)
+                    if (jx in -50f..size.width + 50f) {
+                        val jType = snapshot.main.types.getOrNull(j) ?: TransitionType.NONE
+                        val isJunctionSelected = selection == TimelineSelection.JunctionSelected(j) ||
+                                selection == TimelineSelection.TransitionClicked(j)
+                        val hasTransition = jType != TransitionType.NONE
+                        val jBg = if (hasTransition) junctionActivePinkBg else junctionCharcoalBg
+
+                        val boxTopLeft = Offset(jx - junctionHalfBoxPx, junctionCenterY - junctionHalfBoxPx)
+                        drawRoundRect(
+                            color = jBg,
+                            topLeft = boxTopLeft,
+                            size = junctionBoxSize,
+                            cornerRadius = junctionCornerRadius
+                        )
+                        drawRoundRect(
+                            color = whiteColor,
+                            topLeft = boxTopLeft,
+                            size = junctionBoxSize,
+                            cornerRadius = junctionCornerRadius,
+                            style = if (isJunctionSelected) junctionSelectedBorderStroke else junctionBoxBorderStroke
+                        )
+
+                        if (hasTransition) {
+                            // Crisp white bowtie / transition icon
+                            val leftX = jx - junctionHalfBoxPx + slashInsetPx
+                            val rightX = jx + junctionHalfBoxPx - slashInsetPx
+                            val topY = junctionCenterY - junctionHalfBoxPx + slashInsetPx
+                            val bottomY = junctionCenterY + junctionHalfBoxPx - slashInsetPx
+                            junctionBowtiePath.reset()
+                            junctionBowtiePath.moveTo(leftX, topY)
+                            junctionBowtiePath.lineTo(rightX, bottomY)
+                            junctionBowtiePath.lineTo(leftX, bottomY)
+                            junctionBowtiePath.lineTo(rightX, topY)
+                            junctionBowtiePath.close()
+                            drawPath(junctionBowtiePath, color = whiteColor)
+                        } else {
+                            // Crisp white diagonal slash
+                            drawLine(
+                                color = whiteColor,
+                                start = Offset(jx + junctionHalfBoxPx - slashInsetPx, junctionCenterY - junctionHalfBoxPx + slashInsetPx),
+                                end = Offset(jx - junctionHalfBoxPx + slashInsetPx, junctionCenterY + junctionHalfBoxPx - slashInsetPx),
+                                strokeWidth = slashStrokeWidthPx,
+                                cap = StrokeCap.Round
+                            )
+                        }
+                    }
                 }
             }
         }

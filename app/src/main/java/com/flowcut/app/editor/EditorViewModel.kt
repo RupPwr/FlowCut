@@ -16,6 +16,7 @@ import com.flowcut.app.core.timeline.MainIndex
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.ActiveLayerSet
 import com.flowcut.app.engine.AnimatedTransformEvaluator
+import com.flowcut.app.engine.AspectRatioMode
 import com.flowcut.app.engine.BackgroundType
 import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipColorAdjust
@@ -81,8 +82,15 @@ data class EditorUiState(
     val toastMessage: String? = null,
     val isMainTrackMuted: Boolean = false,
     val coverTimeUs: Long = 0L,
-    val customCoverPath: String? = null
-)
+    val customCoverPath: String? = null,
+    val aspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16,
+    val canvasBgMode: Int = 0,
+    val canvasBlurLevel: Float = 0.5f,
+    val canvasColorArgb: Int = 0xFF000000.toInt(),
+    val canvasGradientId: Int = -1
+) {
+    val aspectRatioFloat: Float get() = aspectRatioMode.aspect
+}
 
 data class SplitResult(
     val newSnapshot: TimelineSnapshot,
@@ -142,7 +150,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val undoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
     private val redoTimeMaps = ArrayDeque<Map<String, TimeMap>>()
     val clipTimeMaps = mutableMapOf<String, TimeMap>()
-    val clipNaturalDurations = mutableMapOf<String, Long>()
+    val clipNaturalDurations = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    val pathNaturalDurationsCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     // Per-clip volume (0.0f to 2.0f, default 1.0f), pre-mute memory, and undo/redo stacks
     private val undoVolumes = ArrayDeque<Map<String, Float>>()
@@ -173,6 +182,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     // Multi-layer Overlay Items and undo/redo stacks
     private val undoLayerItems = ArrayDeque<List<OverlayItem>>()
     private val redoLayerItems = ArrayDeque<List<OverlayItem>>()
+    private val undoAspectRatios = ArrayDeque<AspectRatioMode>()
+    private val redoAspectRatios = ArrayDeque<AspectRatioMode>()
+    private var preSheetAspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16
     private val _layerItems = mutableStateListOf<OverlayItem>()
     val layerItems: List<OverlayItem> get() = _layerItems
 
@@ -213,7 +225,40 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         clipBackgrounds[clip.id] = background
         PreviewRenderer.setClipBackground(clip.id, background)
 
+        val bgMode = if (background.gradientIndex in 0..5) 3 else when (background.type) {
+            BackgroundType.NONE -> 0
+            BackgroundType.COLOR -> 1
+            BackgroundType.BLUR -> 2
+        }
+        _uiState.update {
+            it.copy(
+                canvasBgMode = bgMode,
+                canvasBlurLevel = background.blurLevel,
+                canvasColorArgb = background.colorArgb,
+                canvasGradientId = background.gradientIndex
+            )
+        }
+
         updateProject(currentProject, recordUndo = false)
+    }
+
+    fun setClipBackgroundLive(clipIndex: Int, background: ClipBackground) {
+        val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return
+        clipBackgrounds[clip.id] = background
+        PreviewRenderer.setClipBackground(clip.id, background)
+        val bgMode = if (background.gradientIndex in 0..5) 3 else when (background.type) {
+            BackgroundType.NONE -> 0
+            BackgroundType.COLOR -> 1
+            BackgroundType.BLUR -> 2
+        }
+        _uiState.update {
+            it.copy(
+                canvasBgMode = bgMode,
+                canvasBlurLevel = background.blurLevel,
+                canvasColorArgb = background.colorArgb,
+                canvasGradientId = background.gradientIndex
+            )
+        }
     }
 
     fun commitApplyBackgroundToAll(background: ClipBackground) {
@@ -239,11 +284,65 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             PreviewRenderer.setClipBackground(c.id, background)
         }
 
+        val bgMode = if (background.gradientIndex in 0..5) 3 else when (background.type) {
+            BackgroundType.NONE -> 0
+            BackgroundType.COLOR -> 1
+            BackgroundType.BLUR -> 2
+        }
+        _uiState.update {
+            it.copy(
+                canvasBgMode = bgMode,
+                canvasBlurLevel = background.blurLevel,
+                canvasColorArgb = background.colorArgb,
+                canvasGradientId = background.gradientIndex
+            )
+        }
+
         updateProject(currentProject, recordUndo = false)
+    }
+
+    fun setApplyBackgroundToAllLive(background: ClipBackground) {
+        val currentProject = _uiState.value.project
+        for (c in currentProject.clips) {
+            clipBackgrounds[c.id] = background
+            PreviewRenderer.setClipBackground(c.id, background)
+        }
+        val bgMode = if (background.gradientIndex in 0..5) 3 else when (background.type) {
+            BackgroundType.NONE -> 0
+            BackgroundType.COLOR -> 1
+            BackgroundType.BLUR -> 2
+        }
+        _uiState.update {
+            it.copy(
+                canvasBgMode = bgMode,
+                canvasBlurLevel = background.blurLevel,
+                canvasColorArgb = background.colorArgb,
+                canvasGradientId = background.gradientIndex
+            )
+        }
     }
 
     fun getClipColorAdjust(clipId: String): ClipColorAdjust =
         clipColorAdjusts[clipId] ?: ClipColorAdjust.DEFAULT
+
+    fun setClipColorAdjustLive(clipIndex: Int, adjust: ClipColorAdjust) {
+        val currentProject = _uiState.value.project
+        val clip = currentProject.clips.getOrNull(clipIndex) ?: return
+        clipColorAdjusts[clip.id] = adjust
+        PreviewRenderer.setClipColorAdjust(clip.id, adjust)
+    }
+
+    fun setApplyColorAdjustToAllLive(adjust: ClipColorAdjust) {
+        val currentProject = _uiState.value.project
+        for (c in currentProject.clips) {
+            clipColorAdjusts[c.id] = adjust
+            PreviewRenderer.setClipColorAdjust(c.id, adjust)
+        }
+    }
+
+    fun resetClipColorAdjust(clipIndex: Int) {
+        setClipColorAdjustLive(clipIndex, ClipColorAdjust.DEFAULT)
+    }
 
     fun commitClipColorAdjust(clipIndex: Int, adjust: ClipColorAdjust) {
         val currentProject = _uiState.value.project
@@ -861,6 +960,103 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             text = stickerGlyph
         )
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
+    }
+
+    /**
+     * Adds an interactive GPU Mosaic / Privacy Blur Region (Phase 9) to the timeline.
+     */
+    fun addMosaicOverlay(
+        startUs: Long,
+        durationUs: Long = 3_000_000L,
+        style: Int = 0,
+        intensity: Float = 0.5f,
+        feather: Float = 0.05f
+    ): OverlayItem? {
+        if (!canAddLayerItem(_layerItems, LayerType.MOSAIC)) {
+            showToast(getLayerCapLimitMessage(LayerType.MOSAIC))
+            return null
+        }
+        val endUs = startUs + durationUs
+        val item = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.MOSAIC,
+            laneIndex = -1,
+            zIndex = 0,
+            startUs = startUs,
+            endUs = endUs,
+            mosaicStyle = style,
+            mosaicIntensity = intensity,
+            mosaicFeather = feather
+        )
+        return if (addLayerItem(item)) _layerItems.lastOrNull() else null
+    }
+
+    fun liveUpdateMosaic(itemId: String, style: Int, intensity: Float, feather: Float) {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx >= 0) {
+            val old = _layerItems[idx]
+            val updated = old.copy(mosaicStyle = style, mosaicIntensity = intensity, mosaicFeather = feather)
+            _layerItems[idx] = updated
+            syncLayerPlan()
+        }
+    }
+
+    fun updateMosaic(itemId: String, style: Int, intensity: Float, feather: Float): Boolean {
+        val item = _layerItems.firstOrNull { it.id == itemId } ?: return false
+        return updateLayerItem(item.copy(
+            mosaicStyle = style,
+            mosaicIntensity = intensity,
+            mosaicFeather = feather
+        ))
+    }
+
+    fun startAspectRatioEditing() {
+        preSheetAspectRatioMode = _uiState.value.aspectRatioMode
+    }
+
+    fun setAspectRatioLive(mode: AspectRatioMode) {
+        _uiState.update { it.copy(aspectRatioMode = mode) }
+        PreviewRenderer.setCanvasAspectRatio(mode.aspect)
+    }
+
+    fun setAspectRatioLive(modeIndex: Int) {
+        setAspectRatioLive(AspectRatioMode.fromIndex(modeIndex))
+    }
+
+    fun setAspectRatioMode(mode: AspectRatioMode) {
+        setAspectRatioLive(mode)
+    }
+
+    fun commitAspectRatio(mode: AspectRatioMode? = null) {
+        val finalMode = mode ?: _uiState.value.aspectRatioMode
+        if (finalMode != preSheetAspectRatioMode) {
+            val currentProject = _uiState.value.project
+            undoStack.push(currentProject)
+            undoTimeMaps.addLast(HashMap(clipTimeMaps))
+            undoVolumes.addLast(HashMap(clipVolumes))
+            undoTransforms.addLast(HashMap(clipTransforms))
+            undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
+            undoBackgrounds.addLast(HashMap(clipBackgrounds))
+            undoFilterStates.addLast(HashMap(clipFilterStates))
+            undoLayerItems.addLast(ArrayList(_layerItems))
+            undoAspectRatios.addLast(preSheetAspectRatioMode)
+            redoTimeMaps.clear()
+            redoVolumes.clear()
+            redoTransforms.clear()
+            redoColorAdjusts.clear()
+            redoBackgrounds.clear()
+            redoFilterStates.clear()
+            redoLayerItems.clear()
+            redoAspectRatios.clear()
+            preSheetAspectRatioMode = finalMode
+        }
+        _uiState.update { it.copy(aspectRatioMode = finalMode) }
+        PreviewRenderer.setCanvasAspectRatio(finalMode.aspect)
+    }
+
+    fun cancelAspectRatio() {
+        _uiState.update { it.copy(aspectRatioMode = preSheetAspectRatioMode) }
+        PreviewRenderer.setCanvasAspectRatio(preSheetAspectRatioMode.aspect)
     }
 
     /**
@@ -2337,6 +2533,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun getMediaFileDurationUs(clip: Clip): Long {
+        pathNaturalDurationsCache[clip.path]?.let { return it }
         return try {
             val file = java.io.File(clip.path)
             if (file.exists()) {
@@ -2344,7 +2541,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 retriever.setDataSource(file.absolutePath)
                 val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
                 retriever.release()
-                durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(clip.durationMs)
+                val dur = durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(clip.durationMs)
+                pathNaturalDurationsCache[clip.path] = dur
+                dur
             } else {
                 msToUs(clip.durationMs)
             }
@@ -3421,17 +3620,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun selectJunction(index: Int) {
-        _uiState.update {
-            it.copy(
-                selectedJunctionIndex = index,
-                selectedClipIndex = null,
-                selectedOverlayId = null,
-                focusMode = TimelineFocusState.S0_NONE
-            )
-        }
-    }
-
     fun deselectAll() {
         _uiState.update {
             it.copy(
@@ -3693,6 +3881,130 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private val junctionTransitionModes = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private var preSheetTransitions: List<Transition>? = null
+    private var preSheetJunctionModes: Map<Int, Int>? = null
+
+    fun selectJunction(index: Int) {
+        preSheetTransitions = _uiState.value.project.transitions
+        preSheetJunctionModes = HashMap(junctionTransitionModes)
+        _uiState.update {
+            it.copy(
+                selectedJunctionIndex = index,
+                selectedClipIndex = null,
+                selectedOverlayId = null,
+                focusMode = TimelineFocusState.S0_NONE
+            )
+        }
+    }
+
+    fun mapTransitionModeToModel(mode: Int): TransitionType = when (mode) {
+        1 -> TransitionType.FADE    // Dissolve
+        2 -> TransitionType.FADE    // Black Fade
+        3 -> TransitionType.FADE    // White Flash
+        4 -> TransitionType.SLIDE   // Slide Left
+        5 -> TransitionType.SLIDE   // Slide Right
+        6 -> TransitionType.ZOOM    // Zoom In
+        7 -> TransitionType.ZOOM    // Zoom Out
+        8 -> TransitionType.CIRCLE  // Vertical Wipe
+        else -> TransitionType.NONE // None (0)
+    }
+
+    fun getMaxTransitionDuration(junctionIndex: Int): Long {
+        val clips = _uiState.value.project.clips
+        if (junctionIndex < 0 || junctionIndex >= clips.size - 1) return 1000L
+        val d1 = clips[junctionIndex].durationMs
+        val d2 = clips[junctionIndex + 1].durationMs
+        return maxOf(200L, minOf(d1, d2) / 2L)
+    }
+
+    fun getJunctionTransitionMode(junctionIndex: Int): Int {
+        val stored = junctionTransitionModes[junctionIndex]
+        if (stored != null) return stored
+        val modelT = _uiState.value.project.transitions.getOrNull(junctionIndex)
+        return when (modelT?.type) {
+            TransitionType.SLIDE -> 4
+            TransitionType.CIRCLE -> 8
+            TransitionType.ZOOM -> 6
+            TransitionType.FADE -> 1
+            else -> 0
+        }
+    }
+
+    fun setTransitionLive(junctionIndex: Int, mode: Int, durationMs: Long) {
+        val currentProject = _uiState.value.project
+        if (junctionIndex !in currentProject.transitions.indices) return
+        if (mode <= 0) {
+            junctionTransitionModes.remove(junctionIndex)
+            PreviewRenderer.setJunctionTransitionType(junctionIndex, 0)
+        } else {
+            junctionTransitionModes[junctionIndex] = mode
+            PreviewRenderer.setJunctionTransitionType(junctionIndex, mode)
+        }
+        val maxDur = getMaxTransitionDuration(junctionIndex)
+        val clampedDur = if (mode <= 0) 0L else durationMs.coerceIn(200L, maxDur)
+        val newTransitions = currentProject.transitions.toMutableList()
+        newTransitions[junctionIndex] = Transition(mapTransitionModeToModel(mode), clampedDur)
+        val newProject = currentProject.copy(transitions = newTransitions)
+        updateProject(newProject, recordUndo = false)
+    }
+
+    fun commitTransition(junctionIndex: Int, mode: Int, durationMs: Long) {
+        val pre = preSheetTransitions
+        if (pre != null) {
+            val currentProject = _uiState.value.project
+            undoStack.push(currentProject.copy(transitions = pre))
+            preSheetTransitions = null
+            preSheetJunctionModes = null
+            _uiState.update {
+                it.copy(
+                    canUndo = undoStack.canUndo,
+                    canRedo = undoStack.canRedo
+                )
+            }
+        }
+        setTransitionLive(junctionIndex, mode, durationMs)
+    }
+
+    fun commitApplyTransitionToAll(mode: Int, durationMs: Long) {
+        val currentProject = _uiState.value.project
+        if (currentProject.transitions.isEmpty()) return
+        undoStack.push(currentProject)
+        val newTransitions = currentProject.transitions.toMutableList()
+        val modelType = mapTransitionModeToModel(mode)
+        for (j in newTransitions.indices) {
+            val maxDur = getMaxTransitionDuration(j)
+            val clampedDur = if (mode <= 0) 0L else durationMs.coerceIn(200L, maxDur)
+            newTransitions[j] = Transition(modelType, clampedDur)
+            if (mode <= 0) {
+                junctionTransitionModes.remove(j)
+                PreviewRenderer.setJunctionTransitionType(j, 0)
+            } else {
+                junctionTransitionModes[j] = mode
+                PreviewRenderer.setJunctionTransitionType(j, mode)
+            }
+        }
+        val newProject = currentProject.copy(transitions = newTransitions)
+        updateProject(newProject, recordUndo = true)
+    }
+
+    fun cancelTransition() {
+        val pre = preSheetTransitions
+        val preModes = preSheetJunctionModes
+        if (pre != null) {
+            val currentProject = _uiState.value.project
+            val restoredProject = currentProject.copy(transitions = pre)
+            if (preModes != null) {
+                junctionTransitionModes.clear()
+                junctionTransitionModes.putAll(preModes)
+                PreviewRenderer.syncJunctionTransitions(preModes)
+            }
+            updateProject(restoredProject, recordUndo = false)
+            preSheetTransitions = null
+            preSheetJunctionModes = null
+        }
+    }
+
     fun applyTransition(type: TransitionType) {
         val junctionIndex = _uiState.value.selectedJunctionIndex ?: return
         val currentT = _uiState.value.project.transitions.getOrNull(junctionIndex) ?: return
@@ -3838,6 +4150,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             _layerItems.addAll(prevLayers)
             syncLayerPlan()
         }
+        if (undoAspectRatios.isNotEmpty()) {
+            val prevRatio = undoAspectRatios.removeLast()
+            redoAspectRatios.addLast(_uiState.value.aspectRatioMode)
+            _uiState.update { it.copy(aspectRatioMode = prevRatio) }
+            PreviewRenderer.setCanvasAspectRatio(prevRatio.aspect)
+        }
         val isAllMuted = previous.clips.isNotEmpty() && previous.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(previous, recordUndo = false)
@@ -3902,6 +4220,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             _layerItems.addAll(nextLayers)
             syncLayerPlan()
         }
+        if (redoAspectRatios.isNotEmpty()) {
+            val nextRatio = redoAspectRatios.removeLast()
+            undoAspectRatios.addLast(_uiState.value.aspectRatioMode)
+            _uiState.update { it.copy(aspectRatioMode = nextRatio) }
+            PreviewRenderer.setCanvasAspectRatio(nextRatio.aspect)
+        }
         val isAllMuted = next.clips.isNotEmpty() && next.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
         updateProject(next, recordUndo = false)
@@ -3965,9 +4289,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(exportState = ExportState.Exporting(0f)) }
 
         val snapshot = getSnapshot()
+        val ratioMode = _uiState.value.aspectRatioMode
         exportJob = viewModelScope.launch {
             try {
-                val uri = exportEngine.export(snapshot) { progress ->
+                val uri = exportEngine.export(snapshot, ratioMode.width, ratioMode.height) { progress ->
                     _uiState.update { it.copy(exportState = ExportState.Exporting(progress)) }
                 }
                 _uiState.update {

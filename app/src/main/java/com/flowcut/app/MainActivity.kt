@@ -3,6 +3,8 @@ package com.flowcut.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.opengl.EGL14
+import android.opengl.EGLConfig
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -42,6 +44,7 @@ import androidx.core.content.ContextCompat
 import com.flowcut.app.editor.AppScreen
 import com.flowcut.app.editor.EditorViewModel
 import com.flowcut.app.engine.PreviewEngine
+import com.flowcut.app.engine.TransitionRenderer
 import com.flowcut.app.model.MAX_CLIPS
 import com.flowcut.app.ui.EditorScreen
 import com.flowcut.app.ui.ExportState
@@ -56,6 +59,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
         enableEdgeToEdge()
 
         try {
@@ -76,6 +89,18 @@ class MainActivity : ComponentActivity() {
                 viewModel.initPreviewEngine(it)
             }
         } else null
+
+        val importUriString = intent?.getStringExtra("import_uri")
+        if (importUriString != null) {
+            val uri = android.net.Uri.parse(importUriString)
+            viewModel.createNewProject(listOf(uri))
+        } else if (intent?.getBooleanExtra("open_editor", false) == true) {
+            viewModel.navigateTo(AppScreen.EDITOR)
+        }
+
+        if (intent?.getBooleanExtra("test_shader_init", false) == true) {
+            testShaderWarmup()
+        }
 
         setContent {
             FlowCutTheme {
@@ -325,5 +350,50 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         jankStats?.isTrackingEnabled = true
         viewModel.onAppResume()
+    }
+
+    private fun testShaderWarmup() {
+        Thread {
+            try {
+                val dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                val vers = IntArray(2)
+                EGL14.eglInitialize(dpy, vers, 0, vers, 1)
+                val configAttrs = intArrayOf(
+                    EGL14.EGL_RENDERABLE_TYPE, 0x0040,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                    EGL14.EGL_NONE
+                )
+                val configs = arrayOfNulls<EGLConfig>(1)
+                val numConfigs = IntArray(1)
+                EGL14.eglChooseConfig(dpy, configAttrs, 0, configs, 0, 1, numConfigs, 0)
+                val ctxAttrs = intArrayOf(
+                    EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
+                    EGL14.EGL_NONE
+                )
+                val ctx = EGL14.eglCreateContext(dpy, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttrs, 0)
+                val pbufAttrs = intArrayOf(
+                    EGL14.EGL_WIDTH, 64,
+                    EGL14.EGL_HEIGHT, 64,
+                    EGL14.EGL_NONE
+                )
+                val surf = EGL14.eglCreatePbufferSurface(dpy, configs[0], pbufAttrs, 0)
+                EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
+
+                android.util.Log.d("FlowCutPerf", "Offscreen EGL initialized for shader test")
+                val renderer = TransitionRenderer(cacheDir)
+                val t0 = android.os.SystemClock.elapsedRealtime()
+                renderer.init()
+                val initMs = android.os.SystemClock.elapsedRealtime() - t0
+                android.util.Log.d("FlowCutPerf", "TransitionRenderer init finished in ${initMs} ms")
+
+                renderer.release()
+                EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                EGL14.eglDestroySurface(dpy, surf)
+                EGL14.eglDestroyContext(dpy, ctx)
+                EGL14.eglTerminate(dpy)
+            } catch (e: Exception) {
+                android.util.Log.e("FlowCutPerf", "testShaderWarmup failed", e)
+            }
+        }.start()
     }
 }

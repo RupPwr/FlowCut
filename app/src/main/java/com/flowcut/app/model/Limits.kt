@@ -2,8 +2,8 @@ package com.flowcut.app.model
 
 const val MAX_CLIPS = 1000
 const val MIN_CLIP_MS = 1_000L
-const val MAX_CLIP_MS = 300_000L
-const val MAX_TOTAL_MS = 300_000L
+const val MAX_CLIP_MS = 900_000L
+const val MAX_TOTAL_MS = 900_000L
 const val MAX_1080P_SHORT_SIDE = 1080
 const val MAX_1080P_LONG_SIDE = 2560
 const val MAX_SIDE_PX = 2560

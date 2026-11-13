@@ -123,6 +123,8 @@ class ExportEngine(private val context: Context) {
 
     suspend fun export(
         timeline: ProgramTimeline,
+        width: Int = EXPORT_W,
+        height: Int = EXPORT_H,
         onProgress: (Float) -> Unit
     ): Uri {
         val coreClips = timeline.project.clips.map {
@@ -149,8 +151,13 @@ class ExportEngine(private val context: Context) {
             )
         }
         val snapshot = TimelineSnapshot(1L, com.flowcut.app.core.model.Project(coreClips, coreTransitions))
-        return export(snapshot, onProgress)
+        return export(snapshot, width, height, onProgress)
     }
+
+    suspend fun export(
+        timeline: ProgramTimeline,
+        onProgress: (Float) -> Unit
+    ): Uri = export(timeline, EXPORT_W, EXPORT_H, onProgress)
 
     private data class PendingSample(
         val isVideo: Boolean,
@@ -165,6 +172,8 @@ class ExportEngine(private val context: Context) {
      */
     suspend fun export(
         snapshot: TimelineSnapshot,
+        width: Int = EXPORT_W,
+        height: Int = EXPORT_H,
         onProgress: (Float) -> Unit
     ): Uri = withContext(Dispatchers.IO) {
         isCancelled.set(false)
@@ -220,7 +229,7 @@ class ExportEngine(private val context: Context) {
             muxer = mux
 
             // Step 2: Configure H.264 video encoder (no B-frames)
-            val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, EXPORT_W, EXPORT_H).apply {
+            val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, EXPORT_BITRATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, EXPORT_FPS)
@@ -282,7 +291,10 @@ class ExportEngine(private val context: Context) {
             eglSurface = surf
 
             EGL14.eglMakeCurrent(display, surf, surf, eglCtx)
-            GLES30.glViewport(0, 0, EXPORT_W, EXPORT_H)
+            val exportAspect = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
+            PreviewRenderer.setCanvasAspectRatio(exportAspect)
+            TransitionRenderer.canvasAspect = exportAspect
+            GLES30.glViewport(0, 0, width, height)
 
             // Step 5: Setup TransitionRenderer and SurfaceTextures
             val rnd = TransitionRenderer()
@@ -299,7 +311,7 @@ class ExportEngine(private val context: Context) {
             var frameAvailableB = false
 
             val stA = SurfaceTexture(rnd.textureIdA()).apply {
-                setDefaultBufferSize(EXPORT_W, EXPORT_H)
+                setDefaultBufferSize(width, height)
                 setOnFrameAvailableListener {
                     synchronized(frameSyncObjectA) {
                         frameAvailableA = true
@@ -308,7 +320,7 @@ class ExportEngine(private val context: Context) {
                 }
             }
             val stB = SurfaceTexture(rnd.textureIdB()).apply {
-                setDefaultBufferSize(EXPORT_W, EXPORT_H)
+                setDefaultBufferSize(width, height)
                 setOnFrameAvailableListener {
                     synchronized(frameSyncObjectB) {
                         frameAvailableB = true
@@ -334,7 +346,7 @@ class ExportEngine(private val context: Context) {
             val adjB0 = FloatArray(4)
             val adjB1 = FloatArray(4)
             val adjB2 = FloatArray(4)
-            val texelSize = floatArrayOf(1.0f / EXPORT_W.toFloat(), 1.0f / EXPORT_H.toFloat())
+            val texelSize = floatArrayOf(1.0f / width.toFloat(), 1.0f / height.toFloat())
 
             val fgNormMatA = FloatArray(16)
             val fgNormMatB = FloatArray(16)
@@ -559,15 +571,26 @@ class ExportEngine(private val context: Context) {
                     stA.getTransformMatrix(rawMatA)
                 } catch (_: Exception) {}
 
+                val aScreen = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
                 val transformA = PreviewRenderer.getClipTransform(clipA.id)
-                PreviewRenderer.computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
+                PreviewRenderer.computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight, aScreen)
                 System.arraycopy(rawMatA, 0, matA, 0, 16)
-                PreviewRenderer.applyTransformMatrix(matA, transformA, clipA.displayWidth, clipA.displayHeight)
                 PreviewRenderer.calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
-                PreviewRenderer.computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                PreviewRenderer.computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight, aScreen)
                 Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
                 val bgA = PreviewRenderer.getClipBackground(clipA.id)
-                val bgModeA = PreviewRenderer.packBackground(bgA, bgParamsA)
+                var bgModeA = PreviewRenderer.packBackground(bgA, bgParamsA)
+                val videoAspectA = PreviewRenderer.computeVideoAspect(clipA.displayWidth, clipA.displayHeight, transformA)
+                if (bgModeA == 0 && (kotlin.math.abs(videoAspectA - aScreen) > 0.01f || transformA.scale < 0.999f)) {
+                    bgModeA = 2
+                    bgParamsA[0] = 0f
+                    bgParamsA[1] = 0f
+                    bgParamsA[2] = 0f
+                    bgParamsA[3] = if (bgA.blurLevel > 0.01f) bgA.blurLevel.coerceIn(0.01f, 1.0f) else 0.5f
+                }
+                if (bgModeA != 0 && PreviewRenderer.isForegroundCoveringCanvas(transformA, clipA.displayWidth, clipA.displayHeight, aScreen)) {
+                    bgModeA = 0
+                }
 
                 val isTransition = res.isTransition && res.clipBIndex >= 0
                 var bgB = ClipBackground.DEFAULT
@@ -611,14 +634,24 @@ class ExportEngine(private val context: Context) {
 
                     val transformB = PreviewRenderer.getClipTransform(clipB.id)
                     opacityB = transformB.opacity
-                    PreviewRenderer.computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
+                    PreviewRenderer.computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight, aScreen)
                     System.arraycopy(rawMatB, 0, matB, 0, 16)
-                    PreviewRenderer.applyTransformMatrix(matB, transformB, clipB.displayWidth, clipB.displayHeight)
                     PreviewRenderer.calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
-                    PreviewRenderer.computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                    PreviewRenderer.computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight, aScreen)
                     Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
                     bgB = PreviewRenderer.getClipBackground(clipB.id)
                     bgModeB = PreviewRenderer.packBackground(bgB, bgParamsB)
+                    val videoAspectB = PreviewRenderer.computeVideoAspect(clipB.displayWidth, clipB.displayHeight, transformB)
+                    if (bgModeB == 0 && (kotlin.math.abs(videoAspectB - aScreen) > 0.01f || transformB.scale < 0.999f)) {
+                        bgModeB = 2
+                        bgParamsB[0] = 0f
+                        bgParamsB[1] = 0f
+                        bgParamsB[2] = 0f
+                        bgParamsB[3] = if (bgB.blurLevel > 0.01f) bgB.blurLevel.coerceIn(0.01f, 1.0f) else 0.5f
+                    }
+                    if (bgModeB != 0 && PreviewRenderer.isForegroundCoveringCanvas(transformB, clipB.displayWidth, clipB.displayHeight, aScreen)) {
+                        bgModeB = 0
+                    }
                 } else {
                     if (frameSourceB != null) {
                         frameSourceB?.release()
@@ -642,6 +675,7 @@ class ExportEngine(private val context: Context) {
                 }
 
                 drawSpec.type = res.transitionType
+                drawSpec.transitionType = if (isTransition) PreviewRenderer.getJunctionTransitionType(res.clipAIndex) else 0
                 drawSpec.easedP = res.easedP
                 drawSpec.matA = matA
                 drawSpec.matB = matB
@@ -664,6 +698,7 @@ class ExportEngine(private val context: Context) {
                 drawSpec.bgModeB = bgModeB
                 drawSpec.bgParamsA = bgParamsA
                 drawSpec.bgParamsB = if (isTransition) bgParamsB else null
+                drawSpec.aspectRatio = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
 
                 val timeSec = (res.tUs.toDouble() / 1_000_000.0).toFloat()
                 val st = PreviewRenderer.getClipFilterState(clipA.id)
@@ -699,10 +734,10 @@ class ExportEngine(private val context: Context) {
 
                 val needsScissor = if (isTransition) {
                     (bgA.type == BackgroundType.NONE && bgB.type == BackgroundType.NONE) &&
-                        PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                        PreviewRenderer.computeScissorRect(width, height, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 } else {
                     (bgA.type == BackgroundType.NONE) &&
-                        PreviewRenderer.computeScissorRect(EXPORT_W, EXPORT_H, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
+                        PreviewRenderer.computeScissorRect(width, height, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 }
                 if (needsScissor) {
                     GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
@@ -715,6 +750,7 @@ class ExportEngine(private val context: Context) {
                         GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
                     }
                 }
+                Matrix.multiplyMM(matA, 0, rawMatA, 0, fgNormMatA, 0)
 
                 // Overlay compositor hook: render active overlay layers for this timestamp
                 if (plan.segments.isNotEmpty()) {
@@ -725,6 +761,23 @@ class ExportEngine(private val context: Context) {
                             val item = plan.items.getOrNull(itemIndex) ?: continue
                             val effTransform = animEvaluator.evaluate(item, res.tUs)
                             if (effTransform.opacity <= 0.001f) continue
+
+                            if (item.type == LayerType.MOSAIC) {
+                                rnd.drawMosaicRegion(
+                                    videoTexId = rnd.textureIdA(),
+                                    videoMat = matA,
+                                    crop = cropA,
+                                    transform = effTransform,
+                                    mosaicStyle = item.mosaicStyle,
+                                    mosaicIntensity = item.mosaicIntensity,
+                                    mosaicFeather = item.mosaicFeather,
+                                    opacity = effTransform.opacity,
+                                    displayWidth = width,
+                                    displayHeight = height
+                                )
+                                continue
+                            }
+
                             val cached = if (item.type == LayerType.VIDEO) {
                                 otc.getOrUpdateVideoTexture(item, res.tUs, isSynchronous = true)
                             } else {
@@ -737,8 +790,8 @@ class ExportEngine(private val context: Context) {
                                     texHeight = cached.height,
                                     transform = effTransform,
                                     opacity = effTransform.opacity,
-                                    displayWidth = EXPORT_W,
-                                    displayHeight = EXPORT_H,
+                                    displayWidth = width,
+                                    displayHeight = height,
                                     cropLeft = item.cropLeft,
                                     cropTop = item.cropTop,
                                     cropRight = item.cropRight,
@@ -795,8 +848,8 @@ class ExportEngine(private val context: Context) {
                 put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/FlowCut")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
                 put(MediaStore.Video.Media.DURATION, totalDurationMs)
-                put(MediaStore.Video.Media.WIDTH, EXPORT_W)
-                put(MediaStore.Video.Media.HEIGHT, EXPORT_H)
+                put(MediaStore.Video.Media.WIDTH, width)
+                put(MediaStore.Video.Media.HEIGHT, height)
             }
 
             val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)

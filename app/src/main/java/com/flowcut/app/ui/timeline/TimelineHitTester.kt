@@ -39,6 +39,7 @@ sealed interface TimelineSelection {
     data object None : TimelineSelection
     data class ClipSelected(val index: Int) : TimelineSelection
     data class JunctionSelected(val index: Int) : TimelineSelection
+    data class TransitionClicked(val junctionIndex: Int) : TimelineSelection
     data class LaneItemSelected(val laneIndex: Int, val itemIndex: Int) : TimelineSelection
     data class TrimHandleLeft(val index: Int) : TimelineSelection
     data class TrimHandleRight(val index: Int) : TimelineSelection
@@ -629,25 +630,20 @@ object TimelineHitTester {
         val tapTimeMs = usToMs(tapTimeUs)
 
         // -----------------------------------------------------------------------------------------
-        // PRIORITY 2: Transition Junction Nodes in Row C
+        // PRIORITY 2: Transition Junction Badges in Row C (±12.dp touch target, high priority)
         // -----------------------------------------------------------------------------------------
-        val junctionCenterY = rowCTopPx + mainTrackHeightPx / 2f
-        val junctionTouchHalfSizePx = (JUNCTION_BOX_SIZE_DP / 2f) * density
-        if (n > 1) {
+        val junctionTouchHalfXPx = 12f * density
+        if (n > 1 && tapY in rowCTopPx..rowCBottomPx) {
             val k = snapshot.main.lastStartAtOrBefore(tapTimeMs)
             val minJ = maxOf(0, k - 1)
             val maxJ = minOf(n - 2, k + 1)
             for (j in minJ..maxJ) {
-                if (selectedClipIndex >= 0 && (j == selectedClipIndex - 1 || j == selectedClipIndex)) {
-                    continue
-                }
                 val centerMs = (snapshot.main.startMs[j + 1] + snapshot.main.endMs[j]) / 2L
                 val junctionCenterPx = zoomState.timeUsToX(msToUs(centerMs), playheadUs, halfWidthPx, density)
                 val dx = abs(tapX - junctionCenterPx)
-                val dy = abs(tapY - junctionCenterY)
 
-                if (dx <= junctionTouchHalfSizePx && dy <= junctionTouchHalfSizePx) {
-                    return TimelineSelection.JunctionSelected(j)
+                if (dx <= junctionTouchHalfXPx) {
+                    return TimelineSelection.TransitionClicked(j)
                 }
             }
         }

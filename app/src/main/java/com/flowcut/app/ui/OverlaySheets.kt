@@ -27,8 +27,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BrightnessMedium
+import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.Contrast
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Tune
+import com.flowcut.app.engine.ClipColorAdjust
 import androidx.compose.material3.Button
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
@@ -48,6 +55,9 @@ import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.Grain
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.InvertColors
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.PanoramaFishEye
@@ -55,6 +65,9 @@ import androidx.compose.material.icons.filled.Vibration
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.text.style.TextOverflow
 import com.flowcut.app.core.timeline.SnapshotHolder
+import com.flowcut.app.engine.AspectRatioMode
+import com.flowcut.app.engine.BackgroundType
+import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipFilterState
 import com.flowcut.app.engine.PreviewRenderer
 import kotlin.math.roundToInt
@@ -3533,6 +3546,1186 @@ fun AutoCaptionsSheet(
                             text = if (phrases.isEmpty()) "Generate Captions" else "Generate ${phrases.size} Captions",
                             color = if (canGenerate) Color.White else Color.White.copy(alpha = 0.4f),
                             fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated Interactive GPU Mosaic / Privacy Blur BottomSheet (Phase 9).
+ * Features 4 style cards (Pixelate, Blur, Dot Matrix, Blackout) with #FF2D55 active border,
+ * Strength slider (10%..100% -> mosaicIntensity), and Feather slider (0%..100% -> mosaicFeather)
+ * with live 60fps preview updates and Cancel (✕) / Done (✓) controls.
+ */
+@Composable
+fun MosaicSheet(
+    initialStyle: Int = 0,
+    initialIntensity: Float = 0.5f,
+    initialFeather: Float = 0.05f,
+    onLiveUpdate: (style: Int, intensity: Float, feather: Float) -> Unit,
+    onCommit: (style: Int, intensity: Float, feather: Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var style by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(initialStyle) }
+    var intensity by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(initialIntensity) }
+    var feather by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(initialFeather) }
+
+    fun notifyChange(newStyle: Int, newIntensity: Float, newFeather: Float) {
+        style = newStyle
+        intensity = newIntensity
+        feather = newFeather
+        onLiveUpdate(newStyle, newIntensity, newFeather)
+    }
+
+    val styleCards = listOf(
+        Triple(0, "Pixelate", Icons.Default.GridOn),
+        Triple(1, "Blur", Icons.Default.BlurOn),
+        Triple(2, "Dot Matrix", Icons.Default.Grain),
+        Triple(3, "Blackout", Icons.Default.Shield)
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onLiveUpdate(initialStyle, initialIntensity, initialFeather)
+                onDismiss()
+            }
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    color = DARK_SHEET_BG,
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                )
+                .clickable(
+                    interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume */ }
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 12.dp)
+        ) {
+            // Header: [✕]  MOSAIC / PRIVACY BLUR  [✓]
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = {
+                        onLiveUpdate(initialStyle, initialIntensity, initialFeather)
+                        onDismiss()
+                    },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cancel",
+                        tint = Color.White
+                    )
+                }
+
+                Text(
+                    text = "MOSAIC / PRIVACY BLUR",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+
+                IconButton(
+                    onClick = {
+                        onCommit(style, intensity, feather)
+                        onDismiss()
+                    },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Done",
+                        tint = PINK_RED_ACCENT
+                    )
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().height(0.5.dp).background(DARK_SURFACE_BORDER))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                // 4 Style Cards
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    styleCards.forEach { (sId, sName, sIcon) ->
+                        val isSelected = style == sId
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(72.dp)
+                                .background(DARK_CARD_BG, RoundedCornerShape(10.dp))
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    notifyChange(sId, intensity, feather)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = sIcon,
+                                    contentDescription = sName,
+                                    tint = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = sName,
+                                    color = if (isSelected) Color.White else Color.White.copy(alpha = 0.7f),
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Strength Slider (10%..100% -> mosaicIntensity)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Strength",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "${(intensity * 100).roundToInt()}%",
+                        color = PINK_RED_ACCENT,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Slider(
+                    value = intensity,
+                    onValueChange = { notifyChange(style, it, feather) },
+                    valueRange = 0.10f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = DARK_SURFACE_BORDER
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Feather Slider (0%..100% -> mosaicFeather in 0.0f..0.3f)
+                val featherDisplay = ((feather / 0.3f) * 100f).coerceIn(0f, 100f).roundToInt()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Feather",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "$featherDisplay%",
+                        color = PINK_RED_ACCENT,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Slider(
+                    value = feather,
+                    onValueChange = { notifyChange(style, intensity, it) },
+                    valueRange = 0.0f..0.3f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = DARK_SURFACE_BORDER
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated Aspect Ratio & Canvas Background BottomSheet (Phase 9).
+ * - 6 Pro Aspect Ratios: 9:16, 16:9, 1:1, 4:5, 4:3, 21:9
+ * - Canvas Background Fill for letterbox/pillarbox areas:
+ *   1. Blur (4 levels)
+ *   2. Color (Black, White, Dark Gray, Pastel/Vibrant solid colors)
+ *   3. Gradient (6 smooth 2-color vertical gradients)
+ * - "Apply to All" button
+ * - Cancel (✕) / Done (✓)
+ */
+@Composable
+fun CanvasRatioSheet(
+    activeRatio: AspectRatioMode,
+    activeBackground: ClipBackground,
+    onRatioChanged: (AspectRatioMode) -> Unit,
+    onBackgroundChanged: (ClipBackground) -> Unit,
+    onApplyBackgroundToAll: (ClipBackground) -> Unit,
+    onDone: ((AspectRatioMode, ClipBackground) -> Unit)? = null,
+    onCancel: (() -> Unit)? = null,
+    onDismiss: () -> Unit
+) {
+    var selectedRatio by androidx.compose.runtime.remember(activeRatio) { androidx.compose.runtime.mutableStateOf(activeRatio) }
+    var selectedBg by androidx.compose.runtime.remember(activeBackground) { androidx.compose.runtime.mutableStateOf(activeBackground) }
+    var bgTab by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(
+            if (activeBackground.gradientIndex in 0..5) {
+                "Gradient"
+            } else when (activeBackground.type) {
+                BackgroundType.BLUR -> "Blur"
+                BackgroundType.COLOR -> "Color"
+                BackgroundType.NONE -> "Blur"
+            }
+        )
+    }
+
+    val ratios = AspectRatioMode.entries
+
+    val solidColors = listOf(
+        0xFF000000.toInt() to "Black",
+        0xFFFFFFFF.toInt() to "White",
+        0xFF24242A.toInt() to "Dark Gray",
+        0xFFFF2D55.toInt() to "Pink Red",
+        0xFF2196F3.toInt() to "Blue",
+        0xFF9C27B0.toInt() to "Purple",
+        0xFF009688.toInt() to "Teal",
+        0xFFFF9800.toInt() to "Orange",
+        0xFF4CAF50.toInt() to "Green"
+    )
+
+    val gradientPresets = listOf(
+        Pair(Color(0xFF1E0D40), Color(0xFF8C1A73)), // 0: Deep Purple to Magenta
+        Pair(Color(0xFF0D1A40), Color(0xFF0080A6)), // 1: Midnight Blue to Cyan
+        Pair(Color(0xFFA6331A), Color(0xFF400D26)), // 2: Sunset to Deep Red
+        Pair(Color(0xFF0D3326), Color(0xFF1A7366)), // 3: Emerald to Teal
+        Pair(Color(0xFF1A1F47), Color(0xFF994059)), // 4: Twilight Navy to Rose
+        Pair(Color(0xFF333338), Color(0xFF0A0A0D))  // 5: Charcoal to Pitch Black
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onCancel?.invoke() ?: onDismiss()
+            }
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    color = DARK_SHEET_BG,
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                )
+                .clickable(
+                    interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume */ }
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 12.dp)
+        ) {
+            // Header: [✕]  ASPECT RATIO & CANVAS  [✓]
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = { onCancel?.invoke() ?: onDismiss() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color.White
+                    )
+                }
+
+                Text(
+                    text = "CANVAS & ASPECT RATIO",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+
+                IconButton(
+                    onClick = { onDone?.invoke(selectedRatio, selectedBg) ?: onDismiss() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Done",
+                        tint = PINK_RED_ACCENT
+                    )
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().height(0.5.dp).background(DARK_SURFACE_BORDER))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                // Section 1: Aspect Ratio Presets
+                Text(
+                    text = "Aspect Ratio",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ratios.forEach { r ->
+                        val isSelected = selectedRatio == r
+                        Column(
+                            modifier = Modifier
+                                .width(76.dp)
+                                .height(86.dp)
+                                .background(DARK_CARD_BG, RoundedCornerShape(10.dp))
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    selectedRatio = r
+                                    onRatioChanged(r)
+                                }
+                                .padding(vertical = 6.dp, horizontal = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Box(
+                                modifier = Modifier.size(24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                val frameAspect = r.aspect
+                                val maxDim = 20.dp
+                                val (mW, mH) = if (frameAspect >= 1f) {
+                                    maxDim to (maxDim / frameAspect).coerceAtLeast(6.dp)
+                                } else {
+                                    (maxDim * frameAspect).coerceAtLeast(6.dp) to maxDim
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(mW, mH)
+                                        .border(
+                                            width = 1.5.dp,
+                                            color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.7f),
+                                            shape = RoundedCornerShape(2.dp)
+                                        )
+                                        .background(if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.2f) else Color.Transparent)
+                                )
+                            }
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = r.label,
+                                    color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = when (r) {
+                                        AspectRatioMode.RATIO_9_16 -> "Reels/Shorts"
+                                        AspectRatioMode.RATIO_16_9 -> "YouTube"
+                                        AspectRatioMode.RATIO_1_1 -> "Square"
+                                        AspectRatioMode.RATIO_4_5 -> "Portrait"
+                                        AspectRatioMode.RATIO_4_3 -> "Classic"
+                                        AspectRatioMode.RATIO_3_4 -> "Photo"
+                                        AspectRatioMode.RATIO_5_4 -> "Monitor"
+                                        AspectRatioMode.RATIO_3_2 -> "Standard"
+                                        AspectRatioMode.RATIO_2_3 -> "Vertical"
+                                        AspectRatioMode.RATIO_2_1 -> "Cinema"
+                                        AspectRatioMode.RATIO_1_2 -> "Tall"
+                                        AspectRatioMode.RATIO_21_9 -> "Ultrawide"
+                                    },
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    fontSize = 9.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Section 2: Canvas Background Fill (Letterbox / Pillarbox)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Canvas Background",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    // 3 Tabs: Blur, Color, Gradient
+                    Row(
+                        modifier = Modifier
+                            .background(DARK_CARD_BG, RoundedCornerShape(16.dp))
+                            .padding(2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf("Blur", "Color", "Gradient").forEach { tab ->
+                            val isTabSelected = bgTab == tab
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        if (isTabSelected) PINK_RED_ACCENT else Color.Transparent,
+                                        RoundedCornerShape(14.dp)
+                                    )
+                                    .clickable { bgTab = tab }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = tab,
+                                    color = if (isTabSelected) Color.White else Color.White.copy(alpha = 0.6f),
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isTabSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                when (bgTab) {
+                    "Blur" -> {
+                        // 4 Blur Levels: 25%, 50%, 75%, 100%
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            val blurLevels = listOf(0.25f, 0.50f, 0.75f, 1.0f)
+                            blurLevels.forEachIndexed { idx, lvl ->
+                                val isSelected = selectedBg.gradientIndex < 0 && selectedBg.type == BackgroundType.BLUR && kotlin.math.abs(selectedBg.blurLevel - lvl) < 0.05f
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(54.dp)
+                                        .background(DARK_CARD_BG, RoundedCornerShape(10.dp))
+                                        .border(
+                                            width = if (isSelected) 2.dp else 1.dp,
+                                            color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable {
+                                            val newBg = ClipBackground(type = BackgroundType.BLUR, blurLevel = lvl, gradientIndex = -1)
+                                            selectedBg = newBg
+                                            onBackgroundChanged(newBg)
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = "Level ${idx + 1}",
+                                            color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "${(lvl * 100).toInt()}%",
+                                            color = Color.White.copy(alpha = 0.5f),
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "Color" -> {
+                        // Solid Colors
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            solidColors.forEach { (colorArgb, colorName) ->
+                                val isSelected = selectedBg.gradientIndex < 0 && selectedBg.type == BackgroundType.COLOR && selectedBg.colorArgb == colorArgb
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.clickable {
+                                        val newBg = ClipBackground(type = BackgroundType.COLOR, colorArgb = colorArgb, gradientIndex = -1)
+                                        selectedBg = newBg
+                                        onBackgroundChanged(newBg)
+                                    }
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(42.dp)
+                                            .background(Color(colorArgb), CircleShape)
+                                            .border(
+                                                width = if (isSelected) 2.5.dp else 1.dp,
+                                                color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                                shape = CircleShape
+                                            )
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = colorName,
+                                        color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.7f),
+                                        fontSize = 9.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    "Gradient" -> {
+                        // 6 Vertical Gradients
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            gradientPresets.forEachIndexed { gIdx, (topCol, botCol) ->
+                                val isSelected = selectedBg.gradientIndex == gIdx
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.clickable {
+                                        val newBg = ClipBackground(type = BackgroundType.COLOR, gradientIndex = gIdx)
+                                        selectedBg = newBg
+                                        onBackgroundChanged(newBg)
+                                    }
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(width = 46.dp, height = 54.dp)
+                                            .background(
+                                                brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                                                    listOf(topCol, botCol)
+                                                ),
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .border(
+                                                width = if (isSelected) 2.5.dp else 1.dp,
+                                                color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "G${gIdx + 1}",
+                                        color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.7f),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Apply to All Button
+                OutlinedButton(
+                    onClick = {
+                        onApplyBackgroundToAll(selectedBg)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, PINK_RED_ACCENT.copy(alpha = 0.7f)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = PINK_RED_ACCENT.copy(alpha = 0.12f)
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Apply to All",
+                        tint = PINK_RED_ACCENT,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Apply Canvas Background to All Clips",
+                        color = PINK_RED_ACCENT,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Phase 10A: TransitionSheet
+ * Interactive Clip-to-Clip transitions on Row C junctions.
+ */
+@Composable
+fun TransitionSheet(
+    activeJunctionIndex: Int,
+    initialMode: Int = 0,
+    initialDurationMs: Long = 600L,
+    maxDurationMs: Long = 1000L,
+    onTransitionChanged: (mode: Int, durationMs: Long) -> Unit,
+    onApplyToAll: (mode: Int, durationMs: Long) -> Unit,
+    onDone: (mode: Int, durationMs: Long) -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedMode by androidx.compose.runtime.remember(activeJunctionIndex) {
+        androidx.compose.runtime.mutableIntStateOf(initialMode)
+    }
+    var currentDurationMs by androidx.compose.runtime.remember(activeJunctionIndex) {
+        androidx.compose.runtime.mutableLongStateOf(initialDurationMs.coerceIn(200L, maxDurationMs))
+    }
+
+    val maxSec = (maxDurationMs / 1000f).coerceAtLeast(0.3f)
+    val durSec = (currentDurationMs / 1000f).coerceIn(0.2f, maxSec)
+
+    val transitionItems = listOf(
+        Triple(0, "None", Icons.Default.Block),
+        Triple(1, "Dissolve", Icons.Default.Grain),
+        Triple(2, "Black", Icons.Default.Circle),
+        Triple(3, "White", Icons.Default.FlashOn),
+        Triple(4, "Slide L", Icons.Default.ViewAgenda),
+        Triple(5, "Slide R", Icons.Default.Splitscreen),
+        Triple(6, "Zoom In", Icons.Default.Add),
+        Triple(7, "Zoom Out", Icons.Default.Remove),
+        Triple(8, "Wipe", Icons.Default.CropSquare)
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onCancel()
+            }
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    color = DARK_SHEET_BG,
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                )
+                .clickable(
+                    interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume */ }
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 12.dp)
+        ) {
+            // Header: [✕]  TRANSITION  [✓]
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = { onCancel() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color.White
+                    )
+                }
+
+                Text(
+                    text = "TRANSITION",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+
+                IconButton(
+                    onClick = { onDone(selectedMode, currentDurationMs) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Done",
+                        tint = PINK_RED_ACCENT
+                    )
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().height(0.5.dp).background(DARK_SURFACE_BORDER))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                // Top Row: Duration Slider & Apply to All
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Duration: ${String.format(java.util.Locale.US, "%.1fs", durSec)}",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    OutlinedButton(
+                        onClick = { onApplyToAll(selectedMode, currentDurationMs) },
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        border = BorderStroke(1.dp, PINK_RED_ACCENT.copy(alpha = 0.8f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = PINK_RED_ACCENT.copy(alpha = 0.12f)
+                        ),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        Text(
+                            text = "Apply to All",
+                            color = PINK_RED_ACCENT,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Slider(
+                    value = durSec,
+                    onValueChange = { newSec ->
+                        val newMs = (newSec * 1000f).toLong().coerceIn(200L, maxDurationMs)
+                        currentDurationMs = newMs
+                        onTransitionChanged(selectedMode, newMs)
+                    },
+                    valueRange = 0.2f..maxSec,
+                    enabled = selectedMode > 0,
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = DARK_SURFACE_BORDER
+                    ),
+                    modifier = Modifier.fillMaxWidth().height(36.dp)
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 9 Transition Cards Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    transitionItems.forEach { (mode, name, icon) ->
+                        val isSelected = selectedMode == mode
+                        Column(
+                            modifier = Modifier
+                                .width(74.dp)
+                                .height(82.dp)
+                                .background(DARK_CARD_BG, RoundedCornerShape(10.dp))
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    selectedMode = mode
+                                    onTransitionChanged(mode, currentDurationMs)
+                                }
+                                .padding(vertical = 8.dp, horizontal = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(
+                                        if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.18f) else Color.Transparent,
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = name,
+                                    tint = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            Text(
+                                text = name,
+                                color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.85f),
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Phase 10A: ClipAdjustSheet
+ * Main Video Clip Pro Color Adjustments (Brightness, Contrast, Saturation, Warmth, Vignette)
+ */
+@Composable
+fun ClipAdjustSheet(
+    initialAdjust: ClipColorAdjust,
+    onAdjustChanged: (ClipColorAdjust) -> Unit,
+    onApplyToAll: (ClipColorAdjust) -> Unit,
+    onReset: () -> Unit,
+    onDone: (ClipColorAdjust) -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var adjust by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(initialAdjust)
+    }
+
+    // 5 Selectable Parameter Tabs
+    var selectedParamIndex by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableIntStateOf(0)
+    }
+
+    val params = listOf(
+        Triple(0, "Brightness", Icons.Default.BrightnessMedium),
+        Triple(1, "Contrast", Icons.Default.Contrast),
+        Triple(2, "Saturation", Icons.Default.ColorLens),
+        Triple(3, "Warmth", Icons.Default.Thermostat),
+        Triple(4, "Vignette", Icons.Default.PanoramaFishEye)
+    )
+
+    // Current parameter percentage for slider
+    val currentPercent: Float = when (selectedParamIndex) {
+        0 -> (adjust.brightness / 0.5f) * 50f
+        1 -> (adjust.contrast / 0.5f) * 50f
+        2 -> (adjust.saturation / 0.5f) * 50f
+        3 -> (adjust.warmth / 0.5f) * 50f
+        4 -> adjust.vignette * 100f
+        else -> 0f
+    }
+
+    val paramRange = if (selectedParamIndex == 4) 0f..100f else -50f..50f
+    val paramName = params.getOrNull(selectedParamIndex)?.second ?: "Adjust"
+    val displayValue = if (selectedParamIndex == 4) {
+        "${currentPercent.toInt()}%"
+    } else {
+        val v = currentPercent.toInt()
+        if (v > 0) "+$v%" else "$v%"
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onCancel()
+            }
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    color = DARK_SHEET_BG,
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                )
+                .clickable(
+                    interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume */ }
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 12.dp)
+        ) {
+            // Header: [✕]  PRO COLOR ADJUST  [✓]
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = { onCancel() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color.White
+                    )
+                }
+
+                Text(
+                    text = "ADJUST",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+
+                IconButton(
+                    onClick = { onDone(adjust) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Done",
+                        tint = PINK_RED_ACCENT
+                    )
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().height(0.5.dp).background(DARK_SURFACE_BORDER))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                // Parameter Name and Live Value
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = paramName,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        text = displayValue,
+                        color = PINK_RED_ACCENT,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Smooth Pink Slider
+                Slider(
+                    value = currentPercent,
+                    onValueChange = { newVal ->
+                        val updated = when (selectedParamIndex) {
+                            0 -> adjust.copy(brightness = (newVal / 50f) * 0.5f)
+                            1 -> adjust.copy(contrast = (newVal / 50f) * 0.5f)
+                            2 -> adjust.copy(saturation = (newVal / 50f) * 0.5f)
+                            3 -> adjust.copy(warmth = (newVal / 50f) * 0.5f)
+                            4 -> adjust.copy(vignette = (newVal / 100f).coerceIn(0f, 1f))
+                            else -> adjust
+                        }
+                        adjust = updated
+                        onAdjustChanged(updated)
+                    },
+                    valueRange = paramRange,
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = DARK_SURFACE_BORDER
+                    ),
+                    modifier = Modifier.fillMaxWidth().height(36.dp)
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 5 Selectable Parameter Chips Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    params.forEach { (idx, name, icon) ->
+                        val isSelected = selectedParamIndex == idx
+                        Column(
+                            modifier = Modifier
+                                .width(70.dp)
+                                .height(68.dp)
+                                .background(DARK_CARD_BG, RoundedCornerShape(10.dp))
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    selectedParamIndex = idx
+                                }
+                                .padding(vertical = 6.dp, horizontal = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = name,
+                                tint = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = name,
+                                color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.75f),
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Bottom Buttons: Reset & Apply to All
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val resetAdjust = when (selectedParamIndex) {
+                                0 -> adjust.copy(brightness = 0f)
+                                1 -> adjust.copy(contrast = 0f)
+                                2 -> adjust.copy(saturation = 0f)
+                                3 -> adjust.copy(warmth = 0f)
+                                4 -> adjust.copy(vignette = 0f)
+                                else -> ClipColorAdjust.DEFAULT
+                            }
+                            adjust = resetAdjust
+                            onAdjustChanged(resetAdjust)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(40.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, DARK_SURFACE_BORDER),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = DARK_CARD_BG
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Reset",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Reset",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            onApplyToAll(adjust)
+                        },
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .height(40.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PINK_RED_ACCENT
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Apply to All",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Apply to All Clips",
+                            color = Color.White,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }

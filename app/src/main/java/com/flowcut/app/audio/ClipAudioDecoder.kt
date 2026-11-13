@@ -11,6 +11,7 @@ import com.flowcut.app.core.time.usToAudioFrames
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * Hardware audio decoder with a bounded sliding ring buffer.
@@ -39,7 +40,7 @@ class ClipAudioDecoder(val filePath: String) {
         fun framesToUs(frames: Long): Long = Math.floorDiv(frames * US_PER_MS, AUDIO_FRAMES_PER_MS)
     }
 
-    private val codecLock = Any()
+    private val codecLock = ReentrantLock()
 
     @Volatile var hasAudio: Boolean = false
         private set
@@ -80,7 +81,8 @@ class ClipAudioDecoder(val filePath: String) {
     }
 
     fun prepare() {
-        synchronized(codecLock) {
+        codecLock.lock()
+        try {
             if (isPrepared) return
             val file = File(filePath)
             if (!file.exists()) {
@@ -140,13 +142,15 @@ class ClipAudioDecoder(val filePath: String) {
                 hasAudio = true
                 isPrepared = true
 
-                // Prime the buffer from frame 0
-                internalSeekToFrame(0L)
+                // Prime the buffer from frame 0 with minimal iterations
+                internalSeekToFrame(0L, maxIterations = 10, targetMinFrames = PREFILL_FRAMES / 2)
             } catch (_: Throwable) {
                 hasAudio = false
                 isPrepared = false
                 internalRelease()
             }
+        } finally {
+            codecLock.unlock()
         }
     }
 
@@ -269,12 +273,16 @@ class ClipAudioDecoder(val filePath: String) {
 
     fun seekToFrame(targetFrame: Long) {
         if (wavPcmData != null) return
-        synchronized(codecLock) {
-            internalSeekToFrame(targetFrame)
+        if (codecLock.tryLock()) {
+            try {
+                internalSeekToFrame(targetFrame, maxIterations = 20, targetMinFrames = PREFILL_FRAMES)
+            } finally {
+                codecLock.unlock()
+            }
         }
     }
 
-    private fun internalSeekToFrame(targetFrame: Long) {
+    private fun internalSeekToFrame(targetFrame: Long, maxIterations: Int = 40, targetMinFrames: Int = PREFILL_FRAMES) {
         if (!hasAudio || !isPrepared) return
         val ext = extractor ?: return
         val dec = codec ?: return
@@ -297,9 +305,8 @@ class ClipAudioDecoder(val filePath: String) {
             prevSrcSampleR = 0f
 
             // Fill buffer forward to target + prefill
-            val minFramesToBuffer = PREFILL_FRAMES
             var iterations = 0
-            while (bufferedFrames < minFramesToBuffer && !outputEos && iterations < 80) {
+            while (bufferedFrames < targetMinFrames && !outputEos && iterations < maxIterations) {
                 val decoded = internalDecodeChunk()
                 if (!decoded && inputEos) break
                 iterations++
@@ -345,35 +352,42 @@ class ClipAudioDecoder(val filePath: String) {
             return
         }
 
-        // Check if requested range is outside buffer
-        val start = bufferStartFrame
-        val countBuffered = bufferedFrames
-        if (actualSourceFrame < start || actualSourceFrame > start + countBuffered + 24_000L) {
-            seekToFrame(actualSourceFrame)
-        } else if (actualSourceFrame + count > start + countBuffered) {
-            decodeChunk()
-        } else {
-            val remaining = (start + countBuffered) - (actualSourceFrame + count)
-            if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
-                decodeChunk()
-            }
+        // Non-blocking real-time audio thread: tryLock prevents blocking AudioTrack callback
+        if (!codecLock.tryLock()) {
+            return
         }
-
-        var curFrame = actualSourceFrame
-        var dstIdx = outOffset
-        val curStart = bufferStartFrame
-        val curBuffered = bufferedFrames
-
-        for (i in 0 until count) {
-            if (curFrame in curStart until (curStart + curBuffered)) {
-                val ringIdx = ((curFrame and BUFFER_MASK.toLong()).toInt()) shl 1
-                out[dstIdx] += pcmBuffer[ringIdx] * gain
-                out[dstIdx + 1] += pcmBuffer[ringIdx + 1] * gain
+        try {
+            val start = bufferStartFrame
+            val countBuffered = bufferedFrames
+            if (actualSourceFrame < start || actualSourceFrame > start + countBuffered + 24_000L) {
+                internalSeekToFrame(actualSourceFrame, maxIterations = 3, targetMinFrames = count * 2)
+            } else if (actualSourceFrame + count > start + countBuffered) {
+                internalDecodeChunk()
+            } else {
+                val remaining = (start + countBuffered) - (actualSourceFrame + count)
+                if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
+                    internalDecodeChunk()
+                }
             }
-            curFrame++
-            dstIdx += TARGET_CHANNELS
+
+            var curFrame = actualSourceFrame
+            var dstIdx = outOffset
+            val curStart = bufferStartFrame
+            val curBuffered = bufferedFrames
+
+            for (i in 0 until count) {
+                if (curFrame in curStart until (curStart + curBuffered)) {
+                    val ringIdx = ((curFrame and BUFFER_MASK.toLong()).toInt()) shl 1
+                    out[dstIdx] += pcmBuffer[ringIdx] * gain
+                    out[dstIdx + 1] += pcmBuffer[ringIdx + 1] * gain
+                }
+                curFrame++
+                dstIdx += TARGET_CHANNELS
+            }
+            lastReadEndSourceFrame = actualSourceFrame + count
+        } finally {
+            codecLock.unlock()
         }
-        lastReadEndSourceFrame = actualSourceFrame + count
     }
 
     /**
@@ -437,59 +451,67 @@ class ClipAudioDecoder(val filePath: String) {
             return
         }
 
-        val totalNeededSrcFrames = (count * speed).toInt() + 2
-        val targetEnd = actualStartFrame + totalNeededSrcFrames
-        val start = bufferStartFrame
-        val countBuffered = bufferedFrames
-
-        if (actualStartFrame < start || actualStartFrame > start + countBuffered + 24_000L) {
-            seekToFrame(actualStartFrame)
-        } else if (targetEnd > start + countBuffered) {
-            // Strictly at most 1 non-blocking chunk decode per 10ms block so AudioEngine thread never stalls!
-            decodeChunk()
-        } else {
-            val remaining = (start + countBuffered) - targetEnd
-            if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
-                decodeChunk()
-            }
+        // Non-blocking real-time audio thread: tryLock prevents blocking AudioTrack callback
+        if (!codecLock.tryLock()) {
+            return
         }
+        try {
+            val totalNeededSrcFrames = (count * speed).toInt() + 2
+            val targetEnd = actualStartFrame + totalNeededSrcFrames
+            val start = bufferStartFrame
+            val countBuffered = bufferedFrames
 
-        val curStart = bufferStartFrame
-        val curBuffered = bufferedFrames
-        val curEnd = curStart + curBuffered
-
-        var dstIdx = outOffset
-        for (i in 0 until count) {
-            val exactSrcPos = actualStartFrame.toDouble() + i.toDouble() * speed.toDouble()
-            val f0 = exactSrcPos.toLong()
-            val f1 = f0 + 1L
-            val frac = (exactSrcPos - f0.toDouble()).toFloat()
-
-            if (f0 in curStart until curEnd) {
-                val ringIdx0 = ((f0 and BUFFER_MASK.toLong()).toInt()) shl 1
-                val s0L = pcmBuffer[ringIdx0]
-                val s0R = pcmBuffer[ringIdx0 + 1]
-
-                val sL: Float
-                val sR: Float
-                if (f1 in curStart until curEnd) {
-                    val ringIdx1 = ((f1 and BUFFER_MASK.toLong()).toInt()) shl 1
-                    val s1L = pcmBuffer[ringIdx1]
-                    val s1R = pcmBuffer[ringIdx1 + 1]
-                    sL = s0L * (1f - frac) + s1L * frac
-                    sR = s0R * (1f - frac) + s1R * frac
-                } else {
-                    sL = s0L
-                    sR = s0R
+            if (actualStartFrame < start || actualStartFrame > start + countBuffered + 24_000L) {
+                internalSeekToFrame(actualStartFrame, maxIterations = 3, targetMinFrames = totalNeededSrcFrames)
+            } else if (targetEnd > start + countBuffered) {
+                // Strictly at most 1 non-blocking chunk decode per 10ms block so AudioEngine thread never stalls!
+                internalDecodeChunk()
+            } else {
+                val remaining = (start + countBuffered) - targetEnd
+                if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
+                    internalDecodeChunk()
                 }
-
-                out[dstIdx] += sL * gain
-                out[dstIdx + 1] += sR * gain
             }
-            dstIdx += TARGET_CHANNELS
+
+            val curStart = bufferStartFrame
+            val curBuffered = bufferedFrames
+            val curEnd = curStart + curBuffered
+
+            var dstIdx = outOffset
+            for (i in 0 until count) {
+                val exactSrcPos = actualStartFrame.toDouble() + i.toDouble() * speed.toDouble()
+                val f0 = exactSrcPos.toLong()
+                val f1 = f0 + 1L
+                val frac = (exactSrcPos - f0.toDouble()).toFloat()
+
+                if (f0 in curStart until curEnd) {
+                    val ringIdx0 = ((f0 and BUFFER_MASK.toLong()).toInt()) shl 1
+                    val s0L = pcmBuffer[ringIdx0]
+                    val s0R = pcmBuffer[ringIdx0 + 1]
+
+                    val sL: Float
+                    val sR: Float
+                    if (f1 in curStart until curEnd) {
+                        val ringIdx1 = ((f1 and BUFFER_MASK.toLong()).toInt()) shl 1
+                        val s1L = pcmBuffer[ringIdx1]
+                        val s1R = pcmBuffer[ringIdx1 + 1]
+                        sL = s0L * (1f - frac) + s1L * frac
+                        sR = s0R * (1f - frac) + s1R * frac
+                    } else {
+                        sL = s0L
+                        sR = s0R
+                    }
+
+                    out[dstIdx] += sL * gain
+                    out[dstIdx + 1] += sR * gain
+                }
+                dstIdx += TARGET_CHANNELS
+            }
+            val consumedSrcFrames = (count.toDouble() * speed.toDouble()).toLong()
+            lastReadEndSourceFrame = actualStartFrame + consumedSrcFrames
+        } finally {
+            codecLock.unlock()
         }
-        val consumedSrcFrames = (count.toDouble() * speed.toDouble()).toLong()
-        lastReadEndSourceFrame = actualStartFrame + consumedSrcFrames
     }
 
     /**
@@ -505,7 +527,8 @@ class ClipAudioDecoder(val filePath: String) {
             readSynchronous(sourceStartFrame, count, out, outOffset, gain)
             return
         }
-        synchronized(codecLock) {
+        codecLock.lock()
+        try {
             val actualStartFrame = if (lastReadEndSourceFrame >= 0L && kotlin.math.abs(sourceStartFrame - lastReadEndSourceFrame) <= 96L) {
                 lastReadEndSourceFrame
             } else {
@@ -563,6 +586,8 @@ class ClipAudioDecoder(val filePath: String) {
             }
             val consumedSrcFrames = (count.toDouble() * speed.toDouble()).toLong()
             lastReadEndSourceFrame = actualStartFrame + consumedSrcFrames
+        } finally {
+            codecLock.unlock()
         }
     }
 
@@ -576,7 +601,8 @@ class ClipAudioDecoder(val filePath: String) {
             read(sourceFrame, count, out, outOffset, gain)
             return
         }
-        synchronized(codecLock) {
+        codecLock.lock()
+        try {
             val actualSourceFrame = if (lastReadEndSourceFrame >= 0L && kotlin.math.abs(sourceFrame - lastReadEndSourceFrame) <= 96L) {
                 lastReadEndSourceFrame
             } else {
@@ -612,12 +638,17 @@ class ClipAudioDecoder(val filePath: String) {
                 dstIdx += TARGET_CHANNELS
             }
             lastReadEndSourceFrame = actualSourceFrame + count
+        } finally {
+            codecLock.unlock()
         }
     }
 
     fun decodeChunk(): Boolean {
-        synchronized(codecLock) {
+        codecLock.lock()
+        try {
             return internalDecodeChunk()
+        } finally {
+            codecLock.unlock()
         }
     }
 
@@ -773,8 +804,11 @@ class ClipAudioDecoder(val filePath: String) {
     }
 
     fun release() {
-        synchronized(codecLock) {
+        codecLock.lock()
+        try {
             internalRelease()
+        } finally {
+            codecLock.unlock()
         }
     }
 

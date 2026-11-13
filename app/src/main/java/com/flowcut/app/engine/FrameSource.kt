@@ -2,6 +2,7 @@ package com.flowcut.app.engine
 
 import android.graphics.SurfaceTexture
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.view.Surface
@@ -35,10 +36,51 @@ class FrameSource(
     private var isAccuratePausedFrameLatched: Boolean = false
     private var isCatchingUpFromSeek: Boolean = false
     private var lastForwardKeyframeHopUs: Long = -1L
+    private var hasNotifiedFirstFrame: Boolean = false
+    var onFirstFrameDecoded: (() -> Unit)? = null
 
     var prewarmStage: Int = 0 // 0 = uninitialized, 1 = extractor ready, 2 = codec configured & seeked, 3 = target frame decoded & ready
     private var videoTrackIndex: Int = -1
     private var videoFormat: MediaFormat? = null
+
+    private var cachedKeyframes: LongArray? = null
+    private var keyframeLoadAttempted = false
+
+    private fun getKeyframes(): LongArray? {
+        if (!keyframeLoadAttempted) {
+            keyframeLoadAttempted = true
+            val idxPath = clip.path.replace(".mp4", ".idx")
+            cachedKeyframes = com.flowcut.app.storage.KeyframeIndex.load(idxPath)
+        }
+        return cachedKeyframes
+    }
+
+    private fun findSoftwareDecoderName(mime: String): String? {
+        return try {
+            val codecList = MediaCodecList(MediaCodecList.ALL_CODECS)
+            for (info in codecList.codecInfos) {
+                if (info.isEncoder) continue
+                val name = info.name
+                if (name.startsWith("c2.android.", ignoreCase = true) || name.startsWith("OMX.google.", ignoreCase = true)) {
+                    for (type in info.supportedTypes) {
+                        if (type.equals(mime, ignoreCase = true)) {
+                            return name
+                        }
+                    }
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun notifyFirstFrame() {
+        if (!hasNotifiedFirstFrame) {
+            hasNotifiedFirstFrame = true
+            onFirstFrameDecoded?.invoke()
+        }
+    }
 
     fun prepareExtractorOnly(): Boolean {
         if (prewarmStage >= 1 && extractor != null) return true
@@ -67,8 +109,26 @@ class FrameSource(
             ext.selectTrack(track)
             extractor = ext
             videoTrackIndex = track
+
+            val rawMime = format.getString(MediaFormat.KEY_MIME) ?: ""
+            // MediaTek MT6833 / Codec2 Dolby Vision Fallback:
+            // Standard GL surfaces fail on video/dolby-vision with "failed config".
+            // Normalize to standard video/hevc and remove profile/level constraints.
+            if (rawMime.contains("dolby-vision", ignoreCase = true)) {
+                currentMime = "video/hevc"
+                format.setString(MediaFormat.KEY_MIME, "video/hevc")
+                try {
+                    if (format.containsKey(MediaFormat.KEY_PROFILE)) {
+                        format.setInteger(MediaFormat.KEY_PROFILE, 0)
+                    }
+                    if (format.containsKey(MediaFormat.KEY_LEVEL)) {
+                        format.setInteger(MediaFormat.KEY_LEVEL, 0)
+                    }
+                } catch (_: Exception) {}
+            } else {
+                currentMime = rawMime
+            }
             videoFormat = format
-            currentMime = format.getString(MediaFormat.KEY_MIME) ?: ""
             prewarmStage = 1
             return true
         } catch (_: Exception) {
@@ -84,24 +144,62 @@ class FrameSource(
 
         val ext = extractor ?: return false
         val format = videoFormat ?: return false
-        val mime = currentMime.ifEmpty { format.getString(MediaFormat.KEY_MIME) ?: "" }
+        val targetMime = if (currentMime.contains("dolby-vision", ignoreCase = true)) {
+            "video/hevc"
+        } else {
+            currentMime.ifEmpty { format.getString(MediaFormat.KEY_MIME) ?: "video/avc" }
+        }
+        if (currentMime.contains("dolby-vision", ignoreCase = true)) {
+            format.setString(MediaFormat.KEY_MIME, "video/hevc")
+        }
 
         try {
-            try {
-                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                format.setInteger(MediaFormat.KEY_PRIORITY, 0)
-                format.setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
-            } catch (_: Exception) {}
-
             surface = Surface(surfaceTexture)
-            val decoder = MediaCodec.createDecoderByType(mime)
+            var decoder: MediaCodec? = null
+
+            // Pass 1: Try Hardware Decoder
             try {
-                decoder.configure(format, surface, null, 0)
-            } catch (cfgEx: Exception) {
-                val fallbackFormat = ext.getTrackFormat(videoTrackIndex)
-                decoder.configure(fallbackFormat, surface, null, 0)
+                val hwDec = MediaCodec.createDecoderByType(targetMime)
+                hwDec.configure(format, surface, null, 0)
+                hwDec.start()
+                decoder = hwDec
+            } catch (e1: Exception) {
+                try { decoder?.release() } catch (_: Exception) {}
+                decoder = null
+
+                // Pass 2: Retry Hardware Decoder with stripped profile/level and basic dimensions
+                try {
+                    val fallbackFormat = ext.getTrackFormat(videoTrackIndex)
+                    fallbackFormat.setString(MediaFormat.KEY_MIME, targetMime)
+                    val hwRetry = MediaCodec.createDecoderByType(targetMime)
+                    hwRetry.configure(fallbackFormat, surface, null, 0)
+                    hwRetry.start()
+                    decoder = hwRetry
+                } catch (e2: Exception) {
+                    try { decoder?.release() } catch (_: Exception) {}
+                    decoder = null
+
+                    // Pass 3: Fallback to Software Codec (c2.android.* / OMX.google.*)
+                    val swCodecName = findSoftwareDecoderName(targetMime)
+                    if (swCodecName != null) {
+                        try {
+                            val swDec = MediaCodec.createByCodecName(swCodecName)
+                            swDec.configure(format, surface, null, 0)
+                            swDec.start()
+                            decoder = swDec
+                        } catch (e3: Exception) {
+                            try { decoder?.release() } catch (_: Exception) {}
+                            decoder = null
+                        }
+                    }
+                }
             }
-            decoder.start()
+
+            if (decoder == null) {
+                isPrepared = false
+                return false
+            }
+
             codec = decoder
             isPrepared = true
 
@@ -133,8 +231,10 @@ class FrameSource(
         try {
             val bufferInfo = MediaCodec.BufferInfo()
 
-            // Feed up to 1 input buffer (0L non-blocking)
-            if (!inputEos) {
+            // Feed up to 4 input buffers (0L non-blocking)
+            var fed = 0
+            while (fed < 4 && !inputEos) {
+                fed++
                 val inIndex = dec.dequeueInputBuffer(0L)
                 if (inIndex >= 0) {
                     val inBuf = dec.getInputBuffer(inIndex)
@@ -149,14 +249,17 @@ class FrameSource(
                             ext.advance()
                         }
                     }
+                } else {
+                    break
                 }
             }
 
-            // Drain up to 2 output buffers (0L non-blocking)
+            // Drain up to 4 output buffers (first drain with 2,000us timeout, subsequent 0L)
             var drained = 0
-            while (drained < 2 && !outputEos) {
+            while (drained < 4 && !outputEos) {
+                val timeoutUs = if (drained == 0) 2_000L else 0L
                 drained++
-                val outIndex = dec.dequeueOutputBuffer(bufferInfo, 0L)
+                val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
                 if (outIndex >= 0) {
                     val pts = bufferInfo.presentationTimeUs
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
@@ -169,6 +272,7 @@ class FrameSource(
                         isAccuratePausedFrameLatched = true
                         isCatchingUpFromSeek = false
                         prewarmStage = 3
+                        notifyFirstFrame()
                         return true
                     } else {
                         dec.releaseOutputBuffer(outIndex, false)
@@ -214,8 +318,7 @@ class FrameSource(
             isCatchingUpFromSeek = true
             var seekTimeUs = localUs
             if (fastKeyframeOnly) {
-                val idxPath = clip.path.replace(".mp4", ".idx")
-                val keyframes = com.flowcut.app.storage.KeyframeIndex.load(idxPath)
+                val keyframes = getKeyframes()
                 if (keyframes != null && keyframes.isNotEmpty()) {
                     val targetMs = localUs / 1000L
                     val closestKeyframeMs = com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, targetMs)
@@ -270,9 +373,10 @@ class FrameSource(
                         lastKeyframePtsUs = pts
                         rendered = true
                         lastRenderedLocalUs = localUs
+                        notifyFirstFrame()
                     } else {
                         // Exact Silent Preroll: silently discard all frames before localUs - 20_000L
-                        if (pts >= localUs - 20_000L || outputEos || attempts >= maxAttempts) {
+                        if (pts >= localUs - 20_000L || outputEos) {
                             dec.releaseOutputBuffer(outIndex, true)
                             currentPtsUs = pts
                             lastKeyframePtsUs = pts
@@ -280,6 +384,7 @@ class FrameSource(
                             lastRenderedLocalUs = localUs
                             isAccuratePausedFrameLatched = true
                             isCatchingUpFromSeek = false
+                            notifyFirstFrame()
                         } else {
                             dec.releaseOutputBuffer(outIndex, false)
                             currentPtsUs = pts
@@ -360,8 +465,7 @@ class FrameSource(
             // Case B (Extreme forward jump > 1.5s): Only hop to keyframe if keyframe is strictly AHEAD of currentPtsUs
             if (deltaUs > 1_500_000L && (lastForwardKeyframeHopUs == -1L || localUs - lastForwardKeyframeHopUs > 600_000L)) {
                 val targetMs = localUs / 1000L
-                val idxPath = clip.path.replace(".mp4", ".idx")
-                val keyframes = com.flowcut.app.storage.KeyframeIndex.load(idxPath)
+                val keyframes = getKeyframes()
                 val closestKeyframeMs = if (keyframes != null && keyframes.isNotEmpty()) {
                     com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(keyframes, targetMs)
                 } else -1L
@@ -436,6 +540,7 @@ class FrameSource(
                 if (currentPtsUs >= lastSeekTargetUs - 50_000L) {
                     isCatchingUpFromSeek = false
                 }
+                notifyFirstFrame()
                 return true
             }
         } catch (_: Exception) {
