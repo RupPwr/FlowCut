@@ -3175,17 +3175,14 @@ fun EditorScreen(
             onDeselectAll = onDeselectAll
         )
 
-        // Export Sheet
-        if (exportSheetVisible) {
-            ExportSheet(
-                state = exportState,
-                totalDurationMs = timeline.total,
-                onStartExport = onStartExport,
-                onCancelExport = onCancelExport,
-                onShare = onShareExport,
-                onDismiss = onCloseExportSheet
-            )
-        }
+        // Export Config Sheet (Phase 10B: Two-Step Export Flow - Step 1)
+        ExportConfigSheetHost(
+            exportSheetVisible = exportSheetVisible,
+            resolvedViewModel = resolvedViewModel,
+            timelineTotal = timeline.total,
+            onStartExport = onStartExport,
+            onCloseExportSheet = onCloseExportSheet
+        )
 
         // Trim BottomSheet / Panel for selected clip OR global timeline trim
         if (isTrimSheetVisible) {
@@ -3656,6 +3653,55 @@ private fun CoverSelectionDialogHost(
         onDismiss = onDismiss,
         currentPlayheadTimeFormatted = formatTimeMs(com.flowcut.app.core.time.usToMs(playbackController.playhead.timeUs))
     )
+}
+
+@Composable
+private fun ExportConfigSheetHost(
+    exportSheetVisible: Boolean,
+    resolvedViewModel: EditorViewModel?,
+    timelineTotal: Long,
+    onStartExport: () -> Unit,
+    onCloseExportSheet: () -> Unit
+) {
+    if (!exportSheetVisible) return
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.55f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onCloseExportSheet()
+            },
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Box(
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { /* Consume clicks inside sheet so scrim is not triggered */ }
+        ) {
+            val res = resolvedViewModel?.uiState?.value?.exportResolution ?: 1080
+            val fps = resolvedViewModel?.uiState?.value?.exportFps ?: 30
+            val bitrateBps = resolvedViewModel?.uiState?.value?.exportBitrateBps ?: 14_000_000
+            ExportConfigSheet(
+                initialResolution = res,
+                initialFps = fps,
+                initialBitrateBps = bitrateBps,
+                totalDurationMs = timelineTotal,
+                onStartExport = { selectedRes, selectedFps, selectedBitrate ->
+                    if (resolvedViewModel != null) {
+                        resolvedViewModel.startExportWithConfig(selectedRes, selectedFps, selectedBitrate)
+                    } else {
+                        onStartExport()
+                    }
+                },
+                onDismiss = onCloseExportSheet
+            )
+        }
+    }
 }
 
 @Composable

@@ -302,6 +302,26 @@ class MainActivity : ComponentActivity() {
                             onPlayheadUpdate = { ms -> viewModel.onPlayheadUpdate(ms) }
                         )
                     }
+
+                    AppScreen.EXPORT -> {
+                        com.flowcut.app.ui.ExportScreen(
+                            uiState = uiState,
+                            aspectRatioMode = uiState.aspectRatioMode,
+                            onBackClick = { viewModel.returnToEditorFromExport() },
+                            onCancelExport = { reason -> viewModel.cancelExport(reason) },
+                            onRetryExport = { viewModel.startExport() },
+                            onShareExport = {
+                                uiState.exportedUri?.let { uri ->
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "video/mp4"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    startActivity(Intent.createChooser(shareIntent, "Share video"))
+                                }
+                            }
+                        )
+                    }
                 }
 
                 // Non-dismissible blocking import dialog: "Importing 2/3..."
@@ -344,6 +364,11 @@ class MainActivity : ComponentActivity() {
         super.onPause()
         jankStats?.isTrackingEnabled = false
         viewModel.onAppBackground()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        viewModel.onAppStop()
     }
 
     override fun onResume() {

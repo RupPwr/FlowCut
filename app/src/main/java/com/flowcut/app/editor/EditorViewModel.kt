@@ -59,7 +59,8 @@ import kotlin.math.roundToInt
 
 enum class AppScreen {
     HOME,
-    EDITOR
+    EDITOR,
+    EXPORT
 }
 
 data class EditorUiState(
@@ -79,6 +80,11 @@ data class EditorUiState(
     val exportSheetVisible: Boolean = false,
     val exportState: ExportState = ExportState.Ready,
     val exportedUri: Uri? = null,
+    val exportErrorMessage: String? = null,
+    val exportResolution: Int = 1080,
+    val exportFps: Int = 30,
+    val exportBitratePreset: Int = 1,
+    val exportBitrateBps: Int = 14_000_000,
     val toastMessage: String? = null,
     val isMainTrackMuted: Boolean = false,
     val coverTimeUs: Long = 0L,
@@ -4254,6 +4260,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openExportSheet() {
+        pause()
         _uiState.update {
             it.copy(
                 exportSheetVisible = true,
@@ -4266,6 +4273,50 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (_uiState.value.exportState is ExportState.Exporting) return
         _uiState.update { it.copy(exportSheetVisible = false) }
     }
+
+    fun setExportResolution(resolution: Int) {
+        _uiState.update { it.copy(exportResolution = resolution) }
+    }
+
+    fun setExportFps(fps: Int) {
+        _uiState.update { it.copy(exportFps = fps) }
+    }
+
+    fun setExportBitratePreset(preset: Int) {
+        _uiState.update { it.copy(exportBitratePreset = preset) }
+    }
+
+    fun setExportBitrateBps(bitrateBps: Int) {
+        _uiState.update { it.copy(exportBitrateBps = bitrateBps) }
+    }
+
+    fun setExportConfig(resolution: Int, fps: Int, bitratePreset: Int) {
+        val calculatedBps = calculateTargetBitrateBps(resolution, fps, bitratePreset)
+        _uiState.update {
+            it.copy(
+                exportResolution = resolution,
+                exportFps = fps,
+                exportBitratePreset = bitratePreset,
+                exportBitrateBps = calculatedBps
+            )
+        }
+    }
+
+    fun setExportConfigWithBitrate(resolution: Int, fps: Int, bitrateBps: Int) {
+        _uiState.update {
+            it.copy(
+                exportResolution = resolution,
+                exportFps = fps,
+                exportBitrateBps = bitrateBps
+            )
+        }
+    }
+
+    fun getTargetBitrateBps(
+        resolution: Int = _uiState.value.exportResolution,
+        fps: Int = _uiState.value.exportFps,
+        bitratePreset: Int = _uiState.value.exportBitratePreset
+    ): Int = calculateTargetBitrateBps(resolution, fps, bitratePreset)
 
     fun getSnapshot(): TimelineSnapshot {
         val project = _uiState.value.project
@@ -4297,15 +4348,50 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return TimelineSnapshot(System.nanoTime(), com.flowcut.app.core.model.Project(coreClips, coreTransitions))
     }
 
-    fun startExport() {
+    fun startExportWithConfig(
+        resolution: Int = _uiState.value.exportResolution,
+        fps: Int = _uiState.value.exportFps,
+        bitrateBps: Int = _uiState.value.exportBitrateBps
+    ) {
         exportJob?.cancel()
-        _uiState.update { it.copy(exportState = ExportState.Exporting(0f)) }
+        pause()
+        _uiState.update {
+            it.copy(
+                exportResolution = resolution,
+                exportFps = fps,
+                exportBitrateBps = bitrateBps,
+                exportSheetVisible = false,
+                currentScreen = AppScreen.EXPORT,
+                exportState = ExportState.Exporting(0f),
+                exportErrorMessage = null
+            )
+        }
 
         val snapshot = getSnapshot()
         val ratioMode = _uiState.value.aspectRatioMode
+
+        val aspect = if (ratioMode.aspect > 0f) ratioMode.aspect else (9f / 16f)
+        val rawWidth: Int
+        val rawHeight: Int
+        if (aspect <= 1.0f) {
+            rawWidth = resolution
+            rawHeight = (resolution / aspect).roundToInt()
+        } else {
+            rawHeight = resolution
+            rawWidth = (resolution * aspect).roundToInt()
+        }
+        val outWidth = rawWidth and 1.inv()
+        val outHeight = rawHeight and 1.inv()
+
         exportJob = viewModelScope.launch {
             try {
-                val uri = exportEngine.export(snapshot, ratioMode.width, ratioMode.height) { progress ->
+                val uri = exportEngine.export(
+                    snapshot = snapshot,
+                    width = outWidth,
+                    height = outHeight,
+                    fps = fps,
+                    bitrateBps = bitrateBps
+                ) { progress ->
                     _uiState.update { it.copy(exportState = ExportState.Exporting(progress)) }
                 }
                 _uiState.update {
@@ -4315,20 +4401,60 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             } catch (e: Exception) {
-                if (_uiState.value.exportState !is ExportState.Ready) {
-                    _uiState.update { it.copy(exportState = ExportState.Failed) }
+                if (e is kotlinx.coroutines.CancellationException) {
+                    val msg = _uiState.value.exportErrorMessage ?: "Export cancelled by user"
+                    _uiState.update {
+                        it.copy(
+                            exportState = ExportState.Failed,
+                            exportErrorMessage = msg
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            exportState = ExportState.Failed,
+                            exportErrorMessage = e.message ?: "Export failed. Please try again."
+                        )
+                    }
                 }
             }
         }
     }
 
-    fun cancelExport() {
+    fun startExport() {
+        val targetBitrate = if (_uiState.value.exportBitrateBps > 0) {
+            _uiState.value.exportBitrateBps
+        } else {
+            getTargetBitrateBps(_uiState.value.exportResolution, _uiState.value.exportFps, _uiState.value.exportBitratePreset)
+        }
+        startExportWithConfig(
+            resolution = _uiState.value.exportResolution,
+            fps = _uiState.value.exportFps,
+            bitrateBps = targetBitrate
+        )
+    }
+
+    fun cancelExport(reason: String = "Export cancelled by user") {
         exportEngine.cancel()
         exportJob?.cancel()
         _uiState.update {
             it.copy(
+                exportState = ExportState.Failed,
+                exportErrorMessage = reason
+            )
+        }
+    }
+
+    fun returnToEditorFromExport() {
+        if (_uiState.value.exportState is ExportState.Exporting) {
+            cancelExport("Export cancelled by user")
+        }
+        _uiState.update {
+            it.copy(
+                currentScreen = AppScreen.EDITOR,
                 exportState = ExportState.Ready,
-                exportSheetVisible = false
+                exportSheetVisible = false,
+                exportErrorMessage = null
             )
         }
     }
@@ -4336,8 +4462,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun onAppBackground() {
         previewEngine?.onPause()
         if (_uiState.value.exportState is ExportState.Exporting) {
-            cancelExport()
-            showToast("Export stopped because the app went to background")
+            cancelExport("Export cancelled because app went to background")
+            showToast("Export cancelled because app went to background")
+        }
+    }
+
+    fun onAppStop() {
+        if (_uiState.value.exportState is ExportState.Exporting) {
+            cancelExport("Export cancelled because app went to background")
         }
     }
 
@@ -4351,6 +4483,38 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearToast() {
         _uiState.update { it.copy(toastMessage = null) }
+    }
+
+    companion object {
+        fun calculateRecommendedBitrateBps(resolution: Int, fps: Int): Int {
+            val baseBps = when {
+                resolution <= 480 -> 4_000_000
+                resolution <= 720 -> 8_000_000
+                else -> 14_000_000
+            }
+            return if (fps >= 50) (baseBps * 1.35f).toInt() else baseBps
+        }
+
+        fun calculateTargetBitrateBps(resolution: Int, fps: Int, bitratePreset: Int): Int {
+            val baseBps = when {
+                resolution <= 480 -> when (bitratePreset) {
+                    0 -> 2_500_000
+                    2 -> 6_000_000
+                    else -> 4_000_000
+                }
+                resolution <= 720 -> when (bitratePreset) {
+                    0 -> 5_000_000
+                    2 -> 12_000_000
+                    else -> 8_000_000
+                }
+                else -> when (bitratePreset) {
+                    0 -> 8_000_000
+                    2 -> 22_000_000
+                    else -> 14_000_000
+                }
+            }
+            return if (fps >= 50) (baseBps * 1.35f).toInt() else baseBps
+        }
     }
 
     override fun onCleared() {

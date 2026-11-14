@@ -151,7 +151,7 @@ class ExportEngine(private val context: Context) {
             )
         }
         val snapshot = TimelineSnapshot(1L, com.flowcut.app.core.model.Project(coreClips, coreTransitions))
-        return export(snapshot, width, height, onProgress)
+        return export(snapshot, width, height, onProgress = onProgress)
     }
 
     suspend fun export(
@@ -174,6 +174,8 @@ class ExportEngine(private val context: Context) {
         snapshot: TimelineSnapshot,
         width: Int = EXPORT_W,
         height: Int = EXPORT_H,
+        fps: Int = EXPORT_FPS,
+        bitrateBps: Int = EXPORT_BITRATE,
         onProgress: (Float) -> Unit
     ): Uri = withContext(Dispatchers.IO) {
         isCancelled.set(false)
@@ -183,7 +185,7 @@ class ExportEngine(private val context: Context) {
         }
 
         val totalDurationMs = snapshot.totalMs
-        val totalFrames = ceil(totalDurationMs * EXPORT_FPS / 1000.0).toInt().coerceAtLeast(1)
+        val totalFrames = ceil(totalDurationMs * fps / 1000.0).toInt().coerceAtLeast(1)
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val fileName = "FlowCut_$timestamp.mp4"
@@ -231,8 +233,8 @@ class ExportEngine(private val context: Context) {
             // Step 2: Configure H.264 video encoder (no B-frames)
             val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, EXPORT_BITRATE)
-                setInteger(MediaFormat.KEY_FRAME_RATE, EXPORT_FPS)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
+                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -513,8 +515,8 @@ class ExportEngine(private val context: Context) {
                 }
 
                 // 6a. Render corresponding synchronous audio block
-                val startAudioFrame = (i * 48000L) / EXPORT_FPS
-                val endAudioFrame = ((i + 1) * 48000L) / EXPORT_FPS
+                val startAudioFrame = (i * 48000L) / fps
+                val endAudioFrame = ((i + 1) * 48000L) / fps
                 val audioFramesCount = (endAudioFrame - startAudioFrame).toInt()
                 val audioPtsUs = (startAudioFrame * 1_000_000L) / 48000L
 
@@ -535,7 +537,7 @@ class ExportEngine(private val context: Context) {
                 }
 
                 // 6b. Render video frame
-                val res = resolveExportFrame(snapshot, i, EXPORT_FPS, activeSet)
+                val res = resolveExportFrame(snapshot, i, fps, activeSet)
                 val clipA = snapshot.project.clips[res.clipAIndex]
                 val legacyClipA = PreviewRenderer.toLegacyClip(clipA)
 
@@ -675,6 +677,7 @@ class ExportEngine(private val context: Context) {
                 }
 
                 drawSpec.type = res.transitionType
+                drawSpec.swapTextures = false
                 drawSpec.transitionType = if (isTransition) PreviewRenderer.getJunctionTransitionType(res.clipAIndex) else 0
                 drawSpec.easedP = res.easedP
                 drawSpec.matA = matA
@@ -813,7 +816,7 @@ class ExportEngine(private val context: Context) {
                 }
 
                 // Non-zero monotonic EGL timestamp: offset by +1ms (1,000,000 ns) to avoid driver 0L pitfalls
-                val presentationTimeNs = (i * 1_000_000_000L / EXPORT_FPS) + 1_000_000L
+                val presentationTimeNs = (i * 1_000_000_000L / fps) + 1_000_000L
                 EGLExt.eglPresentationTimeANDROID(display, surf, presentationTimeNs)
                 EGL14.eglSwapBuffers(display, surf)
 
@@ -822,7 +825,7 @@ class ExportEngine(private val context: Context) {
             }
 
             // Step 7: Signal EOS on both video and audio encoders and drain
-            val finalAudioPtsUs = (totalFrames * 48000L / EXPORT_FPS * 1_000_000L) / 48000L
+            val finalAudioPtsUs = (totalFrames * 48000L / fps * 1_000_000L) / 48000L
             feedAudioInput(ByteArray(0), isEos = true, ptsUs = finalAudioPtsUs)
             drainAudio(true)
 

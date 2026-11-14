@@ -32,6 +32,24 @@ import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
+import android.os.Build
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextAlign
+import com.flowcut.app.editor.EditorUiState
+import com.flowcut.app.editor.EditorViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Tune
@@ -71,6 +89,7 @@ import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipFilterState
 import com.flowcut.app.engine.PreviewRenderer
 import kotlin.math.roundToInt
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -81,6 +100,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -4736,6 +4756,803 @@ fun ClipAdjustSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Phase 10B: Step 1 - ExportConfigSheet BottomSheet on EditorScreen
+ * Quality (Resolution), Frame Rate (FPS), Bitrate (Code Rate), and Live Approximate File Size Banner
+ * with 3 smooth #FF2D55 interactive sliders matching VideoGuru / CapCut export sheets.
+ */
+@Composable
+fun ExportConfigSheet(
+    initialResolution: Int = 1080,
+    initialFps: Int = 30,
+    initialBitrateBps: Int? = null,
+    totalDurationMs: Long = 0L,
+    onStartExport: (resolution: Int, fps: Int, bitrateBps: Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val resolutionOptions = remember {
+        listOf(
+            480 to "480p",
+            720 to "720p (HD)",
+            1080 to "1080p (FHD)"
+        )
+    }
+    val initialResIndex = remember(initialResolution) {
+        val idx = resolutionOptions.indexOfFirst { it.first == initialResolution }
+        if (idx >= 0) idx else 2 // default 1080p
+    }
+    var resolutionIndex by remember { mutableFloatStateOf(initialResIndex.toFloat()) }
+
+    val currentResolution = resolutionOptions[resolutionIndex.roundToInt().coerceIn(0, 2)].first
+    val currentResolutionLabel = resolutionOptions[resolutionIndex.roundToInt().coerceIn(0, 2)].second
+
+    val fpsOptions = remember { listOf(24, 25, 30, 50, 60) }
+    val initialFpsIndex = remember(initialFps) {
+        val idx = fpsOptions.indexOf(initialFps)
+        if (idx >= 0) idx else 2 // default 30 FPS
+    }
+    var fpsIndex by remember { mutableFloatStateOf(initialFpsIndex.toFloat()) }
+    val currentFps = fpsOptions[fpsIndex.roundToInt().coerceIn(0, 4)]
+
+    val initialBitrateMbps = remember(initialBitrateBps, initialResolution, initialFps) {
+        val bps = initialBitrateBps?.takeIf { it > 0 }
+            ?: EditorViewModel.calculateRecommendedBitrateBps(currentResolution, currentFps)
+        (bps / 1_000_000f).coerceIn(2.0f, 30.0f)
+    }
+    var bitrateMbps by remember { mutableFloatStateOf(initialBitrateMbps) }
+
+    val targetBitrateBps = (bitrateMbps * 1_000_000f).roundToInt().coerceIn(2_000_000, 30_000_000)
+    val approxSizeMb = (targetBitrateBps.toDouble() * (totalDurationMs / 1000.0)) / (8.0 * 1_000_000.0)
+    val formattedDuration = String.format(Locale.US, "%02d:%02d", totalDurationMs / 60000L, (totalDurationMs % 60000L) / 1000L)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF14151C), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+            .border(
+                BorderStroke(1.dp, Color(0xFF262833)),
+                RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+            )
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(horizontal = 20.dp, vertical = 16.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            // Top Header: Cancel (✕), Title ("Export Settings"), and Done / "Export" button in #FF2D55
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cancel",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Text(
+                    text = "Export Settings",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Button(
+                    onClick = {
+                        onStartExport(currentResolution, currentFps, targetBitrateBps)
+                    },
+                    modifier = Modifier.height(34.dp),
+                    shape = RoundedCornerShape(17.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PINK_RED_ACCENT
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Export",
+                        tint = Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Export",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Slider 1 — Resolution (Quality)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Resolution",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = currentResolutionLabel,
+                        color = PINK_RED_ACCENT,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Slider(
+                    value = resolutionIndex,
+                    onValueChange = { newVal ->
+                        val oldRes = currentResolution
+                        resolutionIndex = newVal
+                        val newRes = resolutionOptions[newVal.roundToInt().coerceIn(0, 2)].first
+                        if (newRes != oldRes) {
+                            bitrateMbps = (EditorViewModel.calculateRecommendedBitrateBps(newRes, currentFps) / 1_000_000f).coerceIn(2.0f, 30.0f)
+                        }
+                    },
+                    valueRange = 0f..2f,
+                    steps = 1,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = Color(0xFF262833)
+                    )
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    resolutionOptions.forEachIndexed { idx, pair ->
+                        val isSelected = idx == resolutionIndex.roundToInt().coerceIn(0, 2)
+                        Text(
+                            text = pair.second,
+                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.4f),
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            // Slider 2 — Frame Rate (FPS)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Frame Rate",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "${currentFps} FPS",
+                        color = PINK_RED_ACCENT,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Slider(
+                    value = fpsIndex,
+                    onValueChange = { newVal ->
+                        val oldFps = currentFps
+                        fpsIndex = newVal
+                        val newFps = fpsOptions[newVal.roundToInt().coerceIn(0, 4)]
+                        if (newFps != oldFps) {
+                            bitrateMbps = (EditorViewModel.calculateRecommendedBitrateBps(currentResolution, newFps) / 1_000_000f).coerceIn(2.0f, 30.0f)
+                        }
+                    },
+                    valueRange = 0f..4f,
+                    steps = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = Color(0xFF262833)
+                    )
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    fpsOptions.forEachIndexed { idx, fpsVal ->
+                        val isSelected = idx == fpsIndex.roundToInt().coerceIn(0, 4)
+                        Text(
+                            text = "${fpsVal}",
+                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.4f),
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            // Slider 3 — Bitrate (Code Rate / Mbps)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Bitrate",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "${String.format(Locale.US, "%.1f", bitrateMbps)} Mbps",
+                        color = PINK_RED_ACCENT,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Slider(
+                    value = bitrateMbps,
+                    onValueChange = { newVal ->
+                        bitrateMbps = newVal
+                    },
+                    valueRange = 2.0f..30.0f,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = PINK_RED_ACCENT,
+                        activeTrackColor = PINK_RED_ACCENT,
+                        inactiveTrackColor = Color(0xFF262833)
+                    )
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "2.0 Mbps (Low)",
+                        color = Color.White.copy(alpha = 0.4f),
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = "30.0 Mbps (High)",
+                        color = Color.White.copy(alpha = 0.4f),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            // Live Approximate File Size Banner below the 3 sliders
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1A1D27), RoundedCornerShape(12.dp))
+                    .border(BorderStroke(1.dp, Color(0xFF2B2E3D)), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(PINK_RED_ACCENT.copy(alpha = 0.15f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "File Size Info",
+                            tint = PINK_RED_ACCENT,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Estimated Size: ~${String.format(Locale.US, "%.1f", approxSizeMb)} MB  •  Duration: $formattedDuration",
+                        color = Color.White.copy(alpha = 0.95f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+    }
+}
+
+/**
+ * Phase 10B: Step 2 - Dedicated Full-Screen ExportScreen (AppScreen.EXPORT)
+ * Studio Dark Theme (#0E0F13), Center Visual Card with Cover Thumbnail & Animated Progress Ring,
+ * Dynamic State Handling (Exporting, Done, Failed), Lifecycle ON_STOP auto-cancel, and BackHandler.
+ */
+@Composable
+fun ExportScreen(
+    uiState: EditorUiState,
+    aspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16,
+    onBackClick: () -> Unit,
+    onCancelExport: (reason: String) -> Unit,
+    onRetryExport: () -> Unit,
+    onShareExport: () -> Unit
+) {
+    var showCancelConfirmDialog by remember { mutableStateOf(false) }
+
+    fun handleBackOrCancel() {
+        if (uiState.exportState is ExportState.Exporting) {
+            showCancelConfirmDialog = true
+        } else {
+            onBackClick()
+        }
+    }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                if (uiState.exportState is ExportState.Exporting) {
+                    onCancelExport("Export cancelled because app went to background")
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    BackHandler(enabled = true) {
+        handleBackOrCancel()
+    }
+
+    // Cover Thumbnail from first video clip
+    var coverBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(uiState.project.clips) {
+        val firstClipPath = uiState.project.clips.firstOrNull()?.path
+        if (firstClipPath != null) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val file = File(firstClipPath)
+                    val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        android.media.ThumbnailUtils.createVideoThumbnail(file, android.util.Size(540, 960), null)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        android.media.ThumbnailUtils.createVideoThumbnail(firstClipPath, android.provider.MediaStore.Video.Thumbnails.MINI_KIND)
+                    }
+                    coverBitmap = bmp
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    val state = uiState.exportState
+    val progress = if (state is ExportState.Exporting) state.progress.coerceIn(0f, 1f) else 0f
+    val titleText = when (state) {
+        is ExportState.Exporting -> "Exporting Video"
+        is ExportState.Done -> "Export Complete"
+        is ExportState.Failed -> if (uiState.exportErrorMessage?.contains("background", ignoreCase = true) == true) "Export Cancelled" else "Export Failed"
+        else -> "Export"
+    }
+
+    val targetBitrate = if (uiState.exportBitrateBps > 0) {
+        uiState.exportBitrateBps
+    } else {
+        EditorViewModel.calculateTargetBitrateBps(
+            uiState.exportResolution,
+            uiState.exportFps,
+            uiState.exportBitratePreset
+        )
+    }
+    val bitrateMbps = targetBitrate / 1_000_000f
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0E0F13))
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // 1. Top Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = { handleBackOrCancel() },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Text(
+                    text = titleText,
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // 2. Center Visual Section: Thumbnail Card + Progress Indicator + Settings Badge
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.weight(1f)
+            ) {
+                val frameAspect = if (aspectRatioMode.aspect > 0f) aspectRatioMode.aspect else (9f / 16f)
+                val cardHeight = 260.dp
+                val cardWidth = (cardHeight * frameAspect).coerceIn(150.dp, 300.dp)
+
+                Box(
+                    modifier = Modifier
+                        .size(width = cardWidth, height = cardHeight)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF161822))
+                        .border(
+                            BorderStroke(1.5.dp, if (state is ExportState.Exporting) PINK_RED_ACCENT else Color(0xFF262833)),
+                            RoundedCornerShape(16.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (coverBitmap != null) {
+                        Image(
+                            bitmap = coverBitmap!!.asImageBitmap(),
+                            contentDescription = "Project Cover",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+
+                    // Overlay based on state
+                    when (state) {
+                        is ExportState.Exporting -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.55f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    progress = { progress },
+                                    modifier = Modifier.size(88.dp),
+                                    color = PINK_RED_ACCENT,
+                                    trackColor = PINK_RED_ACCENT.copy(alpha = 0.25f),
+                                    strokeWidth = 6.dp
+                                )
+                                Text(
+                                    text = "${(progress * 100f).toInt()}%",
+                                    color = Color.White,
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        is ExportState.Done -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.45f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .background(Color(0xFF34C759).copy(alpha = 0.2f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Export Complete",
+                                        tint = Color(0xFF34C759),
+                                        modifier = Modifier.size(52.dp)
+                                    )
+                                }
+                            }
+                        }
+                        is ExportState.Failed -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.60f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .background(Color(0xFFFF453A).copy(alpha = 0.2f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Warning,
+                                        contentDescription = "Export Failed",
+                                        tint = Color(0xFFFF453A),
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                }
+                            }
+                        }
+                        else -> {}
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Settings badge
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF1B1D27), RoundedCornerShape(14.dp))
+                        .border(BorderStroke(1.dp, Color(0xFF2B2E3D)), RoundedCornerShape(14.dp))
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "${uiState.exportResolution}p  •  ${uiState.exportFps} FPS  •  ${String.format(Locale.US, "%.1f", bitrateMbps)} Mbps",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            // 3. Bottom Action & Status Panel
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                when (state) {
+                    is ExportState.Exporting -> {
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = PINK_RED_ACCENT,
+                            trackColor = Color(0xFF262833)
+                        )
+
+                        Text(
+                            text = "Please don't lock the screen or switch apps",
+                            color = Color.White.copy(alpha = 0.55f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        OutlinedButton(
+                            onClick = { handleBackOrCancel() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF383C4D))
+                        ) {
+                            Text(
+                                text = "Cancel Export",
+                                color = Color(0xFFFF453A),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    is ExportState.Done -> {
+                        Text(
+                            text = "Video Saved to Gallery!",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Saved to Movies/FlowCut",
+                            color = Color.White.copy(alpha = 0.55f),
+                            fontSize = 13.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Button(
+                            onClick = onShareExport,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PINK_RED_ACCENT
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Share Video",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = onBackClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF383C4D))
+                        ) {
+                            Text(
+                                text = "Back to Editor",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    is ExportState.Failed -> {
+                        Text(
+                            text = if (uiState.exportErrorMessage?.contains("background", ignoreCase = true) == true) "Export Cancelled" else "Export Failed",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = uiState.exportErrorMessage ?: "Export was stopped. Try again.",
+                            color = Color(0xFFFF6961),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Button(
+                            onClick = onRetryExport,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PINK_RED_ACCENT
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Retry",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Retry Export",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = onBackClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF383C4D))
+                        ) {
+                            Text(
+                                text = "Back to Editor",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    else -> {
+                        OutlinedButton(
+                            onClick = onBackClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF383C4D))
+                        ) {
+                            Text(
+                                text = "Back to Editor",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showCancelConfirmDialog) {
+            AlertDialog(
+                onDismissRequest = { showCancelConfirmDialog = false },
+                title = {
+                    Text(
+                        text = "Cancel Export?",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Text(
+                        text = "Your video is still exporting. Do you want to stop exporting and return to the editor?",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 14.sp
+                    )
+                },
+                containerColor = Color(0xFF1C1E28),
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showCancelConfirmDialog = false
+                            onCancelExport("Export cancelled by user")
+                            onBackClick()
+                        }
+                    ) {
+                        Text(
+                            text = "Cancel Export",
+                            color = PINK_RED_ACCENT,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showCancelConfirmDialog = false
+                        }
+                    ) {
+                        Text(
+                            text = "Continue",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            )
         }
     }
 }
