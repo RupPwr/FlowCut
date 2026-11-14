@@ -1,11 +1,19 @@
 package com.flowcut.app.ui
 
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
@@ -601,6 +609,9 @@ fun EditorScreen(
             onPlaybackStateChange(false)
         }
         val currentPlayheadUs = playbackController.playhead.timeUs
+        if (timeline.project.clips.isNotEmpty()) {
+            previewRenderer.isWaitingForFrame = true
+        }
         val result = resolvedViewModel?.splitAtPlayhead(
             playheadUs = currentPlayheadUs,
             preferredClipIndex = selectedClipIndex
@@ -746,31 +757,43 @@ fun EditorScreen(
     ) { uri ->
         if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            val cachePath = copyUriToCacheFile(context, uri, "audio_extract_")
-            if (cachePath != null) {
-                val retriever = android.media.MediaMetadataRetriever()
-                var durMs = 5000L
+            coroutineScope.launch {
+                vm.setProcessingEdit(true)
+                previewRenderer.isWaitingForFrame = true
                 try {
-                    retriever.setDataSource(cachePath)
-                    durMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 5000L
-                } catch (_: Exception) {
+                    val cachePath = withContext(Dispatchers.IO) {
+                        copyUriToCacheFile(context, uri, "audio_extract_")
+                    }
+                    if (cachePath != null) {
+                        var durMs = 5000L
+                        withContext(Dispatchers.IO) {
+                            val retriever = android.media.MediaMetadataRetriever()
+                            try {
+                                retriever.setDataSource(cachePath)
+                                durMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 5000L
+                            } catch (_: Exception) {
+                            } finally {
+                                try { retriever.release() } catch (_: Exception) {}
+                            }
+                        }
+                        val playheadUs = playbackController.playhead.timeUs
+                        val totalUs = msToUs(vm.uiState.value.project.clips.sumOf { it.durationMs })
+                        val remainingUs = (totalUs - playheadUs).coerceAtLeast(1_000_000L)
+                        val finalDurUs = minOf(durMs * 1000L, remainingUs).coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
+                        vm.addAudioOverlay(
+                            mediaPath = cachePath,
+                            title = "Extracted Audio",
+                            startUs = playheadUs,
+                            durationUs = finalDurUs,
+                            audioSubType = 0
+                        )
+                        vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                    }
                 } finally {
-                    try { retriever.release() } catch (_: Exception) {}
+                    vm.setProcessingEdit(false)
                 }
-                val playheadUs = playbackController.playhead.timeUs
-                val totalUs = msToUs(vm.uiState.value.project.clips.sumOf { it.durationMs })
-                val remainingUs = (totalUs - playheadUs).coerceAtLeast(1_000_000L)
-                val finalDurUs = minOf(durMs * 1000L, remainingUs).coerceAtLeast(com.flowcut.app.engine.OverlayItem.MIN_DURATION_US)
-                vm.addAudioOverlay(
-                    mediaPath = cachePath,
-                    title = "Extracted Audio",
-                    startUs = playheadUs,
-                    durationUs = finalDurUs,
-                    audioSubType = 0
-                )
-                vm.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
-                previewRenderer.requestRender()
-                frameDriver.wake()
             }
         }
     }
@@ -931,6 +954,40 @@ fun EditorScreen(
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
     val currentFocus = vmUiState?.focusMode ?: com.flowcut.app.ui.timeline.TimelineFocusState.S0_NONE
 
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    var isWaitingForFrameState by remember { mutableStateOf(previewRenderer.isWaitingForFrame) }
+    DisposableEffect(previewRenderer) {
+        previewRenderer.onWaitingForFrameChanged = { waiting ->
+            mainHandler.post {
+                isWaitingForFrameState = waiting
+            }
+        }
+        onDispose {
+            previewRenderer.onWaitingForFrameChanged = null
+        }
+    }
+
+    var showPreviewLoader by remember { mutableStateOf(false) }
+    val isImporting = vmUiState?.isImporting == true
+    val isProcessingEdit = vmUiState?.isProcessingEdit == true
+    val isBusy = isWaitingForFrameState || previewRenderer.isWaitingForFrame || isImporting || isProcessingEdit
+
+    LaunchedEffect(isBusy) {
+        if (isBusy) {
+            kotlinx.coroutines.delay(80L)
+            if (isWaitingForFrameState || previewRenderer.isWaitingForFrame || vmUiState?.isImporting == true || vmUiState?.isProcessingEdit == true) {
+                showPreviewLoader = true
+                while (previewRenderer.isWaitingForFrame || vmUiState?.isImporting == true || vmUiState?.isProcessingEdit == true) {
+                    kotlinx.coroutines.delay(30L)
+                }
+                showPreviewLoader = false
+                isWaitingForFrameState = false
+            }
+        } else {
+            showPreviewLoader = false
+        }
+    }
+
     LaunchedEffect(currentFocus) {
         val selId = when (currentFocus) {
             is com.flowcut.app.ui.timeline.TimelineFocusState.S2_PIP_ITEM -> currentFocus.itemId
@@ -1069,70 +1126,13 @@ fun EditorScreen(
                     .padding(horizontal = 12.dp)
             ) {
                 // 1. Top bar: 48 dp (Left: [←  My reel 01], Right: [9:16] [Export])
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = onBackClick,
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = colors.textPrimary
-                        )
-                    }
-                    Text(
-                        text = "My reel 01",
-                        color = colors.textPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    Box(
-                        modifier = Modifier
-                            .background(Color(0xFF24242A), RoundedCornerShape(14.dp))
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Text(
-                            text = "9:16",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    Button(
-                        onClick = {
-                            if (!hasClips) {
-                                Toast.makeText(context, "Add clips first", Toast.LENGTH_SHORT).show()
-                            } else {
-                                onExportButtonClick()
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = colors.accent,
-                            contentColor = colors.onAccent
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
-                        modifier = Modifier.height(32.dp)
-                    ) {
-                        Text(
-                            text = "Export",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
+                EditorTopBar(
+                    hasClips = hasClips,
+                    showPreviewLoader = showPreviewLoader,
+                    colors = colors,
+                    onBackClick = onBackClick,
+                    onExportButtonClick = onExportButtonClick
+                )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -1155,6 +1155,12 @@ fun EditorScreen(
                     FirstClipThumbnailOverlay(
                         isFirstFrameLatched = previewRenderer.isFirstFrameLatched,
                         clips = timeline.project.clips
+                    )
+
+                    // Center three-dots preview loader (96.dp x 36.dp sequential wave pulse)
+                    PreviewThreeDotsLoader(
+                        showLoader = showPreviewLoader,
+                        modifier = Modifier.align(Alignment.Center)
                     )
 
                     // Cover up floating 9:16 badge in PreviewBox
@@ -1218,370 +1224,16 @@ fun EditorScreen(
                         val activeClipId = resolvedViewModel?.uiState?.value?.project?.clips?.getOrNull(selectedClipIndex)?.id
                         val activeClip = resolvedViewModel?.uiState?.value?.project?.clips?.getOrNull(selectedClipIndex)
                         if (activeClipId != null) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .pointerInput(selectedClipIndex, activeClipId) {
-                                        var lastTapTimeMs = 0L
-                                        var lastTapPosition = Offset.Zero
-
-                                        awaitEachGesture {
-                                            val down = awaitFirstDown(requireUnconsumed = false)
-                                            val downTime = System.currentTimeMillis()
-                                            val downPos = down.position
-                                            var isDragOrTransform = false
-
-                                            val initialTransform = resolvedViewModel?.getClipTransform(activeClipId)
-                                                ?: PreviewRenderer.getClipTransform(activeClipId)
-
-                                            var rawPanX = initialTransform.panX
-                                            var rawPanY = initialTransform.panY
-                                            var rawScale = initialTransform.scale
-                                            var rawRotationDeg = initialTransform.rotationDeg
-                                            val isFlippedH = initialTransform.isFlippedH
-
-                                            var currentTransform = initialTransform
-
-                                            var totalMovedPx = 0f
-
-                                            var prevSnapCenterX = false
-                                            var prevSnapCenterY = false
-                                            var prevSnapEdgeLeft = false
-                                            var prevSnapEdgeRight = false
-                                            var prevSnapEdgeTop = false
-                                            var prevSnapEdgeBottom = false
-                                            var prevSnapScale100 = false
-                                            var prevSnapRotationCardinal = false
-
-                                            do {
-                                                val event = awaitPointerEvent()
-                                                val pressedList = event.changes.filter { it.pressed }
-                                                if (pressedList.isEmpty()) break
-
-                                                val outerW = size.width.toFloat().coerceAtLeast(1f)
-                                                val outerH = size.height.toFloat().coerceAtLeast(1f)
-                                                val previewH = outerH
-                                                val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
-
-                                                if (pressedList.size == 1) {
-                                                    val p = pressedList[0]
-                                                    val dx = p.position.x - p.previousPosition.x
-                                                    val dy = p.position.y - p.previousPosition.y
-                                                    val moveDist = kotlin.math.sqrt(dx * dx + dy * dy)
-                                                    totalMovedPx += moveDist
-
-                                                    if (totalMovedPx > 10f) {
-                                                        isDragOrTransform = true
-                                                        p.consume()
-
-                                                        rawPanX = (rawPanX + dx / previewW).coerceIn(-1.5f, 1.5f)
-                                                        rawPanY = (rawPanY - dy / previewH).coerceIn(-1.5f, 1.5f)
-                                                    }
-                                                } else if (pressedList.size >= 2) {
-                                                    isDragOrTransform = true
-                                                    val p1 = pressedList[0]
-                                                    val p2 = pressedList[1]
-                                                    p1.consume()
-                                                    p2.consume()
-
-                                                    val prevPos1 = p1.previousPosition
-                                                    val prevPos2 = p2.previousPosition
-                                                    val currPos1 = p1.position
-                                                    val currPos2 = p2.position
-
-                                                    // 1. Pan (centroid delta)
-                                                    val prevCenter = (prevPos1 + prevPos2) / 2f
-                                                    val currCenter = (currPos1 + currPos2) / 2f
-                                                    val dPan = currCenter - prevCenter
-                                                    rawPanX = (rawPanX + dPan.x / previewW).coerceIn(-1.5f, 1.5f)
-                                                    rawPanY = (rawPanY - dPan.y / previewH).coerceIn(-1.5f, 1.5f)
-
-                                                    // 2. Zoom (distance ratio)
-                                                    val prevDist = (prevPos1 - prevPos2).getDistance()
-                                                    val currDist = (currPos1 - currPos2).getDistance()
-                                                    val zoomRatio = if (prevDist > 1f) currDist / prevDist else 1f
-                                                    rawScale = (rawScale * zoomRatio).coerceIn(0.25f, 5.0f)
-
-                                                    // 3. Twist (rotation delta)
-                                                    val prevAngle = Math.toDegrees(kotlin.math.atan2((prevPos2.y - prevPos1.y).toDouble(), (prevPos2.x - prevPos1.x).toDouble())).toFloat()
-                                                    val currAngle = Math.toDegrees(kotlin.math.atan2((currPos2.y - currPos1.y).toDouble(), (currPos2.x - currPos1.x).toDouble())).toFloat()
-                                                    var angleDelta = currAngle - prevAngle
-                                                    while (angleDelta > 180f) angleDelta -= 360f
-                                                    while (angleDelta < -180f) angleDelta += 360f
-                                                    rawRotationDeg += angleDelta
-                                                }
-
-                                                if (isDragOrTransform) {
-                                                    // --- Compute Snapping from Raw Accumulators ---
-                                                    // 1. Rotation Snap
-                                                    val normRot = ((rawRotationDeg % 360f) + 360f) % 360f
-                                                    val nearestCardinal = (Math.round(normRot / 90f) * 90f).toFloat()
-                                                    val diffRot = kotlin.math.abs(normRot - nearestCardinal)
-                                                    val snapRotationCardinal = diffRot <= 3.0f
-                                                    val snappedRotationDeg = if (snapRotationCardinal) (nearestCardinal % 360f) else rawRotationDeg
-
-                                                    // 2. Scale Snap
-                                                    val diffScale = kotlin.math.abs(rawScale - 1.0f)
-                                                    val snapScale100 = diffScale < 0.04f
-                                                    val snappedScale = if (snapScale100) 1.0f else rawScale
-
-                                                    // 3. Effective Dimensions for Edge Snapping
-                                                    val aScreen = 9.0f / 16.0f
-                                                    val dispW = activeClip?.displayWidth ?: 1080
-                                                    val dispH = activeClip?.displayHeight ?: 1920
-                                                    val aClip = (dispW.toFloat() / dispH.toFloat()).coerceAtLeast(0.01f)
-
-                                                    val cardinalAngle = ((Math.round(snappedRotationDeg / 90f) * 90) % 360 + 360) % 360
-                                                    val isRot90or270 = (cardinalAngle == 90 || cardinalAngle == 270) && kotlin.math.abs(snappedRotationDeg - cardinalAngle) < 15f
-                                                    val effAspect = if (isRot90or270) (1.0f / aClip) else aClip
-
-                                                    val baseHw = if (effAspect >= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
-                                                    val baseHh = if (effAspect >= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
-                                                    val hw = baseHw * snappedScale
-                                                    val hh = baseHh * snappedScale
-
-                                                    // Target pan offsets for edge flush alignment
-                                                    val targetPanXLeft = hw - 0.5f
-                                                    val targetPanXRight = 0.5f - hw
-                                                    val targetPanYBottom = hh - 0.5f
-                                                    val targetPanYTop = 0.5f - hh
-
-                                                    // 4. Center & Edge Snap for panX
-                                                    var snappedPanX = rawPanX
-                                                    var snapCenterX = false
-                                                    var snapEdgeLeft = false
-                                                    var snapEdgeRight = false
-
-                                                    if (kotlin.math.abs(rawPanX) < 0.035f) {
-                                                        snappedPanX = 0f
-                                                        snapCenterX = true
-                                                    } else if (kotlin.math.abs(rawPanX - targetPanXLeft) < 0.035f) {
-                                                        snappedPanX = targetPanXLeft
-                                                        snapEdgeLeft = true
-                                                    } else if (kotlin.math.abs(rawPanX - targetPanXRight) < 0.035f) {
-                                                        snappedPanX = targetPanXRight
-                                                        snapEdgeRight = true
-                                                    }
-
-                                                    // 5. Center & Edge Snap for panY
-                                                    var snappedPanY = rawPanY
-                                                    var snapCenterY = false
-                                                    var snapEdgeBottom = false
-                                                    var snapEdgeTop = false
-
-                                                    if (kotlin.math.abs(rawPanY) < 0.035f) {
-                                                        snappedPanY = 0f
-                                                        snapCenterY = true
-                                                    } else if (kotlin.math.abs(rawPanY - targetPanYBottom) < 0.035f) {
-                                                        snappedPanY = targetPanYBottom
-                                                        snapEdgeBottom = true
-                                                    } else if (kotlin.math.abs(rawPanY - targetPanYTop) < 0.035f) {
-                                                        snappedPanY = targetPanYTop
-                                                        snapEdgeTop = true
-                                                    }
-
-                                                    // --- Haptic Feedback Tick on State Transition ---
-                                                    val newlySnapped = (!prevSnapCenterX && snapCenterX) ||
-                                                            (!prevSnapCenterY && snapCenterY) ||
-                                                            (!prevSnapEdgeLeft && snapEdgeLeft) ||
-                                                            (!prevSnapEdgeRight && snapEdgeRight) ||
-                                                            (!prevSnapEdgeTop && snapEdgeTop) ||
-                                                            (!prevSnapEdgeBottom && snapEdgeBottom) ||
-                                                            (!prevSnapScale100 && snapScale100) ||
-                                                            (!prevSnapRotationCardinal && snapRotationCardinal)
-
-                                                    if (newlySnapped) {
-                                                        try {
-                                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                        } catch (_: Throwable) {}
-                                                    }
-
-                                                    prevSnapCenterX = snapCenterX
-                                                    prevSnapCenterY = snapCenterY
-                                                    prevSnapEdgeLeft = snapEdgeLeft
-                                                    prevSnapEdgeRight = snapEdgeRight
-                                                    prevSnapEdgeTop = snapEdgeTop
-                                                    prevSnapEdgeBottom = snapEdgeBottom
-                                                    prevSnapScale100 = snapScale100
-                                                    prevSnapRotationCardinal = snapRotationCardinal
-
-                                                    // --- Update Compose Guide Overlay State ---
-                                                    isTransforming = true
-                                                    guideSnapCenterX = snapCenterX
-                                                    guideSnapCenterY = snapCenterY
-                                                    guideSnapEdgeLeft = snapEdgeLeft
-                                                    guideSnapEdgeRight = snapEdgeRight
-                                                    guideSnapEdgeTop = snapEdgeTop
-                                                    guideSnapEdgeBottom = snapEdgeBottom
-
-                                                    // Badge text: show rotation or scale
-                                                    guideBadgeText = when {
-                                                        snapRotationCardinal -> "${snappedRotationDeg.toInt()}°"
-                                                        snapScale100 -> "100%"
-                                                        pressedList.size >= 2 && kotlin.math.abs(rawRotationDeg - initialTransform.rotationDeg) > 1.5f ->
-                                                            "${Math.round(snappedRotationDeg)}°"
-                                                        pressedList.size >= 2 && kotlin.math.abs(rawScale - initialTransform.scale) > 0.03f ->
-                                                            "${Math.round(snappedScale * 100f)}%"
-                                                        else -> null
-                                                    }
-
-                                                    currentTransform = currentTransform.copy(
-                                                        scale = snappedScale,
-                                                        panX = snappedPanX,
-                                                        panY = snappedPanY,
-                                                        rotationDeg = snappedRotationDeg,
-                                                        isFlippedH = isFlippedH
-                                                    )
-                                                    PreviewRenderer.setClipTransform(activeClipId, currentTransform)
-                                                    previewRenderer.requestRender()
-                                                    frameDriver.wake()
-                                                }
-                                            } while (true)
-
-                                            // Clear visual guides immediately on gesture end
-                                            isTransforming = false
-                                            guideSnapCenterX = false
-                                            guideSnapCenterY = false
-                                            guideSnapEdgeLeft = false
-                                            guideSnapEdgeRight = false
-                                            guideSnapEdgeTop = false
-                                            guideSnapEdgeBottom = false
-                                            guideBadgeText = null
-
-                                            // Gesture completed (all fingers up)
-                                            if (isDragOrTransform) {
-                                                resolvedViewModel?.commitClipTransform(selectedClipIndex, currentTransform)
-                                                if (USE_NEW_CORE) {
-                                                    resolvedViewModel?.let { vm ->
-                                                        snapshotHolder.current = vm.getSnapshot()
-                                                    }
-                                                }
-                                                previewRenderer.requestRender()
-                                                frameDriver.wake()
-                                                triggerApplyToAllPill()
-                                            } else {
-                                                // Check for double-tap
-                                                val upTime = System.currentTimeMillis()
-                                                val tapDuration = upTime - downTime
-                                                val tapDist = (downPos - lastTapPosition).getDistance()
-
-                                                if (tapDuration < 300L && (upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
-                                                    // Double-tap detected: reset transform!
-                                                    val resetTransform = currentTransform.copy(
-                                                        scale = 1.0f,
-                                                        panX = 0f,
-                                                        panY = 0f,
-                                                        rotationDeg = 0f
-                                                    )
-                                                    resolvedViewModel?.commitClipTransform(selectedClipIndex, resetTransform)
-                                                    if (USE_NEW_CORE) {
-                                                        resolvedViewModel?.let { vm ->
-                                                            snapshotHolder.current = vm.getSnapshot()
-                                                        }
-                                                    }
-                                                    PreviewRenderer.setClipTransform(activeClipId, resetTransform)
-                                                    previewRenderer.requestRender()
-                                                    frameDriver.wake()
-                                                    triggerApplyToAllPill()
-                                                    lastTapTimeMs = 0L
-                                                } else if (tapDuration < 300L) {
-                                                    lastTapTimeMs = upTime
-                                                    lastTapPosition = downPos
-                                                }
-                                            }
-                                        }
-                                    }
-                            ) {
-                                // 9:16 Guide Overlay Canvas & Badge
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .aspectRatio(9f / 16f)
-                                        .align(Alignment.Center)
-                                ) {
-                                    if (isTransforming) {
-                                        Canvas(modifier = Modifier.fillMaxSize()) {
-                                            val strokeWidth1_5 = 1.5.dp.toPx()
-                                            val strokeWidth2 = 2.dp.toPx()
-                                            val cyanColor = Color(0xFF00E5FF)
-
-                                            // Vertical Center Guide
-                                            if (guideSnapCenterX) {
-                                                drawLine(
-                                                    color = cyanColor,
-                                                    start = Offset(size.width / 2f, 0f),
-                                                    end = Offset(size.width / 2f, size.height),
-                                                    strokeWidth = strokeWidth1_5
-                                                )
-                                            }
-
-                                            // Horizontal Center Guide
-                                            if (guideSnapCenterY) {
-                                                drawLine(
-                                                    color = cyanColor,
-                                                    start = Offset(0f, size.height / 2f),
-                                                    end = Offset(size.width, size.height / 2f),
-                                                    strokeWidth = strokeWidth1_5
-                                                )
-                                            }
-
-                                            // Edge Guides (inset by strokeWidth2 / 2f so the entire 2dp stroke is visible)
-                                            if (guideSnapEdgeLeft) {
-                                                drawLine(
-                                                    color = cyanColor,
-                                                    start = Offset(strokeWidth2 / 2f, 0f),
-                                                    end = Offset(strokeWidth2 / 2f, size.height),
-                                                    strokeWidth = strokeWidth2
-                                                )
-                                            }
-                                            if (guideSnapEdgeRight) {
-                                                drawLine(
-                                                    color = cyanColor,
-                                                    start = Offset(size.width - strokeWidth2 / 2f, 0f),
-                                                    end = Offset(size.width - strokeWidth2 / 2f, size.height),
-                                                    strokeWidth = strokeWidth2
-                                                )
-                                            }
-                                            if (guideSnapEdgeTop) {
-                                                drawLine(
-                                                    color = cyanColor,
-                                                    start = Offset(0f, strokeWidth2 / 2f),
-                                                    end = Offset(size.width, strokeWidth2 / 2f),
-                                                    strokeWidth = strokeWidth2
-                                                )
-                                            }
-                                            if (guideSnapEdgeBottom) {
-                                                drawLine(
-                                                    color = cyanColor,
-                                                    start = Offset(0f, size.height - strokeWidth2 / 2f),
-                                                    end = Offset(size.width, size.height - strokeWidth2 / 2f),
-                                                    strokeWidth = strokeWidth2
-                                                )
-                                            }
-                                        }
-
-                                        // Rotation / Scale Badge
-                                        if (guideBadgeText != null) {
-                                            Surface(
-                                                shape = RoundedCornerShape(12.dp),
-                                                color = Color(0xCC000000),
-                                                border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.6f)),
-                                                modifier = Modifier
-                                                    .align(Alignment.TopCenter)
-                                                    .padding(top = 12.dp)
-                                            ) {
-                                                Text(
-                                                    text = guideBadgeText!!,
-                                                    color = Color(0xFF00E5FF),
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            PreviewClipTransformOverlay(
+                                activeClipId = activeClipId,
+                                activeClip = activeClip,
+                                selectedClipIndex = selectedClipIndex,
+                                resolvedViewModel = resolvedViewModel,
+                                previewRenderer = previewRenderer,
+                                frameDriver = frameDriver,
+                                snapshotHolder = snapshotHolder,
+                                triggerApplyToAllPill = { triggerApplyToAllPill() }
+                            )
                         }
                     }
 
@@ -2388,6 +2040,9 @@ fun EditorScreen(
                             }
                         }
                     }
+
+                    // Touch blocker over preview area while loader is active
+                    TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -2401,31 +2056,34 @@ fun EditorScreen(
                         ?: TimelineSelection.None
                 }
 
-                TransportControlsRow(
-                    vmUiState = vmUiState,
-                    resolvedViewModel = resolvedViewModel,
-                    selection = selection,
-                    currentFocus = currentFocus,
-                    frameTick = frameTick,
-                    displayedMs = displayedMs,
-                    playbackController = playbackController,
-                    previewRenderer = previewRenderer,
-                    frameDriver = frameDriver,
-                    density = density,
-                    canUndo = canUndo,
-                    canRedo = canRedo,
-                    onUndoClick = onUndoClick,
-                    onRedoClick = onRedoClick,
-                    timelineTotalMs = timeline.total,
-                    isPlaying = isPlaying,
-                    onPlayPauseClick = onPlayPauseClick,
-                    onPlaybackStateChange = onPlaybackStateChange,
-                    onSeekScrub = onSeekScrub,
-                    snapshotHolder = snapshotHolder,
-                    onSetPlayPauseBounds = { bounds ->
-                        playPauseBoundsInRoot = bounds
-                    }
-                )
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    TransportControlsRow(
+                        vmUiState = vmUiState,
+                        resolvedViewModel = resolvedViewModel,
+                        selection = selection,
+                        currentFocus = currentFocus,
+                        frameTick = frameTick,
+                        displayedMs = displayedMs,
+                        playbackController = playbackController,
+                        previewRenderer = previewRenderer,
+                        frameDriver = frameDriver,
+                        density = density,
+                        canUndo = canUndo,
+                        canRedo = canRedo,
+                        onUndoClick = onUndoClick,
+                        onRedoClick = onRedoClick,
+                        timelineTotalMs = timeline.total,
+                        isPlaying = isPlaying,
+                        onPlayPauseClick = onPlayPauseClick,
+                        onPlaybackStateChange = onPlaybackStateChange,
+                        onSeekScrub = onSeekScrub,
+                        snapshotHolder = snapshotHolder,
+                        onSetPlayPauseBounds = { bounds ->
+                            playPauseBoundsInRoot = bounds
+                        }
+                    )
+                    TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -2447,6 +2105,7 @@ fun EditorScreen(
                             selection = selection,
                             focusMode = currentFocus,
                             overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
+                            isLoaderActive = showPreviewLoader,
                             customCoverBitmap = customCoverBitmap,
                             onSelect = { sel ->
                                 when (sel) {
@@ -2621,7 +2280,8 @@ fun EditorScreen(
 
             val isOverlaySelectedForToolbar = vmUiState?.selectedOverlayId != null || isPipActive || isAudioActive || isStickerItem
 
-            BottomToolbar(
+            Box(modifier = Modifier.fillMaxWidth()) {
+                BottomToolbar(
                 isClipSelected = selectedClipIndex != null,
                 isOverlaySelected = isOverlaySelectedForToolbar,
                 isPipOverlaySelected = isPipOverlay,
@@ -3161,7 +2821,9 @@ fun EditorScreen(
                     isEffectSheetVisible = true
                 }
             )
+            TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
         }
+    }
 
         // Interactive Clip-to-Clip Transition Sheet (Phase 10)
         TransitionSheetHost(
@@ -6514,4 +6176,567 @@ private fun TransitionSheetHost(
             onDeselectAll()
         }
     )
+}
+
+/**
+ * Ultra-lightweight Three-Dots Center Preview Loader (• ● •).
+ * Rendered exclusively inside the preview box at Alignment.Center.
+ * Size: 96.dp x 36.dp with smooth sequential wave bounce & scale pulse animation.
+ * Consumes 0% CPU/GPU when showLoader is false.
+ */
+@Composable
+private fun PreviewThreeDotsLoader(
+    showLoader: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (!showLoader) return
+
+    val infiniteTransition = rememberInfiniteTransition(label = "PreviewThreeDotsTransition")
+    val phase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 750, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "PreviewThreeDotsPhase"
+    )
+
+    Canvas(
+        modifier = modifier
+            .size(width = 96.dp, height = 36.dp)
+    ) {
+        val centerX = size.width / 2f
+        val centerY = size.height / 2f
+        val spacingPx = 24.dp.toPx()
+        val baseRadiusPx = 5.5.dp.toPx()
+        val peakRadiusPx = 9.0.dp.toPx()
+        val maxBouncePx = 6.0.dp.toPx()
+        val haloExtraPx = 1.5.dp.toPx()
+
+        for (i in 0 until 3) {
+            val dotCenterX = centerX + (i - 1) * spacingPx
+            val dotPhase = (phase - i * 0.22f + 1f) % 1f
+            val pulse = kotlin.math.sin(dotPhase * kotlin.math.PI.toFloat()).coerceAtLeast(0f)
+
+            val currentRadius = baseRadiusPx + (peakRadiusPx - baseRadiusPx) * pulse
+            val offsetY = -maxBouncePx * pulse
+            val dotCenterY = centerY + offsetY
+            val dotCenter = Offset(dotCenterX, dotCenterY)
+
+            // Subtle dark halo circle behind dot for crisp contrast on bright videos
+            drawCircle(
+                color = Color.Black.copy(alpha = 0.25f),
+                radius = currentRadius + haloExtraPx,
+                center = dotCenter
+            )
+
+            // Dot color transitions from Color.White.copy(alpha = 0.40f) to bright pure Color.White (alpha = 1.0f)
+            val currentAlpha = 0.40f + 0.60f * pulse
+            drawCircle(
+                color = Color.White.copy(alpha = currentAlpha),
+                radius = currentRadius,
+                center = dotCenter
+            )
+        }
+    }
+}
+
+/**
+ * Transparent touch-consuming barrier that intercepts all pointer events
+ * when [blocked] is true. Emits nothing when [blocked] is false.
+ */
+@Composable
+private fun TouchBlocker(
+    blocked: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (blocked) {
+        Box(
+            modifier = modifier.pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { it.consume() }
+                    }
+                }
+            }
+        )
+    }
+}
+
+/**
+ * Top App Bar with back button, project title, aspect ratio badge, export button,
+ * and touch-blocking overlay when loader is active.
+ */
+@Composable
+private fun EditorTopBar(
+    hasClips: Boolean,
+    showPreviewLoader: Boolean,
+    colors: FlowCutColors,
+    onBackClick: () -> Unit,
+    onExportButtonClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(48.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBackClick,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = colors.textPrimary
+                )
+            }
+            Text(
+                text = "My reel 01",
+                color = colors.textPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 4.dp)
+            )
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            Box(
+                modifier = Modifier
+                    .background(Color(0xFF24242A), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = "9:16",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Button(
+                onClick = {
+                    if (!hasClips) {
+                        Toast.makeText(context, "Add clips first", Toast.LENGTH_SHORT).show()
+                    } else {
+                        onExportButtonClick()
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = colors.accent,
+                    contentColor = colors.onAccent
+                ),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp)
+            ) {
+                Text(
+                    text = "Export",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+        TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
+    }
+}
+
+/**
+ * On-Preview Free Transform Gestures overlay when a clip is selected.
+ */
+@Composable
+private fun PreviewClipTransformOverlay(
+    activeClipId: String,
+    activeClip: com.flowcut.app.model.Clip?,
+    selectedClipIndex: Int,
+    resolvedViewModel: EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    frameDriver: FrameDriver,
+    snapshotHolder: com.flowcut.app.core.timeline.SnapshotHolder,
+    triggerApplyToAllPill: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var isTransforming by remember { mutableStateOf(false) }
+    var guideSnapCenterX by remember { mutableStateOf(false) }
+    var guideSnapCenterY by remember { mutableStateOf(false) }
+    var guideSnapEdgeLeft by remember { mutableStateOf(false) }
+    var guideSnapEdgeRight by remember { mutableStateOf(false) }
+    var guideSnapEdgeTop by remember { mutableStateOf(false) }
+    var guideSnapEdgeBottom by remember { mutableStateOf(false) }
+    var guideBadgeText by remember { mutableStateOf<String?>(null) }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .pointerInput(selectedClipIndex, activeClipId) {
+                var lastTapTimeMs = 0L
+                var lastTapPosition = Offset.Zero
+
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val downTime = System.currentTimeMillis()
+                    val downPos = down.position
+                    var isDragOrTransform = false
+
+                    val initialTransform = resolvedViewModel?.getClipTransform(activeClipId)
+                        ?: PreviewRenderer.getClipTransform(activeClipId)
+
+                    var rawPanX = initialTransform.panX
+                    var rawPanY = initialTransform.panY
+                    var rawScale = initialTransform.scale
+                    var rawRotationDeg = initialTransform.rotationDeg
+                    val isFlippedH = initialTransform.isFlippedH
+
+                    var currentTransform = initialTransform
+
+                    var totalMovedPx = 0f
+
+                    var prevSnapCenterX = false
+                    var prevSnapCenterY = false
+                    var prevSnapEdgeLeft = false
+                    var prevSnapEdgeRight = false
+                    var prevSnapEdgeTop = false
+                    var prevSnapEdgeBottom = false
+                    var prevSnapScale100 = false
+                    var prevSnapRotationCardinal = false
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressedList = event.changes.filter { it.pressed }
+                        if (pressedList.isEmpty()) break
+
+                        val outerW = size.width.toFloat().coerceAtLeast(1f)
+                        val outerH = size.height.toFloat().coerceAtLeast(1f)
+                        val previewH = outerH
+                        val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+
+                        if (pressedList.size == 1) {
+                            val p = pressedList[0]
+                            val dx = p.position.x - p.previousPosition.x
+                            val dy = p.position.y - p.previousPosition.y
+                            val moveDist = kotlin.math.sqrt(dx * dx + dy * dy)
+                            totalMovedPx += moveDist
+
+                            if (totalMovedPx > 10f) {
+                                isDragOrTransform = true
+                                p.consume()
+
+                                rawPanX = (rawPanX + dx / previewW).coerceIn(-1.5f, 1.5f)
+                                rawPanY = (rawPanY - dy / previewH).coerceIn(-1.5f, 1.5f)
+                            }
+                        } else if (pressedList.size >= 2) {
+                            isDragOrTransform = true
+                            val p1 = pressedList[0]
+                            val p2 = pressedList[1]
+                            p1.consume()
+                            p2.consume()
+
+                            val prevPos1 = p1.previousPosition
+                            val prevPos2 = p2.previousPosition
+                            val currPos1 = p1.position
+                            val currPos2 = p2.position
+
+                            // 1. Pan (centroid delta)
+                            val prevCenter = (prevPos1 + prevPos2) / 2f
+                            val currCenter = (currPos1 + currPos2) / 2f
+                            val dPan = currCenter - prevCenter
+                            rawPanX = (rawPanX + dPan.x / previewW).coerceIn(-1.5f, 1.5f)
+                            rawPanY = (rawPanY - dPan.y / previewH).coerceIn(-1.5f, 1.5f)
+
+                            // 2. Zoom (distance ratio)
+                            val prevDist = (prevPos1 - prevPos2).getDistance()
+                            val currDist = (currPos1 - currPos2).getDistance()
+                            val zoomRatio = if (prevDist > 1f) currDist / prevDist else 1f
+                            rawScale = (rawScale * zoomRatio).coerceIn(0.25f, 5.0f)
+
+                            // 3. Twist (rotation delta)
+                            val prevAngle = Math.toDegrees(kotlin.math.atan2((prevPos2.y - prevPos1.y).toDouble(), (prevPos2.x - prevPos1.x).toDouble())).toFloat()
+                            val currAngle = Math.toDegrees(kotlin.math.atan2((currPos2.y - currPos1.y).toDouble(), (currPos2.x - currPos1.x).toDouble())).toFloat()
+                            var angleDelta = currAngle - prevAngle
+                            while (angleDelta > 180f) angleDelta -= 360f
+                            while (angleDelta < -180f) angleDelta += 360f
+                            rawRotationDeg += angleDelta
+                        }
+
+                        if (isDragOrTransform) {
+                            // --- Compute Snapping from Raw Accumulators ---
+                            // 1. Rotation Snap
+                            val normRot = ((rawRotationDeg % 360f) + 360f) % 360f
+                            val nearestCardinal = (Math.round(normRot / 90f) * 90f).toFloat()
+                            val diffRot = kotlin.math.abs(normRot - nearestCardinal)
+                            val snapRotationCardinal = diffRot <= 3.0f
+                            val snappedRotationDeg = if (snapRotationCardinal) (nearestCardinal % 360f) else rawRotationDeg
+
+                            // 2. Scale Snap
+                            val diffScale = kotlin.math.abs(rawScale - 1.0f)
+                            val snapScale100 = diffScale < 0.04f
+                            val snappedScale = if (snapScale100) 1.0f else rawScale
+
+                            // 3. Effective Dimensions for Edge Snapping
+                            val aScreen = 9.0f / 16.0f
+                            val dispW = activeClip?.displayWidth ?: 1080
+                            val dispH = activeClip?.displayHeight ?: 1920
+                            val aClip = (dispW.toFloat() / dispH.toFloat()).coerceAtLeast(0.01f)
+
+                            val cardinalAngle = ((Math.round(snappedRotationDeg / 90f) * 90) % 360 + 360) % 360
+                            val isRot90or270 = (cardinalAngle == 90 || cardinalAngle == 270) && kotlin.math.abs(snappedRotationDeg - cardinalAngle) < 15f
+                            val effAspect = if (isRot90or270) (1.0f / aClip) else aClip
+
+                            val baseHw = if (effAspect >= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
+                            val baseHh = if (effAspect >= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
+                            val hw = baseHw * snappedScale
+                            val hh = baseHh * snappedScale
+
+                            // Target pan offsets for edge flush alignment
+                            val targetPanXLeft = hw - 0.5f
+                            val targetPanXRight = 0.5f - hw
+                            val targetPanYBottom = hh - 0.5f
+                            val targetPanYTop = 0.5f - hh
+
+                            // 4. Center & Edge Snap for panX
+                            var snappedPanX = rawPanX
+                            var snapCenterX = false
+                            var snapEdgeLeft = false
+                            var snapEdgeRight = false
+
+                            if (kotlin.math.abs(rawPanX) < 0.035f) {
+                                snappedPanX = 0f
+                                snapCenterX = true
+                            } else if (kotlin.math.abs(rawPanX - targetPanXLeft) < 0.035f) {
+                                snappedPanX = targetPanXLeft
+                                snapEdgeLeft = true
+                            } else if (kotlin.math.abs(rawPanX - targetPanXRight) < 0.035f) {
+                                snappedPanX = targetPanXRight
+                                snapEdgeRight = true
+                            }
+
+                            // 5. Center & Edge Snap for panY
+                            var snappedPanY = rawPanY
+                            var snapCenterY = false
+                            var snapEdgeBottom = false
+                            var snapEdgeTop = false
+
+                            if (kotlin.math.abs(rawPanY) < 0.035f) {
+                                snappedPanY = 0f
+                                snapCenterY = true
+                            } else if (kotlin.math.abs(rawPanY - targetPanYBottom) < 0.035f) {
+                                snappedPanY = targetPanYBottom
+                                snapEdgeBottom = true
+                            } else if (kotlin.math.abs(rawPanY - targetPanYTop) < 0.035f) {
+                                snappedPanY = targetPanYTop
+                                snapEdgeTop = true
+                            }
+
+                            // --- Haptic Feedback Tick on State Transition ---
+                            val newlySnapped = (!prevSnapCenterX && snapCenterX) ||
+                                    (!prevSnapCenterY && snapCenterY) ||
+                                    (!prevSnapEdgeLeft && snapEdgeLeft) ||
+                                    (!prevSnapEdgeRight && snapEdgeRight) ||
+                                    (!prevSnapEdgeTop && snapEdgeTop) ||
+                                    (!prevSnapEdgeBottom && snapEdgeBottom) ||
+                                    (!prevSnapScale100 && snapScale100) ||
+                                    (!prevSnapRotationCardinal && snapRotationCardinal)
+
+                            if (newlySnapped) {
+                                try {
+                                    hapticFeedback.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                                } catch (_: Throwable) {}
+                            }
+
+                            prevSnapCenterX = snapCenterX
+                            prevSnapCenterY = snapCenterY
+                            prevSnapEdgeLeft = snapEdgeLeft
+                            prevSnapEdgeRight = snapEdgeRight
+                            prevSnapEdgeTop = snapEdgeTop
+                            prevSnapEdgeBottom = snapEdgeBottom
+                            prevSnapScale100 = snapScale100
+                            prevSnapRotationCardinal = snapRotationCardinal
+
+                            // --- Update Compose Guide Overlay State ---
+                            isTransforming = true
+                            guideSnapCenterX = snapCenterX
+                            guideSnapCenterY = snapCenterY
+                            guideSnapEdgeLeft = snapEdgeLeft
+                            guideSnapEdgeRight = snapEdgeRight
+                            guideSnapEdgeTop = snapEdgeTop
+                            guideSnapEdgeBottom = snapEdgeBottom
+
+                            // Badge text: show rotation or scale
+                            guideBadgeText = when {
+                                snapRotationCardinal -> "${snappedRotationDeg.toInt()}°"
+                                snapScale100 -> "100%"
+                                pressedList.size >= 2 && kotlin.math.abs(rawRotationDeg - initialTransform.rotationDeg) > 1.5f ->
+                                    "${Math.round(snappedRotationDeg)}°"
+                                pressedList.size >= 2 && kotlin.math.abs(rawScale - initialTransform.scale) > 0.03f ->
+                                    "${Math.round(snappedScale * 100f)}%"
+                                else -> null
+                            }
+
+                            currentTransform = currentTransform.copy(
+                                scale = snappedScale,
+                                panX = snappedPanX,
+                                panY = snappedPanY,
+                                rotationDeg = snappedRotationDeg,
+                                isFlippedH = isFlippedH
+                            )
+                            PreviewRenderer.setClipTransform(activeClipId, currentTransform)
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                        }
+                    } while (true)
+
+                    // Clear visual guides immediately on gesture end
+                    isTransforming = false
+                    guideSnapCenterX = false
+                    guideSnapCenterY = false
+                    guideSnapEdgeLeft = false
+                    guideSnapEdgeRight = false
+                    guideSnapEdgeTop = false
+                    guideSnapEdgeBottom = false
+                    guideBadgeText = null
+
+                    // Gesture completed (all fingers up)
+                    if (isDragOrTransform) {
+                        resolvedViewModel?.commitClipTransform(selectedClipIndex, currentTransform)
+                        if (USE_NEW_CORE) {
+                            resolvedViewModel?.let { vm ->
+                                snapshotHolder.current = vm.getSnapshot()
+                            }
+                        }
+                        previewRenderer.requestRender()
+                        frameDriver.wake()
+                        triggerApplyToAllPill()
+                    } else {
+                        // Check for double-tap
+                        val upTime = System.currentTimeMillis()
+                        val tapDuration = upTime - downTime
+                        val tapDist = (downPos - lastTapPosition).getDistance()
+
+                        if (tapDuration < 300L && (upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
+                            // Double-tap detected: reset transform!
+                            val resetTransform = currentTransform.copy(
+                                scale = 1.0f,
+                                panX = 0f,
+                                panY = 0f,
+                                rotationDeg = 0f
+                            )
+                            resolvedViewModel?.commitClipTransform(selectedClipIndex, resetTransform)
+                            if (USE_NEW_CORE) {
+                                resolvedViewModel?.let { vm ->
+                                    snapshotHolder.current = vm.getSnapshot()
+                                }
+                            }
+                            PreviewRenderer.setClipTransform(activeClipId, resetTransform)
+                            previewRenderer.requestRender()
+                            frameDriver.wake()
+                            triggerApplyToAllPill()
+                            lastTapTimeMs = 0L
+                        } else if (tapDuration < 300L) {
+                            lastTapTimeMs = upTime
+                            lastTapPosition = downPos
+                        }
+                    }
+                }
+            }
+    ) {
+        // 9:16 Guide Overlay Canvas & Badge
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .aspectRatio(9f / 16f)
+                .align(Alignment.Center)
+        ) {
+            if (isTransforming) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val strokeWidth1_5 = 1.5.dp.toPx()
+                    val strokeWidth2 = 2.dp.toPx()
+                    val cyanColor = Color(0xFF00E5FF)
+
+                    // Vertical Center Guide
+                    if (guideSnapCenterX) {
+                        drawLine(
+                            color = cyanColor,
+                            start = Offset(size.width / 2f, 0f),
+                            end = Offset(size.width / 2f, size.height),
+                            strokeWidth = strokeWidth1_5
+                        )
+                    }
+
+                    // Horizontal Center Guide
+                    if (guideSnapCenterY) {
+                        drawLine(
+                            color = cyanColor,
+                            start = Offset(0f, size.height / 2f),
+                            end = Offset(size.width, size.height / 2f),
+                            strokeWidth = strokeWidth1_5
+                        )
+                    }
+
+                    // Edge Guides (inset by strokeWidth2 / 2f so the entire 2dp stroke is visible)
+                    if (guideSnapEdgeLeft) {
+                        drawLine(
+                            color = cyanColor,
+                            start = Offset(strokeWidth2 / 2f, 0f),
+                            end = Offset(strokeWidth2 / 2f, size.height),
+                            strokeWidth = strokeWidth2
+                        )
+                    }
+                    if (guideSnapEdgeRight) {
+                        drawLine(
+                            color = cyanColor,
+                            start = Offset(size.width - strokeWidth2 / 2f, 0f),
+                            end = Offset(size.width - strokeWidth2 / 2f, size.height),
+                            strokeWidth = strokeWidth2
+                        )
+                    }
+                    if (guideSnapEdgeTop) {
+                        drawLine(
+                            color = cyanColor,
+                            start = Offset(0f, strokeWidth2 / 2f),
+                            end = Offset(size.width, strokeWidth2 / 2f),
+                            strokeWidth = strokeWidth2
+                        )
+                    }
+                    if (guideSnapEdgeBottom) {
+                        drawLine(
+                            color = cyanColor,
+                            start = Offset(0f, size.height - strokeWidth2 / 2f),
+                            end = Offset(size.width, size.height - strokeWidth2 / 2f),
+                            strokeWidth = strokeWidth2
+                        )
+                    }
+                }
+
+                // Rotation / Scale Badge
+                if (guideBadgeText != null) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xCC000000),
+                        border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.6f)),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 12.dp)
+                    ) {
+                        Text(
+                            text = guideBadgeText!!,
+                            color = Color(0xFF00E5FF),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

@@ -374,6 +374,7 @@ fun TimelineCanvas(
     focusMode: TimelineFocusState = TimelineFocusState.S0_NONE,
     overlayItems: List<OverlayItem> = emptyList(),
     lanePainters: Map<String, LanePainter> = emptyMap(),
+    isLoaderActive: Boolean = false,
     onSelect: (TimelineSelection) -> Unit = {},
     onLongPress: (TimelineSelection) -> Unit = {},
     onWakeFrameDriver: () -> Unit = {},
@@ -429,6 +430,7 @@ fun TimelineCanvas(
     val currentOnToggleTrackMute by rememberUpdatedState(onToggleTrackMute)
     val currentOnToast by rememberUpdatedState(onToast)
     val currentCustomCoverBitmap by rememberUpdatedState(customCoverBitmap)
+    val currentIsLoaderActive by rememberUpdatedState(isLoaderActive)
 
     val clipNaturalDurationCache = remember { mutableMapOf<String, Long>() }
     val draggedOverlayId = remember { mutableStateOf<String?>(null) }
@@ -716,7 +718,7 @@ fun TimelineCanvas(
                     val isUpperPinSelOnDown = TimelineHitTester.isUpperPinLayerSelected(focus)
                     val rowCTopDpOnDown = TimelineHitTester.rowCTopDp(isUpperPinSelOnDown)
 
-                    val trimHandleHit = if (selectedClipIndex in 0 until snapshotOnDown.main.n) {
+                    val trimHandleHit = if (!currentIsLoaderActive && selectedClipIndex in 0 until snapshotOnDown.main.n) {
                         TimelineHitTester.hitTestTrimHandle(
                             tapX = down.position.x,
                             tapY = down.position.y,
@@ -736,7 +738,7 @@ fun TimelineCanvas(
                     val isTrimCandidate = trimHandleHit != TimelineHitTester.TrimHandleType.NONE
                     val isLeftHandle = trimHandleHit == TimelineHitTester.TrimHandleType.LEFT
 
-                    val overlayTrimHit = if (!isTrimCandidate && selectedOverlayId != null) {
+                    val overlayTrimHit = if (!currentIsLoaderActive && !isTrimCandidate && selectedOverlayId != null) {
                         TimelineHitTester.hitTestOverlayTrimHandle(
                             tapX = down.position.x,
                             tapY = down.position.y,
@@ -758,7 +760,7 @@ fun TimelineCanvas(
                     // Mode A: Direct Drag candidate on Row A pins
                     val rowATopPxOnDown = rowATopPx
                     val rowABottomPxOnDown = rowABottomPx
-                    val pinHitOnDown = if (!isTrimCandidate && !isOverlayTrimCandidate) {
+                    val pinHitOnDown = if (!currentIsLoaderActive && !isTrimCandidate && !isOverlayTrimCandidate) {
                         TimelineHitTester.hitTestRowAPins(
                             tapX = down.position.x,
                             tapY = down.position.y,
@@ -806,7 +808,7 @@ fun TimelineCanvas(
                     // Mode B: Long-Press Drag-and-Drop candidate on PIP / Audio bars
                     val isPipGroup = focus is TimelineFocusState.S1_PIP_GROUP || focus is TimelineFocusState.S2_PIP_ITEM
                     val isAudioGroup = focus is TimelineFocusState.S5_AUDIO_GROUP || focus is TimelineFocusState.S6_AUDIO_ITEM
-                    val barCandidateItem: OverlayItem? = if (!isTrimCandidate && !isOverlayTrimCandidate && !isPinCandidate &&
+                    val barCandidateItem: OverlayItem? = if (!currentIsLoaderActive && !isTrimCandidate && !isOverlayTrimCandidate && !isPinCandidate &&
                         (isPipGroup || isAudioGroup) && down.position.y in rowDTopPx..lower4RowsBottomPx) {
                         val lane = ((down.position.y - rowDTopPx) / lowerRowStepPx).toInt().coerceIn(0, 3)
                         val downTimeUs = zoomState.xToTimeUs(down.position.x, playhead.timeUs, halfWidthPxOnDown, density)
@@ -995,7 +997,7 @@ fun TimelineCanvas(
                         currentOnWakeFrameDriver()
                     }
 
-                    val longPressJob = if (barCandidateItem != null) {
+                    val longPressJob = if (!currentIsLoaderActive && barCandidateItem != null) {
                         coroutineScope.launch {
                             delay(250L) // 250ms press hold for PIP / Audio bar drag
                             if (!isDragging && !isZooming && !wasMovingOnDown) {
@@ -1007,7 +1009,7 @@ fun TimelineCanvas(
                                 currentOnWakeFrameDriver()
                             }
                         }
-                    } else if (!wasMovingOnDown && !isTrimCandidate && !isOverlayTrimCandidate && !isPinCandidate) {
+                    } else if (!currentIsLoaderActive && !wasMovingOnDown && !isTrimCandidate && !isOverlayTrimCandidate && !isPinCandidate) {
                         coroutineScope.launch {
                             delay(viewConfiguration.longPressTimeoutMillis)
                             if (!isDragging && !isZooming && !wasMovingOnDown) {
@@ -1066,7 +1068,7 @@ fun TimelineCanvas(
                                 activeTrimPlayheadUs.longValue = Long.MIN_VALUE
                                 isZooming = true
                                 val zoomFactor = event.calculateZoom()
-                                if (zoomFactor != 1f) {
+                                if (!currentIsLoaderActive && zoomFactor != 1f) {
                                     zoomState.updateZoom(zoomFactor)
                                     currentOnWakeFrameDriver()
                                 }
@@ -1417,7 +1419,7 @@ fun TimelineCanvas(
                         val velocityUsPerSec = if (pxPerUsAtEnd > 0.0) -velocityPxPerSec / pxPerUsAtEnd else 0.0
                         controller.endScrub(velocityUsPerSec, pxPerUsAtEnd)
                         currentOnWakeFrameDriver()
-                    } else if (!wasLongPressed && !isZooming && !isTrimming && !isPinDragging && !isBarDragging) {
+                    } else if (!currentIsLoaderActive && !wasLongPressed && !isZooming && !isTrimming && !isPinDragging && !isBarDragging) {
                         val halfWidthPx = size.width / 2f
                         val hit = TimelineHitTester.hitTest(
                             tapX = startPos.x,

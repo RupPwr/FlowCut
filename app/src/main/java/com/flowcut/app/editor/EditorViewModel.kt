@@ -75,6 +75,7 @@ data class EditorUiState(
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val isImporting: Boolean = false,
+    val isProcessingEdit: Boolean = false,
     val importProgressText: String = "",
     val durationSheetVisible: Boolean = false,
     val exportSheetVisible: Boolean = false,
@@ -4475,6 +4476,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onAppResume() {
         previewEngine?.onResume()
+    }
+
+    fun setProcessingEdit(processing: Boolean) {
+        _uiState.update { it.copy(isProcessingEdit = processing) }
     }
 
     fun showToast(message: String) {

@@ -609,7 +609,7 @@ class ExportEngine(private val context: Context) {
                             prepare()
                         }
                         currentBIndex = res.clipBIndex
-                        renderedB = frameSourceB!!.seekTo(res.sourceUsB, fastKeyframeOnly = false)
+                        renderedB = frameSourceB!!.seekTo(res.sourceUsB, fastKeyframeOnly = false, isExport = true)
                     } else {
                         renderedB = frameSourceB!!.frameAtExport(res.sourceUsB)
                     }

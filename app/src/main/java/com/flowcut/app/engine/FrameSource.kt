@@ -34,7 +34,7 @@ class FrameSource(
     private var lastKeyframePtsUs: Long = -1L
     private var lastRenderedLocalUs: Long = -1L
     private var isAccuratePausedFrameLatched: Boolean = false
-    private var isCatchingUpFromSeek: Boolean = false
+    var isCatchingUpFromSeek: Boolean = false
     private var lastForwardKeyframeHopUs: Long = -1L
     private var hasNotifiedFirstFrame: Boolean = false
     var onFirstFrameDecoded: (() -> Unit)? = null
@@ -334,7 +334,7 @@ class FrameSource(
 
     val currentPath: String get() = clip.path
 
-    fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false): Boolean {
+    fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false, isExport: Boolean = false): Boolean {
         if (isPrepared && currentPtsUs != -1L && kotlin.math.abs(localUs - currentPtsUs) <= 45_000L) {
             return false
         }
@@ -367,10 +367,10 @@ class FrameSource(
             currentPtsUs = -1L
 
             val bufferInfo = MediaCodec.BufferInfo()
-            val timeoutUs = 1_500L
+            val timeoutUs = 1_000L
             var rendered = false
             var attempts = 0
-            val maxAttempts = if (fastKeyframeOnly) 15 else 120
+            val maxAttempts = if (isExport) 120 else (if (fastKeyframeOnly) 10 else 12)
 
             while (!rendered && attempts < maxAttempts && !outputEos) {
                 attempts++
@@ -600,7 +600,7 @@ class FrameSource(
 
             // If discontinuous or far behind/ahead, seek with silent preroll
             if (currentPtsUs == -1L || currentPtsUs > localUs + 200_000L || localUs > currentPtsUs + 800_000L) {
-                return seekTo(localUs, fastKeyframeOnly = false)
+                return seekTo(localUs, fastKeyframeOnly = false, isExport = true)
             }
 
             val bufferInfo = MediaCodec.BufferInfo()

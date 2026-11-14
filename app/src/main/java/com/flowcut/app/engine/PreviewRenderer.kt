@@ -298,6 +298,17 @@ class PreviewRenderer(
 
     @Volatile
     var isFirstFrameLatched: Boolean = false
+
+    @Volatile
+    var isWaitingForFrame: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                onWaitingForFrameChanged?.invoke(value)
+            }
+        }
+
+    var onWaitingForFrameChanged: ((Boolean) -> Unit)? = null
     private val overlayTextureCache = OverlayTextureCache().apply {
         onFrameReady = { requestRender() }
     }
@@ -633,6 +644,7 @@ class PreviewRenderer(
             val clips = s.project.clips
             if (clips.isEmpty()) {
                 isFirstFrameLatched = false
+                isWaitingForFrame = false
                 GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
                 GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
@@ -694,6 +706,7 @@ class PreviewRenderer(
                                 stB.updateTexImage()
                                 stB.getTransformMatrix(rawMatB)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -718,6 +731,7 @@ class PreviewRenderer(
                                 stA.updateTexImage()
                                 stA.getTransformMatrix(rawMatA)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -754,6 +768,7 @@ class PreviewRenderer(
                                 stA.updateTexImage()
                                 stA.getTransformMatrix(rawMatA)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -778,6 +793,7 @@ class PreviewRenderer(
                                 stB.updateTexImage()
                                 stB.getTransformMatrix(rawMatB)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -928,6 +944,24 @@ class PreviewRenderer(
                     lastTransitionIncomingClipIndex = frame.clipBIndex
 
                     renderOverlays(frame.tUs)
+
+            val isTransition = frame.isTransition && frame.clipBIndex >= 0
+            val isCatchingUp = if (isTransition) {
+                !isFirstFrameLatched ||
+                    (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+            }
+
+            if (isCatchingUp) {
+                isWaitingForFrame = true
+                glSurfaceView?.requestRender()
+                onRenderRequested?.invoke()
+            } else {
+                isWaitingForFrame = false
+            }
                     if (playhead.mode == PlayMode.PLAYING) {
                         onRenderRequested?.invoke()
                         glSurfaceView?.requestRender()
@@ -1034,6 +1068,7 @@ class PreviewRenderer(
                     stA.updateTexImage()
                     stA.getTransformMatrix(rawMatA)
                     isFirstFrameLatched = true
+                    isWaitingForFrame = false
                 } catch (_: Exception) {}
             }
             val transformA = getClipTransform(clipA.id)
@@ -1191,6 +1226,24 @@ class PreviewRenderer(
                 }
             }
             renderOverlays(frame.tUs)
+
+            val isTransition = frame.isTransition && frame.clipBIndex >= 0
+            val isCatchingUp = if (isTransition) {
+                !isFirstFrameLatched ||
+                    (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+            }
+
+            if (isCatchingUp) {
+                isWaitingForFrame = true
+                glSurfaceView?.requestRender()
+                onRenderRequested?.invoke()
+            } else {
+                isWaitingForFrame = false
+            }
         } else {
             // --- Slot B is Primary (stB / texBId) ---
             val clipBChanged = frameSourceB == null || frameSourceB?.clip?.id != clipA.id || currentClipIndexB != frame.clipAIndex
@@ -1235,6 +1288,7 @@ class PreviewRenderer(
                     stB.updateTexImage()
                     stB.getTransformMatrix(rawMatB)
                     isFirstFrameLatched = true
+                    isWaitingForFrame = false
                 } catch (_: Exception) {}
             }
             val transformB = getClipTransform(clipA.id)
@@ -1392,6 +1446,24 @@ class PreviewRenderer(
                 }
             }
             renderOverlays(frame.tUs)
+
+            val isTransition = frame.isTransition && frame.clipBIndex >= 0
+            val isCatchingUp = if (isTransition) {
+                !isFirstFrameLatched ||
+                    (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+            }
+
+            if (isCatchingUp) {
+                isWaitingForFrame = true
+                glSurfaceView?.requestRender()
+                onRenderRequested?.invoke()
+            } else {
+                isWaitingForFrame = false
+            }
         }
         } finally {
             val durationUs = (System.nanoTime() - startNs) / 1000L
