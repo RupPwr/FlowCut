@@ -11,6 +11,7 @@ import com.flowcut.app.engine.ClipTransform
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
 import com.flowcut.app.engine.OverlayKeyframe
+import com.flowcut.app.model.CURRENT_PROJECT_SCHEMA
 import com.flowcut.app.model.Project
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,6 +19,43 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+
+class NewerProjectException(val found: Int) : Exception("Project schema $found > $CURRENT_PROJECT_SCHEMA")
+
+val projectJson: Json = Json {
+    ignoreUnknownKeys = true
+    prettyPrint = false
+    encodeDefaults = true
+}
+
+fun decodeProject(text: String): Project {
+    val p = projectJson.decodeFromString<Project>(text)
+    if (p.schemaVersion > CURRENT_PROJECT_SCHEMA) {
+        throw NewerProjectException(p.schemaVersion)
+    }
+    return p
+}
+
+fun decodeFullDraft(text: String): FullProjectDraft {
+    val isDraft = text.contains("\"project\"")
+    val draft = if (isDraft) {
+        try {
+            projectJson.decodeFromString<FullProjectDraft>(text)
+        } catch (e: Exception) {
+            if (e is NewerProjectException) throw e
+            val legacyProject = decodeProject(text)
+            FullProjectDraft(project = legacyProject)
+        }
+    } else {
+        val legacyProject = decodeProject(text)
+        FullProjectDraft(project = legacyProject)
+    }
+
+    if (draft.project.schemaVersion > CURRENT_PROJECT_SCHEMA) {
+        throw NewerProjectException(draft.project.schemaVersion)
+    }
+    return draft
+}
 
 @Serializable
 data class TimeMapDraft(
@@ -420,12 +458,6 @@ fun OverlayItem.toDraft(): OverlayItemDraft = OverlayItemDraft(
 )
 
 class ProjectStore(private val context: Context) {
-    private val json = Json {
-        ignoreUnknownKeys = true
-        prettyPrint = false
-        encodeDefaults = true
-    }
-
     private val projectFile: File
         get() = File(context.filesDir, "project.json")
 
@@ -433,8 +465,11 @@ class ProjectStore(private val context: Context) {
         get() = File(context.filesDir, "clips").apply { if (!exists()) mkdirs() }
 
     suspend fun saveFull(draft: FullProjectDraft): Unit = withContext(Dispatchers.IO) {
+        val stampedDraft = draft.copy(
+            project = draft.project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
+        )
         val tempFile = File(context.filesDir, "project.json.tmp")
-        val content = json.encodeToString(draft)
+        val content = projectJson.encodeToString(stampedDraft)
         tempFile.writeText(content)
         if (tempFile.exists()) {
             tempFile.renameTo(projectFile)
@@ -442,8 +477,9 @@ class ProjectStore(private val context: Context) {
     }
 
     suspend fun save(project: Project): Unit = withContext(Dispatchers.IO) {
+        val stamped = project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
         val existing = loadFull()
-        saveFull(existing.copy(project = project))
+        saveFull(existing.copy(project = stamped))
     }
 
     suspend fun loadFull(): FullProjectDraft = withContext(Dispatchers.IO) {
@@ -452,13 +488,9 @@ class ProjectStore(private val context: Context) {
         }
         try {
             val content = projectFile.readText()
-            try {
-                json.decodeFromString<FullProjectDraft>(content)
-            } catch (_: Exception) {
-                // Fallback for legacy project.json that only contained Project
-                val legacyProject = json.decodeFromString<Project>(content)
-                FullProjectDraft(project = legacyProject)
-            }
+            decodeFullDraft(content)
+        } catch (e: NewerProjectException) {
+            throw e
         } catch (_: Exception) {
             FullProjectDraft()
         }

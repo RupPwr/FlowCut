@@ -6,7 +6,9 @@ import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.SystemClock
+import android.util.Log
 import android.view.Surface
+import com.flowcut.app.BuildConfig
 import com.flowcut.app.model.Clip
 import java.io.File
 import java.util.concurrent.Executors
@@ -245,6 +247,16 @@ class FrameSource(
 
             codec = decoder
             isPrepared = true
+
+            if (BuildConfig.DEBUG) {
+                try {
+                    val isHw = decoder.codecInfo.isHardwareAccelerated
+                    Log.d(
+                        "CODEC",
+                        "Decoder started: name=${decoder.name}, isHardwareAccelerated=$isHw, clipId=${clip.id}, mime=$targetMime, size=${clip.width}x${clip.height}"
+                    )
+                } catch (_: Throwable) {}
+            }
 
             ext.seekTo(targetUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             inputEos = false

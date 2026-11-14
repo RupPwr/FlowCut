@@ -4,7 +4,9 @@ import android.view.View
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,7 +36,10 @@ fun PreviewBox(
     selectedTransitionName: String?,
     onAddVideoClick: () -> Unit,
     modifier: Modifier = Modifier,
-    glSurfaceView: View? = null
+    glSurfaceView: View? = null,
+    targetCanvasAspect: Float = 9f / 16f,
+    aspectRatioLabel: String = "9:16",
+    onRatioClick: (() -> Unit)? = null
 ) {
     val colors = FlowCutTheme.colors
 
@@ -67,20 +72,35 @@ fun PreviewBox(
                 )
             }
         } else {
-            // 9:16 canvas centered vertically / horizontally inside the preview box
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .aspectRatio(9f / 16f)
-                    .align(Alignment.Center)
-                    .clip(RectangleShape)
-                    .background(Color.Black)
+            // Centered aspect-locked canvas matching targetCanvasAspect
+            BoxWithConstraints(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
             ) {
-                if (glSurfaceView != null) {
-                    AndroidView(
-                        factory = { glSurfaceView },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                val containerW = maxWidth
+                val containerH = maxHeight
+                val containerAspect = if (containerH > 0.dp) containerW / containerH else 1f
+                val canvasMod = if (targetCanvasAspect > containerAspect) {
+                    Modifier.fillMaxWidth().aspectRatio(targetCanvasAspect)
+                } else {
+                    Modifier.fillMaxHeight().aspectRatio(targetCanvasAspect)
+                }
+                Box(
+                    modifier = canvasMod
+                        .clip(RectangleShape)
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (glSurfaceView != null) {
+                        AndroidView(
+                            factory = { glSurfaceView },
+                            update = { view ->
+                                (view as? android.view.SurfaceView)?.holder?.setSizeFromLayout()
+                                view.requestLayout()
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
         }
@@ -103,16 +123,17 @@ fun PreviewBox(
             }
         }
 
-        // Top-right label: always "9:16"
+        // Top-right label: dynamic aspect ratio badge
         Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(8.dp)
                 .background(colors.surface2, RoundedCornerShape(6.dp))
+                .clickable(enabled = onRatioClick != null) { onRatioClick?.invoke() }
                 .padding(horizontal = 8.dp, vertical = 2.dp)
         ) {
             Text(
-                text = "9:16",
+                text = aspectRatioLabel,
                 color = colors.textPrimary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium

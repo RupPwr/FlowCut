@@ -3806,6 +3806,189 @@ fun MosaicSheet(
 }
 
 /**
+ * Dedicated Aspect Ratio BottomSheet.
+ * Displays all 13 supported aspect ratios (Original, 9:16, 16:9, 1:1, 4:5, 4:3, 3:4, 5:4, 3:2, 2:3, 2:1, 1:2, 21:9)
+ * with visual proportional frame icons, #FF2D55 active highlight, live preview updates on card tap,
+ * and Cancel (✕) / Done (✓) controls.
+ */
+@Composable
+fun AspectRatioSheet(
+    activeRatio: AspectRatioMode,
+    onRatioChanged: (AspectRatioMode) -> Unit,
+    onDone: (AspectRatioMode) -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var selectedRatio by androidx.compose.runtime.remember(activeRatio) { androidx.compose.runtime.mutableStateOf(activeRatio) }
+    val ratios = AspectRatioMode.entries
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onCancel()
+            }
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    color = DARK_SHEET_BG,
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                )
+                .clickable(
+                    interactionSource = androidx.compose.runtime.remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume */ }
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 16.dp)
+        ) {
+            // Header: [✕]  ASPECT RATIO  [✓]
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = onCancel,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cancel",
+                        tint = Color.White
+                    )
+                }
+
+                Text(
+                    text = "ASPECT RATIO",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+
+                IconButton(
+                    onClick = { onDone(selectedRatio) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Done",
+                        tint = PINK_RED_ACCENT
+                    )
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().height(0.5.dp).background(DARK_SURFACE_BORDER))
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Presets row: 13 cards (Original through 21:9)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ratios.forEach { r ->
+                    val isSelected = selectedRatio == r
+                    Column(
+                        modifier = Modifier
+                            .width(76.dp)
+                            .height(86.dp)
+                            .background(DARK_CARD_BG, RoundedCornerShape(10.dp))
+                            .border(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .clickable {
+                                selectedRatio = r
+                                onRatioChanged(r)
+                            }
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        // Visual proportional frame icon
+                        Box(
+                            modifier = Modifier.size(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val frameAspect = when (r) {
+                                AspectRatioMode.ORIGINAL -> 9f / 16f
+                                else -> if (r.aspect > 0f) r.aspect else (r.ratioWidth.toFloat() / r.ratioHeight.toFloat())
+                            }
+                            val maxDim = 20.dp
+                            val (mW, mH) = if (frameAspect >= 1f) {
+                                maxDim to (maxDim / frameAspect).coerceAtLeast(6.dp)
+                            } else {
+                                (maxDim * frameAspect).coerceAtLeast(6.dp) to maxDim
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(mW, mH)
+                                    .border(
+                                        width = 1.5.dp,
+                                        color = if (isSelected) PINK_RED_ACCENT else Color.White.copy(alpha = 0.7f),
+                                        shape = RoundedCornerShape(2.dp)
+                                    )
+                                    .background(if (isSelected) PINK_RED_ACCENT.copy(alpha = 0.2f) else Color.Transparent)
+                            )
+                        }
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = r.label,
+                                color = if (isSelected) PINK_RED_ACCENT else Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = when (r) {
+                                    AspectRatioMode.ORIGINAL -> "Source"
+                                    AspectRatioMode.RATIO_9_16 -> "Reels/Shorts"
+                                    AspectRatioMode.RATIO_16_9 -> "YouTube"
+                                    AspectRatioMode.RATIO_1_1 -> "Square"
+                                    AspectRatioMode.RATIO_4_5 -> "Portrait"
+                                    AspectRatioMode.RATIO_4_3 -> "Classic"
+                                    AspectRatioMode.RATIO_3_4 -> "Photo"
+                                    AspectRatioMode.RATIO_5_4 -> "Monitor"
+                                    AspectRatioMode.RATIO_3_2 -> "Standard"
+                                    AspectRatioMode.RATIO_2_3 -> "Vertical"
+                                    AspectRatioMode.RATIO_2_1 -> "Cinema"
+                                    AspectRatioMode.RATIO_1_2 -> "Tall"
+                                    AspectRatioMode.RATIO_21_9 -> "Ultrawide"
+                                },
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 9.sp,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
+/**
  * Dedicated Aspect Ratio & Canvas Background BottomSheet (Phase 9).
  * - 6 Pro Aspect Ratios: 9:16, 16:9, 1:1, 4:5, 4:3, 21:9
  * - Canvas Background Fill for letterbox/pillarbox areas:
@@ -3977,7 +4160,7 @@ fun CanvasRatioSheet(
                                 modifier = Modifier.size(24.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                val frameAspect = r.aspect
+                                val frameAspect = if (r.aspect > 0f) r.aspect else 9f / 16f
                                 val maxDim = 20.dp
                                 val (mW, mH) = if (frameAspect >= 1f) {
                                     maxDim to (maxDim / frameAspect).coerceAtLeast(6.dp)
@@ -4007,6 +4190,7 @@ fun CanvasRatioSheet(
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = when (r) {
+                                        AspectRatioMode.ORIGINAL -> "Source"
                                         AspectRatioMode.RATIO_9_16 -> "Reels/Shorts"
                                         AspectRatioMode.RATIO_16_9 -> "YouTube"
                                         AspectRatioMode.RATIO_1_1 -> "Square"

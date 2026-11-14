@@ -2,10 +2,13 @@ package com.flowcut.app.model
 
 import kotlinx.serialization.Serializable
 
+const val CURRENT_PROJECT_SCHEMA = 1
+
 @Serializable
 data class Project(
     val clips: List<Clip> = emptyList(),
-    val transitions: List<Transition> = emptyList()
+    val transitions: List<Transition> = emptyList(),
+    val schemaVersion: Int = CURRENT_PROJECT_SCHEMA
 ) {
     init {
         val expectedTransitions = if (clips.isEmpty()) 0 else clips.size - 1

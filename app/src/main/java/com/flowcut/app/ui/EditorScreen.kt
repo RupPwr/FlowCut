@@ -28,6 +28,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
+import com.flowcut.app.engine.AspectRatioMode
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -157,10 +159,19 @@ private fun hitTestPreviewOverlays(
     outerH: Float,
     overlayItems: List<com.flowcut.app.engine.OverlayItem>,
     playheadUs: Long,
-    preferredTopOverlayId: String? = null
+    preferredTopOverlayId: String? = null,
+    canvasAspect: Float = 9f / 16f
 ): com.flowcut.app.engine.OverlayItem? {
-    val previewH = outerH
-    val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+    val containerAspect = if (outerH > 0f) outerW / outerH else 1f
+    val previewW: Float
+    val previewH: Float
+    if (canvasAspect > containerAspect) {
+        previewW = outerW
+        previewH = (outerW / canvasAspect).coerceAtMost(outerH).coerceAtLeast(1f)
+    } else {
+        previewH = outerH
+        previewW = (outerH * canvasAspect).coerceAtMost(outerW).coerceAtLeast(1f)
+    }
     val previewLeft = (outerW - previewW) / 2f
 
     // Active visual overlays at current playhead sorted front-to-back
@@ -195,7 +206,7 @@ private fun hitTestPreviewOverlays(
             }
             else -> 1.0f
         }
-        val aScreen = 9.0f / 16.0f
+        val aScreen = canvasAspect
         var hwInit = 0.6f
         var hhInit = hwInit / aTex
         if (hhInit * aScreen > 0.6f) {
@@ -497,23 +508,26 @@ fun EditorScreen(
     ) { uri ->
         if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
-                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.IMAGE), Toast.LENGTH_SHORT).show()
-                return@rememberLauncherForActivityResult
-            }
             val mimeType = context.contentResolver.getType(uri) ?: ""
             val isVideo = mimeType.startsWith("video/")
+            val targetType = if (isVideo) com.flowcut.app.engine.LayerType.VIDEO else com.flowcut.app.engine.LayerType.IMAGE
+            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, targetType)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(targetType), Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
             val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
             val cachePath = copyUriToCacheFile(context, uri, prefix)
             if (cachePath != null) {
                 val playheadUs = playbackController.playhead.timeUs
-                if (isVideo) {
+                val addedItem = if (isVideo) {
                     vm.addVideoOverlay(cachePath, playheadUs, 3_000_000L)
                 } else {
                     vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
                 }
-                previewRenderer.requestRender()
-                frameDriver.wake()
+                if (addedItem != null) {
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                }
             }
         }
     }
@@ -523,23 +537,26 @@ fun EditorScreen(
     ) { uri ->
         if (uri != null) {
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
-            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, com.flowcut.app.engine.LayerType.IMAGE)) {
-                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(com.flowcut.app.engine.LayerType.IMAGE), Toast.LENGTH_SHORT).show()
-                return@rememberLauncherForActivityResult
-            }
             val mimeType = context.contentResolver.getType(uri) ?: ""
             val isVideo = mimeType.startsWith("video/")
+            val targetType = if (isVideo) com.flowcut.app.engine.LayerType.VIDEO else com.flowcut.app.engine.LayerType.IMAGE
+            if (!com.flowcut.app.engine.canAddLayerItem(vm.layerItems, targetType)) {
+                Toast.makeText(context, com.flowcut.app.editor.getLayerCapLimitMessage(targetType), Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
             val prefix = if (isVideo) "overlay_vid_" else "overlay_img_"
             val cachePath = copyUriToCacheFile(context, uri, prefix)
             if (cachePath != null) {
                 val playheadUs = playbackController.playhead.timeUs
-                if (isVideo) {
+                val addedItem = if (isVideo) {
                     vm.addVideoOverlay(cachePath, playheadUs, 3_000_000L)
                 } else {
                     vm.addImageOverlay(cachePath, playheadUs, 3_000_000L)
                 }
-                previewRenderer.requestRender()
-                frameDriver.wake()
+                if (addedItem != null) {
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                }
             }
         }
     }
@@ -665,6 +682,7 @@ fun EditorScreen(
     var effectIsNewItem by remember { mutableStateOf(false) }
     var isOverlayAdjustSheetVisible by remember { mutableStateOf(false) }
     var isAutoCaptionsSheetVisible by remember { mutableStateOf(false) }
+    var isAspectRatioSheetVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val fontsDir = File(context.filesDir, "fonts")
@@ -1150,11 +1168,68 @@ fun EditorScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp)
             ) {
-                // 1. Top bar: 48 dp (Left: [←  My reel 01], Right: [9:16] [Export])
+                val currentAspectRatioMode = vmUiState?.aspectRatioMode ?: PreviewRenderer.currentAspectRatioMode
+                val currentRatioLabel = currentAspectRatioMode.label
+                val targetCanvasAspect = remember(currentAspectRatioMode, timeline.project.clips) {
+                    if (currentAspectRatioMode == AspectRatioMode.ORIGINAL) {
+                        val clip0 = timeline.project.clips.firstOrNull()
+                        if (clip0 != null) {
+                            val w = if (clip0.rotation == 90 || clip0.rotation == 270) clip0.height else clip0.width
+                            val h = if (clip0.rotation == 90 || clip0.rotation == 270) clip0.width else clip0.height
+                            if (w > 0 && h > 0) w.toFloat() / h.toFloat() else (9f / 16f)
+                        } else {
+                            9f / 16f
+                        }
+                    } else if (currentAspectRatioMode.ratioWidth > 0 && currentAspectRatioMode.ratioHeight > 0) {
+                        currentAspectRatioMode.ratioWidth.toFloat() / currentAspectRatioMode.ratioHeight.toFloat()
+                    } else if (currentAspectRatioMode.aspect > 0f) {
+                        currentAspectRatioMode.aspect
+                    } else {
+                        9f / 16f
+                    }
+                }
+
+                val openAspectRatioSheet = {
+                    if (isPlaying) {
+                        onPlayPauseClick()
+                    }
+                    isTrimSheetVisible = false
+                    isVolumeSheetVisible = false
+                    isSpeedSheetVisible = false
+                    isAdjustSheetVisible = false
+                    isBackgroundSheetVisible = false
+                    isOpacitySheetVisible = false
+                    isTextSheetVisible = false
+                    isStickerSheetVisible = false
+                    isTextColorSheetVisible = false
+                    isTextFontSheetVisible = false
+                    isTextAnimationSheetVisible = false
+                    isTextAdjustSheetVisible = false
+                    isAudioSoundsSheetVisible = false
+                    isAudioEffectsSheetVisible = false
+                    isAudioRecordSheetVisible = false
+                    isAudioFadeSheetVisible = false
+                    isAudioVolumeSheetVisible = false
+                    isAudioSpeedSheetVisible = false
+                    isPipMaskSheetVisible = false
+                    isPipCropSheetVisible = false
+                    isPipCutoutSheetVisible = false
+                    isFilterSheetVisible = false
+                    isEffectSheetVisible = false
+                    isOverlayAdjustSheetVisible = false
+                    isAutoCaptionsSheetVisible = false
+
+                    resolvedViewModel?.startAspectRatioEditing()
+                    isAspectRatioSheetVisible = true
+                }
+
+                // 1. Top bar: 48 dp (Left: [←  My reel 01], Right: [Ratio] [Export])
                 EditorTopBar(
                     hasClips = hasClips,
                     showPreviewLoader = showPreviewLoader,
                     colors = colors,
+                    aspectRatioLabel = currentRatioLabel,
+                    onRatioClick = openAspectRatioSheet,
                     onBackClick = onBackClick,
                     onExportButtonClick = onExportButtonClick
                 )
@@ -1167,34 +1242,30 @@ fun EditorScreen(
                         .weight(1f)
                         .heightIn(min = 220.dp)
                         .fillMaxWidth()
+                        .background(Color(0xFF0E0F13))
                 ) {
                     PreviewBox(
                         hasClips = hasClips,
                         selectedTransitionName = selectedTransitionName,
                         onAddVideoClick = onAddClipsClick,
                         glSurfaceView = if (USE_NEW_CORE && previewRenderer.glSurfaceView != null) previewRenderer.glSurfaceView else glSurfaceView,
+                        targetCanvasAspect = targetCanvasAspect,
+                        aspectRatioLabel = currentRatioLabel,
+                        onRatioClick = openAspectRatioSheet,
                         modifier = Modifier.fillMaxSize()
                     )
 
                     // Instant thumbnail placeholder until first GL frame latches
                     FirstClipThumbnailOverlay(
                         isFirstFrameLatched = previewRenderer.isFirstFrameLatched,
-                        clips = timeline.project.clips
+                        clips = timeline.project.clips,
+                        targetCanvasAspect = targetCanvasAspect
                     )
 
                     // Center three-dots preview loader (96.dp x 36.dp sequential wave pulse)
                     PreviewThreeDotsLoader(
                         showLoader = showPreviewLoader,
                         modifier = Modifier.align(Alignment.Center)
-                    )
-
-                    // Cover up floating 9:16 badge in PreviewBox
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(6.dp)
-                            .size(width = 54.dp, height = 32.dp)
-                            .background(colors.surface1)
                     )
 
                     val activeOverlayId = vmUiState?.selectedOverlayId
@@ -1219,7 +1290,8 @@ fun EditorScreen(
                                             outerW = size.width.toFloat(),
                                             outerH = size.height.toFloat(),
                                             overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
-                                            playheadUs = playheadUs
+                                            playheadUs = playheadUs,
+                                            canvasAspect = targetCanvasAspect
                                         )
                                         if (hit != null) {
                                             val newFocus = when (hit.type) {
@@ -1257,7 +1329,8 @@ fun EditorScreen(
                                 previewRenderer = previewRenderer,
                                 frameDriver = frameDriver,
                                 snapshotHolder = snapshotHolder,
-                                triggerApplyToAllPill = { triggerApplyToAllPill() }
+                                triggerApplyToAllPill = { triggerApplyToAllPill() },
+                                targetCanvasAspect = targetCanvasAspect
                             )
                         }
                     }
@@ -1296,8 +1369,16 @@ fun EditorScreen(
 
                                             val outerW = size.width.toFloat().coerceAtLeast(1f)
                                             val outerH = size.height.toFloat().coerceAtLeast(1f)
-                                            val previewH = outerH
-                                            val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+                                            val containerAspect = if (outerH > 0f) outerW / outerH else 1f
+                                            val previewW: Float
+                                            val previewH: Float
+                                            if (targetCanvasAspect > containerAspect) {
+                                                previewW = outerW
+                                                previewH = (outerW / targetCanvasAspect).coerceAtMost(outerH).coerceAtLeast(1f)
+                                            } else {
+                                                previewH = outerH
+                                                previewW = (outerH * targetCanvasAspect).coerceAtMost(outerW).coerceAtLeast(1f)
+                                            }
                                             val previewLeft = (outerW - previewW) / 2f
 
                                             // Calculate aspect-correct overlay dimensions and center in outer gesture coordinates
@@ -1319,7 +1400,7 @@ fun EditorScreen(
                                                 }
                                                 else -> 1.0f
                                             }
-                                            val aScreen = 9.0f / 16.0f
+                                            val aScreen = targetCanvasAspect
                                             var hwInit = 0.6f
                                             var hhInit = hwInit / aTex
                                             if (hhInit * aScreen > 0.6f) {
@@ -1706,13 +1787,20 @@ fun EditorScreen(
                                         }
                                     }
                             ) {
-                                // 9:16 Guide Overlay Canvas & Badge
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .aspectRatio(9f / 16f)
-                                        .align(Alignment.Center)
+                                // Aspect-locked Guide Overlay Canvas & Badge
+                                BoxWithConstraints(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
                                 ) {
+                                    val containerAspect = if (maxHeight > 0.dp) maxWidth / maxHeight else 1f
+                                    val selFrameMod = if (targetCanvasAspect > containerAspect) {
+                                        Modifier.fillMaxWidth().aspectRatio(targetCanvasAspect)
+                                    } else {
+                                        Modifier.fillMaxHeight().aspectRatio(targetCanvasAspect)
+                                    }
+                                    Box(
+                                        modifier = selFrameMod
+                                    ) {
                                     // Interactive CapCut-Style Selection Frame + 5 Action Badges around Selected Overlay
                                     Canvas(modifier = Modifier.fillMaxSize()) {
                                         val selOverlay = activeOverlay
@@ -1741,7 +1829,7 @@ fun EditorScreen(
                                                 else -> 1.0f
                                             }
 
-                                            val aScreen = 9.0f / 16.0f
+                                            val aScreen = targetCanvasAspect
                                             var hw = 0.6f
                                             var hh = hw / aTex
                                             if (hh * aScreen > 0.6f) {
@@ -2016,6 +2104,7 @@ fun EditorScreen(
                                 }
                             }
                         }
+                    }
                     }
 
                     // Floating 3-Second "Apply to All" Pill in bottom-right corner of preview
@@ -3108,6 +3197,43 @@ fun EditorScreen(
             onWakeFrameDriver = { frameDriver.wake() },
             onDismiss = { isOpacitySheetVisible = false }
         )
+
+        // Aspect Ratio BottomSheet
+        if (isAspectRatioSheetVisible) {
+            val currentMode = vmUiState?.aspectRatioMode ?: PreviewRenderer.currentAspectRatioMode
+            AspectRatioSheet(
+                activeRatio = currentMode,
+                onRatioChanged = { mode ->
+                    resolvedViewModel?.setAspectRatioLive(mode)
+                    previewRenderer.setAspectRatioMode(mode, timeline.project.clips.firstOrNull())
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                },
+                onDone = { mode ->
+                    resolvedViewModel?.commitAspectRatio(mode)
+                    previewRenderer.setAspectRatioMode(mode, timeline.project.clips.firstOrNull())
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isAspectRatioSheetVisible = false
+                },
+                onCancel = {
+                    resolvedViewModel?.cancelAspectRatio()
+                    val restored = resolvedViewModel?.uiState?.value?.aspectRatioMode ?: PreviewRenderer.currentAspectRatioMode
+                    previewRenderer.setAspectRatioMode(restored, timeline.project.clips.firstOrNull())
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isAspectRatioSheetVisible = false
+                },
+                onDismiss = {
+                    resolvedViewModel?.cancelAspectRatio()
+                    val restored = resolvedViewModel?.uiState?.value?.aspectRatioMode ?: PreviewRenderer.currentAspectRatioMode
+                    previewRenderer.setAspectRatioMode(restored, timeline.project.clips.firstOrNull())
+                    previewRenderer.requestRender()
+                    frameDriver.wake()
+                    isAspectRatioSheetVisible = false
+                }
+            )
+        }
 
         // Text & Sticker BottomSheets (Phase 3 Typography Suite)
         TextAndStickerSheetsHost(
@@ -6018,7 +6144,8 @@ private fun OverlappingLayerConflictDialog(
 @Composable
 private fun BoxScope.FirstClipThumbnailOverlay(
     isFirstFrameLatched: Boolean,
-    clips: List<com.flowcut.app.model.Clip>
+    clips: List<com.flowcut.app.model.Clip>,
+    targetCanvasAspect: Float = 9f / 16f
 ) {
     if (!USE_NEW_CORE || isFirstFrameLatched || clips.isEmpty()) return
     val firstClipPath = clips.firstOrNull()?.path ?: return
@@ -6036,19 +6163,27 @@ private fun BoxScope.FirstClipThumbnailOverlay(
         }
     }
     thumbBmp?.let { bmp ->
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .aspectRatio(9f / 16f)
-                .align(Alignment.Center)
-                .clip(RectangleShape)
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
         ) {
-            androidx.compose.foundation.Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = androidx.compose.ui.layout.ContentScale.Fit
-            )
+            val containerAspect = if (maxHeight > 0.dp) maxWidth / maxHeight else 1f
+            val thumbMod = if (targetCanvasAspect > containerAspect) {
+                Modifier.fillMaxWidth().aspectRatio(targetCanvasAspect)
+            } else {
+                Modifier.fillMaxHeight().aspectRatio(targetCanvasAspect)
+            }
+            Box(
+                modifier = thumbMod
+                    .clip(RectangleShape)
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                )
+            }
         }
     }
 }
@@ -6299,6 +6434,8 @@ private fun EditorTopBar(
     hasClips: Boolean,
     showPreviewLoader: Boolean,
     colors: FlowCutColors,
+    aspectRatioLabel: String = "9:16",
+    onRatioClick: () -> Unit = {},
     onBackClick: () -> Unit,
     onExportButtonClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -6336,10 +6473,11 @@ private fun EditorTopBar(
             Box(
                 modifier = Modifier
                     .background(Color(0xFF24242A), RoundedCornerShape(14.dp))
+                    .clickable { onRatioClick() }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = "9:16",
+                    text = aspectRatioLabel,
                     color = Color.White,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
@@ -6388,6 +6526,7 @@ private fun PreviewClipTransformOverlay(
     frameDriver: FrameDriver,
     snapshotHolder: com.flowcut.app.core.timeline.SnapshotHolder,
     triggerApplyToAllPill: () -> Unit,
+    targetCanvasAspect: Float = 9f / 16f,
     modifier: Modifier = Modifier
 ) {
     val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -6442,8 +6581,16 @@ private fun PreviewClipTransformOverlay(
 
                         val outerW = size.width.toFloat().coerceAtLeast(1f)
                         val outerH = size.height.toFloat().coerceAtLeast(1f)
-                        val previewH = outerH
-                        val previewW = (outerH * (9f / 16f)).coerceAtMost(outerW).coerceAtLeast(1f)
+                        val containerAspect = if (outerH > 0f) outerW / outerH else 1f
+                        val previewW: Float
+                        val previewH: Float
+                        if (targetCanvasAspect > containerAspect) {
+                            previewW = outerW
+                            previewH = (outerW / targetCanvasAspect).coerceAtMost(outerH).coerceAtLeast(1f)
+                        } else {
+                            previewH = outerH
+                            previewW = (outerH * targetCanvasAspect).coerceAtMost(outerW).coerceAtLeast(1f)
+                        }
 
                         if (pressedList.size == 1) {
                             val p = pressedList[0]
@@ -6508,7 +6655,7 @@ private fun PreviewClipTransformOverlay(
                             val snappedScale = if (snapScale100) 1.0f else rawScale
 
                             // 3. Effective Dimensions for Edge Snapping
-                            val aScreen = 9.0f / 16.0f
+                            val aScreen = targetCanvasAspect
                             val dispW = activeClip?.displayWidth ?: 1080
                             val dispH = activeClip?.displayHeight ?: 1920
                             val aClip = (dispW.toFloat() / dispH.toFloat()).coerceAtLeast(0.01f)
@@ -6674,91 +6821,99 @@ private fun PreviewClipTransformOverlay(
                 }
             }
     ) {
-        // 9:16 Guide Overlay Canvas & Badge
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .aspectRatio(9f / 16f)
-                .align(Alignment.Center)
+        // Aspect-locked Guide Overlay Canvas & Badge
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
         ) {
-            if (isTransforming) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val strokeWidth1_5 = 1.5.dp.toPx()
-                    val strokeWidth2 = 2.dp.toPx()
-                    val cyanColor = Color(0xFF00E5FF)
+            val containerAspect = if (maxHeight > 0.dp) maxWidth / maxHeight else 1f
+            val guideMod = if (targetCanvasAspect > containerAspect) {
+                Modifier.fillMaxWidth().aspectRatio(targetCanvasAspect)
+            } else {
+                Modifier.fillMaxHeight().aspectRatio(targetCanvasAspect)
+            }
+            Box(
+                modifier = guideMod
+            ) {
+                if (isTransforming) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val strokeWidth1_5 = 1.5.dp.toPx()
+                        val strokeWidth2 = 2.dp.toPx()
+                        val cyanColor = Color(0xFF00E5FF)
 
-                    // Vertical Center Guide
-                    if (guideSnapCenterX) {
-                        drawLine(
-                            color = cyanColor,
-                            start = Offset(size.width / 2f, 0f),
-                            end = Offset(size.width / 2f, size.height),
-                            strokeWidth = strokeWidth1_5
-                        )
+                        // Vertical Center Guide
+                        if (guideSnapCenterX) {
+                            drawLine(
+                                color = cyanColor,
+                                start = Offset(size.width / 2f, 0f),
+                                end = Offset(size.width / 2f, size.height),
+                                strokeWidth = strokeWidth1_5
+                            )
+                        }
+
+                        // Horizontal Center Guide
+                        if (guideSnapCenterY) {
+                            drawLine(
+                                color = cyanColor,
+                                start = Offset(0f, size.height / 2f),
+                                end = Offset(size.width, size.height / 2f),
+                                strokeWidth = strokeWidth1_5
+                            )
+                        }
+
+                        // Edge Guides (inset by strokeWidth2 / 2f so the entire 2dp stroke is visible)
+                        if (guideSnapEdgeLeft) {
+                            drawLine(
+                                color = cyanColor,
+                                start = Offset(strokeWidth2 / 2f, 0f),
+                                end = Offset(strokeWidth2 / 2f, size.height),
+                                strokeWidth = strokeWidth2
+                            )
+                        }
+                        if (guideSnapEdgeRight) {
+                            drawLine(
+                                color = cyanColor,
+                                start = Offset(size.width - strokeWidth2 / 2f, 0f),
+                                end = Offset(size.width - strokeWidth2 / 2f, size.height),
+                                strokeWidth = strokeWidth2
+                            )
+                        }
+                        if (guideSnapEdgeTop) {
+                            drawLine(
+                                color = cyanColor,
+                                start = Offset(0f, strokeWidth2 / 2f),
+                                end = Offset(size.width, strokeWidth2 / 2f),
+                                strokeWidth = strokeWidth2
+                            )
+                        }
+                        if (guideSnapEdgeBottom) {
+                            drawLine(
+                                color = cyanColor,
+                                start = Offset(0f, size.height - strokeWidth2 / 2f),
+                                end = Offset(size.width, size.height - strokeWidth2 / 2f),
+                                strokeWidth = strokeWidth2
+                            )
+                        }
                     }
 
-                    // Horizontal Center Guide
-                    if (guideSnapCenterY) {
-                        drawLine(
-                            color = cyanColor,
-                            start = Offset(0f, size.height / 2f),
-                            end = Offset(size.width, size.height / 2f),
-                            strokeWidth = strokeWidth1_5
-                        )
-                    }
-
-                    // Edge Guides (inset by strokeWidth2 / 2f so the entire 2dp stroke is visible)
-                    if (guideSnapEdgeLeft) {
-                        drawLine(
-                            color = cyanColor,
-                            start = Offset(strokeWidth2 / 2f, 0f),
-                            end = Offset(strokeWidth2 / 2f, size.height),
-                            strokeWidth = strokeWidth2
-                        )
-                    }
-                    if (guideSnapEdgeRight) {
-                        drawLine(
-                            color = cyanColor,
-                            start = Offset(size.width - strokeWidth2 / 2f, 0f),
-                            end = Offset(size.width - strokeWidth2 / 2f, size.height),
-                            strokeWidth = strokeWidth2
-                        )
-                    }
-                    if (guideSnapEdgeTop) {
-                        drawLine(
-                            color = cyanColor,
-                            start = Offset(0f, strokeWidth2 / 2f),
-                            end = Offset(size.width, strokeWidth2 / 2f),
-                            strokeWidth = strokeWidth2
-                        )
-                    }
-                    if (guideSnapEdgeBottom) {
-                        drawLine(
-                            color = cyanColor,
-                            start = Offset(0f, size.height - strokeWidth2 / 2f),
-                            end = Offset(size.width, size.height - strokeWidth2 / 2f),
-                            strokeWidth = strokeWidth2
-                        )
-                    }
-                }
-
-                // Rotation / Scale Badge
-                if (guideBadgeText != null) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = Color(0xCC000000),
-                        border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.6f)),
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 12.dp)
-                    ) {
-                        Text(
-                            text = guideBadgeText!!,
-                            color = Color(0xFF00E5FF),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
+                    // Rotation / Scale Badge
+                    if (guideBadgeText != null) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xCC000000),
+                            border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.6f)),
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 12.dp)
+                        ) {
+                            Text(
+                                text = guideBadgeText!!,
+                                color = Color(0xFF00E5FF),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
                     }
                 }
             }

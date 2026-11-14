@@ -5,6 +5,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.flowcut.app.engine.media.ColorInfoCheck
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.MAX_1080P_LONG_SIDE
 import com.flowcut.app.model.MAX_1080P_SHORT_SIDE
@@ -106,13 +107,25 @@ class ClipImporter(private val context: Context) {
                 return ImportValidationResult.Error("Unsupported video format")
             }
 
-            // Codec check: H.264, HEVC, or Dolby Vision
+            // Codec check: H.264 or HEVC (Dolby Vision and 10-bit/HDR rejected)
             val isAvc = videoMime.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true)
             val isHevc = videoMime.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, ignoreCase = true)
             val isDolbyVision = videoMime.contains("dolby-vision", ignoreCase = true)
-            if (!isAvc && !isHevc && !isDolbyVision) {
+            if (isDolbyVision) {
+                pfd.close()
+                return ImportValidationResult.Error("HDR / 10-bit videos abhi support nahi hain.")
+            }
+            if (!isAvc && !isHevc) {
                 pfd.close()
                 return ImportValidationResult.Error("Unsupported video format")
+            }
+
+            if (videoTrackFormat != null) {
+                val verdict = ColorInfoCheck.check(videoTrackFormat)
+                if (verdict != ColorInfoCheck.Verdict.OK) {
+                    pfd.close()
+                    return ImportValidationResult.Error("HDR / 10-bit videos abhi support nahi hain.")
+                }
             }
 
             // 2. Pre-validate metadata via MediaMetadataRetriever directly from file descriptor

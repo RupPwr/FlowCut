@@ -240,20 +240,23 @@ enum class AspectRatioMode(
     val label: String,
     val aspect: Float,
     val exportWidth: Int,
-    val exportHeight: Int
+    val exportHeight: Int,
+    val ratioWidth: Int = 9,
+    val ratioHeight: Int = 16
 ) {
-    RATIO_9_16(0, "9:16", 9f / 16f, 1080, 1920),
-    RATIO_16_9(1, "16:9", 16f / 9f, 1920, 1080),
-    RATIO_1_1(2, "1:1", 1f / 1f, 1080, 1080),
-    RATIO_4_5(3, "4:5", 4f / 5f, 1080, 1350),
-    RATIO_4_3(4, "4:3", 4f / 3f, 1440, 1080),
-    RATIO_3_4(5, "3:4", 3f / 4f, 1080, 1440),
-    RATIO_5_4(6, "5:4", 5f / 4f, 1350, 1080),
-    RATIO_3_2(7, "3:2", 3f / 2f, 1620, 1080),
-    RATIO_2_3(8, "2:3", 2f / 3f, 1080, 1620),
-    RATIO_2_1(9, "2:1", 2f / 1f, 1920, 960),
-    RATIO_1_2(10, "1:2", 1f / 2f, 960, 1920),
-    RATIO_21_9(11, "21:9", 21f / 9f, 1920, 822);
+    ORIGINAL(-1, "Original", 0f, 0, 0, 0, 0),
+    RATIO_9_16(0, "9:16", 9f / 16f, 1080, 1920, 9, 16),
+    RATIO_16_9(1, "16:9", 16f / 9f, 1920, 1080, 16, 9),
+    RATIO_1_1(2, "1:1", 1f / 1f, 1080, 1080, 1, 1),
+    RATIO_4_5(3, "4:5", 4f / 5f, 1080, 1350, 4, 5),
+    RATIO_4_3(4, "4:3", 4f / 3f, 1440, 1080, 4, 3),
+    RATIO_3_4(5, "3:4", 3f / 4f, 1080, 1440, 3, 4),
+    RATIO_5_4(6, "5:4", 5f / 4f, 1350, 1080, 5, 4),
+    RATIO_3_2(7, "3:2", 3f / 2f, 1620, 1080, 3, 2),
+    RATIO_2_3(8, "2:3", 2f / 3f, 1080, 1620, 2, 3),
+    RATIO_2_1(9, "2:1", 2f / 1f, 1920, 960, 2, 1),
+    RATIO_1_2(10, "1:2", 1f / 2f, 960, 1920, 1, 2),
+    RATIO_21_9(11, "21:9", 21f / 9f, 1920, 822, 21, 9);
 
     val width: Int get() = exportWidth
     val height: Int get() = exportHeight
@@ -263,7 +266,7 @@ enum class AspectRatioMode(
             entries.firstOrNull { it.id == index } ?: entries.getOrNull(index) ?: RATIO_9_16
 
         fun fromLabel(label: String): AspectRatioMode =
-            entries.firstOrNull { it.label == label } ?: RATIO_9_16
+            entries.firstOrNull { it.label.equals(label, ignoreCase = true) } ?: RATIO_9_16
     }
 }
 
@@ -368,6 +371,13 @@ class PreviewRenderer(
     private var _canvasAspectRatio: Float = 9f / 16f
     val canvasAspectRatio: Float get() = _canvasAspectRatio
 
+    fun setAspectRatioMode(mode: AspectRatioMode, firstClip: Any? = null) {
+        val clip0 = firstClip ?: holder.current.project.clips.firstOrNull()
+        Companion.setAspectRatioMode(mode, clip0)
+        val aspect = Companion.resolveEffectiveAspect(mode, clip0)
+        setCanvasAspectRatio(aspect)
+    }
+
     fun setCanvasAspectRatio(aspect: Float) {
         if (aspect > 0f) {
             _canvasAspectRatio = aspect
@@ -375,6 +385,7 @@ class PreviewRenderer(
             TransitionRenderer.canvasAspect = aspect
             glSurfaceView?.holder?.setSizeFromLayout()
             requestRender()
+            onRenderRequested?.invoke()
         }
     }
 
@@ -633,12 +644,17 @@ class PreviewRenderer(
             viewportHeight = height
             texelSize[0] = 1.0f / width.toFloat()
             texelSize[1] = 1.0f / height.toFloat()
-            val aspect = width.toFloat() / height.toFloat()
-            _canvasAspectRatio = aspect
-            Companion.setCanvasAspectRatio(aspect)
-            TransitionRenderer.canvasAspect = aspect
+            val surfaceAspect = width.toFloat() / height.toFloat()
+            val currentMode = currentAspectRatioMode
+            val effectiveAspect = Companion.resolveEffectiveAspect(currentMode, holder.current.project.clips.firstOrNull())
+            val targetAspect = if (effectiveAspect > 0f) effectiveAspect else surfaceAspect
+            _canvasAspectRatio = targetAspect
+            Companion.setCanvasAspectRatio(targetAspect)
+            TransitionRenderer.canvasAspect = targetAspect
         }
         GLES30.glViewport(0, 0, width, height)
+        requestRender()
+        onRenderRequested?.invoke()
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -1743,9 +1759,43 @@ class PreviewRenderer(
         @Volatile
         var currentAspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16
 
-        fun setAspectRatioMode(mode: AspectRatioMode) {
+        fun resolveEffectiveAspect(mode: AspectRatioMode, firstClip: Any? = null): Float {
+            if (mode == AspectRatioMode.ORIGINAL) {
+                if (firstClip != null) {
+                    val (w, h) = when (firstClip) {
+                        is com.flowcut.app.model.Clip -> {
+                            val rot = firstClip.rotation
+                            val w = if (rot == 90 || rot == 270) firstClip.height else firstClip.width
+                            val h = if (rot == 90 || rot == 270) firstClip.width else firstClip.height
+                            w to h
+                        }
+                        is com.flowcut.app.core.model.Clip -> {
+                            val rot = firstClip.rotation
+                            val w = if (rot == 90 || rot == 270) firstClip.height else firstClip.width
+                            val h = if (rot == 90 || rot == 270) firstClip.width else firstClip.height
+                            w to h
+                        }
+                        else -> 0 to 0
+                    }
+                    if (w > 0 && h > 0) {
+                        return w.toFloat() / h.toFloat()
+                    }
+                }
+                return 9f / 16f
+            }
+            return if (mode.ratioWidth > 0 && mode.ratioHeight > 0) {
+                mode.ratioWidth.toFloat() / mode.ratioHeight.toFloat()
+            } else if (mode.aspect > 0f) {
+                mode.aspect
+            } else {
+                9f / 16f
+            }
+        }
+
+        fun setAspectRatioMode(mode: AspectRatioMode, firstClip: Any? = null) {
             currentAspectRatioMode = mode
-            setCanvasAspectRatio(mode.aspect)
+            val effective = resolveEffectiveAspect(mode, firstClip)
+            setCanvasAspectRatio(effective)
         }
 
         fun setCanvasAspectRatio(aspect: Float) {

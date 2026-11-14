@@ -19,7 +19,10 @@ import android.opengl.GLES30
 import android.opengl.Matrix
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
+import android.util.Log
+import com.flowcut.app.BuildConfig
 import com.flowcut.app.audio.ClipAudioContributor
 import com.flowcut.app.core.model.map
 import com.flowcut.app.core.timeline.ActiveSet
@@ -251,6 +254,16 @@ class ExportEngine(private val context: Context) {
             val inputSurface = vEnc.createInputSurface()
             vEnc.start()
 
+            if (BuildConfig.DEBUG) {
+                try {
+                    val isHw = vEnc.codecInfo.isHardwareAccelerated
+                    Log.d(
+                        "CODEC",
+                        "Video encoder started: name=${vEnc.name}, isHardwareAccelerated=$isHw, size=${width}x${height}, fps=$fps, bitrate=$bitrateBps"
+                    )
+                } catch (_: Throwable) {}
+            }
+
             // Step 3: Configure AAC audio encoder (48kHz, stereo, 192kbps)
             val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, 192_000)
@@ -261,6 +274,16 @@ class ExportEngine(private val context: Context) {
             audioEncoder = aEnc
             aEnc.configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             aEnc.start()
+
+            if (BuildConfig.DEBUG) {
+                try {
+                    val isHw = aEnc.codecInfo.isHardwareAccelerated
+                    Log.d(
+                        "CODEC",
+                        "Audio encoder started: name=${aEnc.name}, isHardwareAccelerated=$isHw, sampleRate=48000, channels=2, bitrate=192000"
+                    )
+                } catch (_: Throwable) {}
+            }
 
             // Step 4: Setup EGL for rendering onto encoder's input surface
             val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -363,6 +386,12 @@ class ExportEngine(private val context: Context) {
 
             var currentAIndex = -1
             var currentBIndex = -1
+
+            var timeoutsA = 0
+            var timeoutsB = 0
+            var duplicatesA = 0
+            var duplicatesB = 0
+            val exportStartTimeMs = SystemClock.uptimeMillis()
 
             var videoTrackIndex = -1
             var audioTrackIndex = -1
@@ -555,6 +584,7 @@ class ExportEngine(private val context: Context) {
                 }
 
                 if (renderedA) {
+                    var timedOutA = false
                     synchronized(frameSyncObjectA) {
                         var waits = 0
                         while (!frameAvailableA && waits < 10) {
@@ -565,8 +595,17 @@ class ExportEngine(private val context: Context) {
                                 break
                             }
                         }
+                        if (!frameAvailableA) {
+                            timedOutA = true
+                        }
                         frameAvailableA = false
                     }
+                    if (timedOutA) {
+                        timeoutsA++
+                        duplicatesA++
+                    }
+                } else {
+                    duplicatesA++
                 }
 
                 try {
@@ -616,6 +655,7 @@ class ExportEngine(private val context: Context) {
                     }
 
                     if (renderedB) {
+                        var timedOutB = false
                         synchronized(frameSyncObjectB) {
                             var waits = 0
                             while (!frameAvailableB && waits < 10) {
@@ -626,8 +666,17 @@ class ExportEngine(private val context: Context) {
                                     break
                                 }
                             }
+                            if (!frameAvailableB) {
+                                timedOutB = true
+                            }
                             frameAvailableB = false
                         }
+                        if (timedOutB) {
+                            timeoutsB++
+                            duplicatesB++
+                        }
+                    } else {
+                        duplicatesB++
                     }
 
                     try {
@@ -847,6 +896,17 @@ class ExportEngine(private val context: Context) {
             }
             mux.release()
             muxerReleased = true
+
+            if (BuildConfig.DEBUG) {
+                try {
+                    val elapsedMs = SystemClock.uptimeMillis() - exportStartTimeMs
+                    val avgFps = if (elapsedMs > 0) (totalFrames.toDouble() * 1000.0) / elapsedMs else 0.0
+                    Log.d(
+                        "EXPORTSTAT",
+                        "Export completed: totalFrames=$totalFrames, timeoutsA=$timeoutsA, timeoutsB=$timeoutsB, duplicatesA=$duplicatesA, duplicatesB=$duplicatesB, elapsedMs=${elapsedMs}ms, avgFps=${String.format(Locale.US, "%.2f", avgFps)}"
+                    )
+                } catch (_: Throwable) {}
+            }
 
             if (!tempFile.exists() || tempFile.length() < 1024L) {
                 error("Export failed: output file is missing or corrupted (${tempFile.length()} bytes)")

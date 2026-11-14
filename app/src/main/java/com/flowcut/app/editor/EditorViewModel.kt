@@ -3,6 +3,8 @@ package com.flowcut.app.editor
 import android.app.Application
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.compose.runtime.mutableStateListOf
@@ -34,11 +36,13 @@ import com.flowcut.app.engine.canAddLayerItem
 import com.flowcut.app.engine.getLayerCap
 import com.flowcut.app.engine.clampItemTrimBoundsOnRow
 import com.flowcut.app.engine.findAvailableRowOrClamp
+import com.flowcut.app.engine.media.ColorInfoCheck
 import com.flowcut.app.engine.trackGroup
 import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.MAX_CLIPS
+import com.flowcut.app.model.MAX_TOTAL_MS
 import com.flowcut.app.model.ProgramTimeline
 import com.flowcut.app.model.Project
 import com.flowcut.app.model.TRANSITION_DEFAULT_MS
@@ -47,6 +51,7 @@ import com.flowcut.app.model.TransitionType
 import com.flowcut.app.storage.ClipImporter
 import com.flowcut.app.storage.FullProjectDraft
 import com.flowcut.app.storage.JunctionTransitionDraft
+import com.flowcut.app.storage.NewerProjectException
 import com.flowcut.app.storage.ProjectStore
 import com.flowcut.app.storage.toDomain
 import com.flowcut.app.storage.toDraft
@@ -101,7 +106,7 @@ data class EditorUiState(
     val canvasColorArgb: Int = 0xFF000000.toInt(),
     val canvasGradientId: Int = -1
 ) {
-    val aspectRatioFloat: Float get() = aspectRatioMode.aspect
+    val aspectRatioFloat: Float get() = if (aspectRatioMode.aspect > 0f) aspectRatioMode.aspect else (9f / 16f)
 }
 
 data class SplitResult(
@@ -121,7 +126,7 @@ data class FreezeResult(
     val freezeStartMs: Long
 )
 
-const val MAX_TIMELINE_DURATION_US: Long = 15L * 60L * 1_000_000L // 900_000_000L (15 minutes)
+val MAX_TIMELINE_DURATION_US: Long = msToUs(MAX_TOTAL_MS)
 
 fun getLayerCapLimitMessage(type: LayerType): String {
     val cap = getLayerCap(type)
@@ -154,6 +159,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var previewEngine: PreviewEngine? = null
 
     private var autoSaveJob: Job? = null
+    private var isNewerProjectBlocked = false
     private var exportJob: Job? = null
     private var autoPlayJob: Job? = null
 
@@ -1023,13 +1029,34 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         ))
     }
 
+    fun resolveEffectiveAspect(mode: AspectRatioMode = _uiState.value.aspectRatioMode): Float {
+        if (mode == AspectRatioMode.ORIGINAL) {
+            val clip0 = _uiState.value.project.clips.firstOrNull()
+            if (clip0 != null) {
+                val w = if (clip0.rotation == 90 || clip0.rotation == 270) clip0.height else clip0.width
+                val h = if (clip0.rotation == 90 || clip0.rotation == 270) clip0.width else clip0.height
+                if (w > 0 && h > 0) return w.toFloat() / h.toFloat()
+            }
+            return 9f / 16f
+        }
+        return if (mode.ratioWidth > 0 && mode.ratioHeight > 0) {
+            mode.ratioWidth.toFloat() / mode.ratioHeight.toFloat()
+        } else if (mode.aspect > 0f) {
+            mode.aspect
+        } else {
+            9f / 16f
+        }
+    }
+
     fun startAspectRatioEditing() {
         preSheetAspectRatioMode = _uiState.value.aspectRatioMode
     }
 
     fun setAspectRatioLive(mode: AspectRatioMode) {
         _uiState.update { it.copy(aspectRatioMode = mode) }
-        PreviewRenderer.setCanvasAspectRatio(mode.aspect)
+        val effective = resolveEffectiveAspect(mode)
+        PreviewRenderer.setAspectRatioMode(mode, _uiState.value.project.clips.firstOrNull())
+        PreviewRenderer.setCanvasAspectRatio(effective)
     }
 
     fun setAspectRatioLive(modeIndex: Int) {
@@ -1064,13 +1091,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             preSheetAspectRatioMode = finalMode
         }
         _uiState.update { it.copy(aspectRatioMode = finalMode) }
-        PreviewRenderer.setAspectRatioMode(finalMode)
+        val effective = resolveEffectiveAspect(finalMode)
+        PreviewRenderer.setAspectRatioMode(finalMode, _uiState.value.project.clips.firstOrNull())
+        PreviewRenderer.setCanvasAspectRatio(effective)
         scheduleAutoSave()
     }
 
     fun cancelAspectRatio() {
         _uiState.update { it.copy(aspectRatioMode = preSheetAspectRatioMode) }
-        PreviewRenderer.setCanvasAspectRatio(preSheetAspectRatioMode.aspect)
+        val effective = resolveEffectiveAspect(preSheetAspectRatioMode)
+        PreviewRenderer.setAspectRatioMode(preSheetAspectRatioMode, _uiState.value.project.clips.firstOrNull())
+        PreviewRenderer.setCanvasAspectRatio(effective)
     }
 
     /**
@@ -1151,8 +1182,56 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     ): OverlayItem? {
         if (!canAddLayerItem(_layerItems, LayerType.VIDEO)) {
             showToast(getLayerCapLimitMessage(LayerType.VIDEO))
+            try { java.io.File(mediaPath).delete() } catch (_: Throwable) {}
             return null
         }
+
+        // Validate video track and reject HDR / 10-bit
+        val extractor = MediaExtractor()
+        var videoTrackFormat: MediaFormat? = null
+        try {
+            extractor.setDataSource(mediaPath)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/")) {
+                    videoTrackFormat = format
+                    break
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            try { extractor.release() } catch (_: Throwable) {}
+        }
+
+        if (videoTrackFormat == null) {
+            showToast("Unsupported video format")
+            try { java.io.File(mediaPath).delete() } catch (_: Throwable) {}
+            return null
+        }
+
+        val videoMime = videoTrackFormat.getString(MediaFormat.KEY_MIME).orEmpty()
+        val isAvc = videoMime.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true)
+        val isHevc = videoMime.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, ignoreCase = true)
+        val isDolbyVision = videoMime.contains("dolby-vision", ignoreCase = true)
+        if (isDolbyVision) {
+            showToast("HDR / 10-bit videos abhi support nahi hain.")
+            try { java.io.File(mediaPath).delete() } catch (_: Throwable) {}
+            return null
+        }
+        if (!isAvc && !isHevc) {
+            showToast("Unsupported video format")
+            try { java.io.File(mediaPath).delete() } catch (_: Throwable) {}
+            return null
+        }
+
+        val verdict = ColorInfoCheck.check(videoTrackFormat)
+        if (verdict != ColorInfoCheck.Verdict.OK) {
+            showToast("HDR / 10-bit videos abhi support nahi hain.")
+            try { java.io.File(mediaPath).delete() } catch (_: Throwable) {}
+            return null
+        }
+
         val endUs = startUs + durationUs
         var intrinsicWidth = 0
         var intrinsicHeight = 0
@@ -3533,6 +3612,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun scheduleAutoSave() {
+        if (isNewerProjectBlocked) return
         autoSaveJob?.cancel()
         autoSaveJob = viewModelScope.launch(Dispatchers.IO) {
             delay(500L)
@@ -3543,7 +3623,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun loadInitialProject() {
         viewModelScope.launch {
-            val draft = projectStore.loadFull()
+            try {
+                val draft = projectStore.loadFull()
             val loaded = draft.project
             projectStore.cleanupOrphanClips(loaded)
             for (clip in loaded.clips) {
@@ -3604,7 +3685,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val restoredAspectMode = AspectRatioMode.entries.firstOrNull { it.name == draft.aspectRatioModeName }
                 ?: AspectRatioMode.RATIO_9_16
             preSheetAspectRatioMode = restoredAspectMode
-            PreviewRenderer.setAspectRatioMode(restoredAspectMode)
+            PreviewRenderer.setAspectRatioMode(restoredAspectMode, loaded.clips.firstOrNull())
 
             // Restore Overlays
             _layerItems.clear()
@@ -3640,6 +3721,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             previewEngine?.let { engine ->
                 engine.timeline = ProgramTimeline(loaded)
                 engine.seekTo(0L)
+            }
+            } catch (e: NewerProjectException) {
+                isNewerProjectBlocked = true
+                showToast("Project was created with a newer version of FlowCut")
             }
         }
     }
@@ -3807,12 +3892,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openExistingProject() {
+        if (isNewerProjectBlocked) {
+            showToast("Project was created with a newer version of FlowCut")
+            return
+        }
         PreviewRenderer.syncTransforms(clipTransforms)
         PreviewRenderer.syncColorAdjusts(clipColorAdjusts)
         PreviewRenderer.syncBackgrounds(clipBackgrounds)
         PreviewRenderer.syncFilterStates(clipFilterStates)
         PreviewRenderer.syncJunctionTransitions(junctionTransitionModes)
-        PreviewRenderer.setAspectRatioMode(_uiState.value.aspectRatioMode)
+        PreviewRenderer.setAspectRatioMode(_uiState.value.aspectRatioMode, _uiState.value.project.clips.firstOrNull())
         val items = _layerItems.toList()
         val plan = CompiledLayerPlan.compile(items)
         PreviewRenderer.setLayerPlan(plan)
@@ -3828,6 +3917,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun resetProject(onComplete: () -> Unit = {}) {
+        isNewerProjectBlocked = false
         viewModelScope.launch {
             projectStore.clearAll()
             undoStack.clear()
@@ -3893,6 +3983,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun createNewProject(uris: List<Uri>) {
         if (uris.isEmpty()) return
+        isNewerProjectBlocked = false
         val urisToProcess = uris.take(MAX_CLIPS)
 
         viewModelScope.launch {
@@ -4331,7 +4422,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val prevRatio = undoAspectRatios.removeLast()
             redoAspectRatios.addLast(_uiState.value.aspectRatioMode)
             _uiState.update { it.copy(aspectRatioMode = prevRatio) }
-            PreviewRenderer.setCanvasAspectRatio(prevRatio.aspect)
+            val effective = resolveEffectiveAspect(prevRatio)
+            PreviewRenderer.setAspectRatioMode(prevRatio, _uiState.value.project.clips.firstOrNull())
+            PreviewRenderer.setCanvasAspectRatio(effective)
         }
         val isAllMuted = previous.clips.isNotEmpty() && previous.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
@@ -4401,7 +4494,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val nextRatio = redoAspectRatios.removeLast()
             undoAspectRatios.addLast(_uiState.value.aspectRatioMode)
             _uiState.update { it.copy(aspectRatioMode = nextRatio) }
-            PreviewRenderer.setCanvasAspectRatio(nextRatio.aspect)
+            val effective = resolveEffectiveAspect(nextRatio)
+            PreviewRenderer.setAspectRatioMode(nextRatio, _uiState.value.project.clips.firstOrNull())
+            PreviewRenderer.setCanvasAspectRatio(effective)
         }
         val isAllMuted = next.clips.isNotEmpty() && next.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
         ClipAudioContributor.isMainTrackMuted = isAllMuted
@@ -4528,7 +4623,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val snapshot = getSnapshot()
         val ratioMode = _uiState.value.aspectRatioMode
 
-        val aspect = if (ratioMode.aspect > 0f) ratioMode.aspect else (9f / 16f)
+        val aspect = resolveEffectiveAspect(ratioMode)
         val rawWidth: Int
         val rawHeight: Int
         if (aspect <= 1.0f) {
