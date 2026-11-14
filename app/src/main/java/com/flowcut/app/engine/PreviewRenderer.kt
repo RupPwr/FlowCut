@@ -1700,6 +1700,14 @@ class PreviewRenderer(
         private var _canvasAspectRatio: Float = 9f / 16f
         val canvasAspectRatio: Float get() = _canvasAspectRatio
 
+        @Volatile
+        var currentAspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16
+
+        fun setAspectRatioMode(mode: AspectRatioMode) {
+            currentAspectRatioMode = mode
+            setCanvasAspectRatio(mode.aspect)
+        }
+
         fun setCanvasAspectRatio(aspect: Float) {
             if (aspect > 0f) {
                 _canvasAspectRatio = aspect
@@ -1810,7 +1818,18 @@ class PreviewRenderer(
             clipFilterStates.putAll(states)
         }
 
-        private val junctionTransitionTypes = ConcurrentHashMap<Int, Int>()
+        val junctionTransitionTypes = ConcurrentHashMap<Int, Int>()
+
+        fun resetAll() {
+            clipTransforms.clear()
+            clipColorAdjusts.clear()
+            clipBackgrounds.clear()
+            clipFilterStates.clear()
+            junctionTransitionTypes.clear()
+            clearOverlayTextures()
+            setLayerPlan(CompiledLayerPlan.EMPTY)
+            setAspectRatioMode(AspectRatioMode.RATIO_9_16)
+        }
 
         fun getJunctionTransitionType(junctionIndex: Int): Int =
             junctionTransitionTypes[junctionIndex] ?: -1

@@ -45,8 +45,13 @@ import com.flowcut.app.model.TRANSITION_DEFAULT_MS
 import com.flowcut.app.model.Transition
 import com.flowcut.app.model.TransitionType
 import com.flowcut.app.storage.ClipImporter
+import com.flowcut.app.storage.FullProjectDraft
+import com.flowcut.app.storage.JunctionTransitionDraft
 import com.flowcut.app.storage.ProjectStore
+import com.flowcut.app.storage.toDomain
+import com.flowcut.app.storage.toDraft
 import com.flowcut.app.ui.ExportState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -206,6 +211,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 ClipAudioContributor.prewarmAudioPath(item.mediaPath)
             }
         }
+        scheduleAutoSave()
     }
 
     fun getClipBackground(clipId: String): ClipBackground =
@@ -1058,7 +1064,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             preSheetAspectRatioMode = finalMode
         }
         _uiState.update { it.copy(aspectRatioMode = finalMode) }
-        PreviewRenderer.setCanvasAspectRatio(finalMode.aspect)
+        PreviewRenderer.setAspectRatioMode(finalMode)
+        scheduleAutoSave()
     }
 
     fun cancelAspectRatio() {
@@ -2461,10 +2468,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setCoverFromTimelineFrame(timeUs: Long) {
         _uiState.update { it.copy(coverTimeUs = timeUs, customCoverPath = null) }
+        scheduleAutoSave()
     }
 
     fun setCoverFromGalleryImage(path: String) {
         _uiState.update { it.copy(customCoverPath = path, coverTimeUs = 0L) }
+        scheduleAutoSave()
     }
 
     fun commitClipVolume(clipIndex: Int, volume: Float) {
@@ -3484,21 +3493,148 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         engine.timeline = timeline
     }
 
+    fun buildFullProjectDraft(): FullProjectDraft {
+        val currProject = _uiState.value.project
+        val timeMapsDraft = clipTimeMaps.mapValues { it.value.toDraft() }
+        val transformsDraft = clipTransforms.mapValues { it.value.toDraft() }
+        val colorAdjustsDraft = clipColorAdjusts.mapValues { it.value.toDraft() }
+        val backgroundsDraft = clipBackgrounds.mapValues { it.value.toDraft() }
+        val filterStatesDraft = clipFilterStates.mapValues { it.value.toDraft() }
+        val junctionsDraft = mutableMapOf<Int, JunctionTransitionDraft>()
+        val maxJunctions = maxOf(0, currProject.clips.size - 1)
+        for (i in 0 until maxJunctions) {
+            val mode = getJunctionTransitionMode(i)
+            val dur = currProject.transitions.getOrNull(i)?.durationMs ?: 0L
+            junctionsDraft[i] = JunctionTransitionDraft(styleMode = mode, durationMs = dur)
+        }
+        val layersDraft = _layerItems.map { it.toDraft() }
+
+        return FullProjectDraft(
+            version = 2,
+            project = currProject,
+            aspectRatioModeName = _uiState.value.aspectRatioMode.name,
+            isMainTrackMuted = _uiState.value.isMainTrackMuted,
+            coverTimeUs = _uiState.value.coverTimeUs,
+            customCoverPath = _uiState.value.customCoverPath,
+            canvasBgMode = _uiState.value.canvasBgMode,
+            canvasBlurLevel = _uiState.value.canvasBlurLevel,
+            canvasColorArgb = _uiState.value.canvasColorArgb,
+            canvasGradientId = _uiState.value.canvasGradientId,
+            clipTimeMaps = timeMapsDraft,
+            clipVolumes = HashMap(clipVolumes),
+            savedPreMuteVolumes = HashMap(savedPreMuteVolumes),
+            clipTransforms = transformsDraft,
+            clipColorAdjusts = colorAdjustsDraft,
+            clipBackgrounds = backgroundsDraft,
+            clipFilterStates = filterStatesDraft,
+            junctionTransitions = junctionsDraft,
+            layerItems = layersDraft
+        )
+    }
+
+    fun scheduleAutoSave() {
+        autoSaveJob?.cancel()
+        autoSaveJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(500L)
+            val draft = buildFullProjectDraft()
+            projectStore.saveFull(draft)
+        }
+    }
+
     private fun loadInitialProject() {
         viewModelScope.launch {
-            val loaded = projectStore.load()
+            val draft = projectStore.loadFull()
+            val loaded = draft.project
             projectStore.cleanupOrphanClips(loaded)
             for (clip in loaded.clips) {
                 if (!clipNaturalDurations.containsKey(clip.id)) {
                     clipNaturalDurations[clip.id] = getMediaFileDurationUs(clip)
                 }
             }
+
+            // Restore TimeMaps
+            clipTimeMaps.clear()
+            for ((clipId, tmDraft) in draft.clipTimeMaps) {
+                clipTimeMaps[clipId] = tmDraft.toDomain()
+            }
+
+            // Restore Volumes & Mute State
+            clipVolumes.clear()
+            clipVolumes.putAll(draft.clipVolumes)
+            savedPreMuteVolumes.clear()
+            savedPreMuteVolumes.putAll(draft.savedPreMuteVolumes)
+            ClipAudioContributor.clipVolumes.clear()
+            ClipAudioContributor.clipVolumes.putAll(draft.clipVolumes)
+            ClipAudioContributor.isMainTrackMuted = draft.isMainTrackMuted
+
+            // Restore Transforms
+            clipTransforms.clear()
+            val domainTransforms = draft.clipTransforms.mapValues { it.value.toDomain() }
+            clipTransforms.putAll(domainTransforms)
+            PreviewRenderer.syncTransforms(domainTransforms)
+
+            // Restore Color Adjusts
+            clipColorAdjusts.clear()
+            val domainColors = draft.clipColorAdjusts.mapValues { it.value.toDomain() }
+            clipColorAdjusts.putAll(domainColors)
+            PreviewRenderer.syncColorAdjusts(domainColors)
+
+            // Restore Backgrounds
+            clipBackgrounds.clear()
+            val domainBgs = draft.clipBackgrounds.mapValues { it.value.toDomain() }
+            clipBackgrounds.putAll(domainBgs)
+            PreviewRenderer.syncBackgrounds(domainBgs)
+
+            // Restore Filter States
+            clipFilterStates.clear()
+            val domainFilters = draft.clipFilterStates.mapValues { it.value.toDomain() }
+            clipFilterStates.putAll(domainFilters)
+            PreviewRenderer.syncFilterStates(domainFilters)
+
+            // Restore Junction Transitions
+            junctionTransitionModes.clear()
+            for ((idx, transDraft) in draft.junctionTransitions) {
+                if (transDraft.styleMode > 0) {
+                    junctionTransitionModes[idx] = transDraft.styleMode
+                }
+            }
+            PreviewRenderer.syncJunctionTransitions(junctionTransitionModes)
+
+            // Restore Aspect Ratio
+            val restoredAspectMode = AspectRatioMode.entries.firstOrNull { it.name == draft.aspectRatioModeName }
+                ?: AspectRatioMode.RATIO_9_16
+            preSheetAspectRatioMode = restoredAspectMode
+            PreviewRenderer.setAspectRatioMode(restoredAspectMode)
+
+            // Restore Overlays
+            _layerItems.clear()
+            for (itemDraft in draft.layerItems) {
+                _layerItems.add(itemDraft.toDomain())
+            }
+            val plan = CompiledLayerPlan.compile(_layerItems.toList())
+            PreviewRenderer.setLayerPlan(plan)
+            val audioOverlays = _layerItems.filter { it.type == LayerType.AUDIO || (it.type == LayerType.VIDEO && it.volume > 0.001f) }
+            ClipAudioContributor.syncAudioOverlays(audioOverlays)
+            for (item in audioOverlays) {
+                if (item.mediaPath.isNotEmpty()) {
+                    ClipAudioContributor.prewarmAudioPath(item.mediaPath)
+                }
+            }
+
             _uiState.update {
                 it.copy(
                     project = loaded,
                     currentMs = 0L,
                     canUndo = undoStack.canUndo,
-                    canRedo = undoStack.canRedo
+                    canRedo = undoStack.canRedo,
+                    isMainTrackMuted = draft.isMainTrackMuted,
+                    coverTimeUs = draft.coverTimeUs,
+                    customCoverPath = draft.customCoverPath,
+                    aspectRatioMode = restoredAspectMode,
+                    canvasBgMode = draft.canvasBgMode,
+                    canvasBlurLevel = draft.canvasBlurLevel,
+                    canvasColorArgb = draft.canvasColorArgb,
+                    canvasGradientId = draft.canvasGradientId
                 )
             }
             previewEngine?.let { engine ->
@@ -3542,11 +3678,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         // Debounced 500ms auto-save
-        autoSaveJob?.cancel()
-        autoSaveJob = viewModelScope.launch {
-            delay(500L)
-            projectStore.save(newProject)
-        }
+        scheduleAutoSave()
     }
 
     fun onPlayheadUpdate(newMs: Long) {
@@ -3675,6 +3807,22 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openExistingProject() {
+        PreviewRenderer.syncTransforms(clipTransforms)
+        PreviewRenderer.syncColorAdjusts(clipColorAdjusts)
+        PreviewRenderer.syncBackgrounds(clipBackgrounds)
+        PreviewRenderer.syncFilterStates(clipFilterStates)
+        PreviewRenderer.syncJunctionTransitions(junctionTransitionModes)
+        PreviewRenderer.setAspectRatioMode(_uiState.value.aspectRatioMode)
+        val items = _layerItems.toList()
+        val plan = CompiledLayerPlan.compile(items)
+        PreviewRenderer.setLayerPlan(plan)
+        val audioOverlays = items.filter { it.type == LayerType.AUDIO || (it.type == LayerType.VIDEO && it.volume > 0.001f) }
+        ClipAudioContributor.syncAudioOverlays(audioOverlays)
+        for (item in audioOverlays) {
+            if (item.mediaPath.isNotEmpty()) {
+                ClipAudioContributor.prewarmAudioPath(item.mediaPath)
+            }
+        }
         _uiState.update { it.copy(currentScreen = AppScreen.EDITOR) }
         previewEngine?.seekTo(_uiState.value.currentMs)
     }
@@ -3696,23 +3844,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             undoTransforms.clear()
             redoTransforms.clear()
             clipTransforms.clear()
-            PreviewRenderer.clipTransforms.clear()
             undoColorAdjusts.clear()
             redoColorAdjusts.clear()
             clipColorAdjusts.clear()
-            PreviewRenderer.clipColorAdjusts.clear()
             undoBackgrounds.clear()
             redoBackgrounds.clear()
             clipBackgrounds.clear()
-            PreviewRenderer.clipBackgrounds.clear()
             undoFilterStates.clear()
             redoFilterStates.clear()
             clipFilterStates.clear()
-            PreviewRenderer.clipFilterStates.clear()
             undoLayerItems.clear()
             redoLayerItems.clear()
             _layerItems.clear()
-            PreviewRenderer.clearOverlayTextures()
+            undoAspectRatios.clear()
+            redoAspectRatios.clear()
+            preSheetAspectRatioMode = AspectRatioMode.RATIO_9_16
+            junctionTransitionModes.clear()
+            preSheetTransitions = null
+            preSheetJunctionModes = null
+            PreviewRenderer.resetAll()
             syncLayerPlan()
             _uiState.update {
                 it.copy(
@@ -3722,6 +3872,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     selectedJunctionIndex = null,
                     selectedOverlayId = null,
                     isMainTrackMuted = false,
+                    coverTimeUs = 0L,
+                    customCoverPath = null,
+                    aspectRatioMode = AspectRatioMode.RATIO_9_16,
+                    canvasBgMode = 0,
+                    canvasBlurLevel = 0.5f,
+                    canvasColorArgb = 0xFF000000.toInt(),
+                    canvasGradientId = -1,
                     canUndo = false,
                     canRedo = false
                 )

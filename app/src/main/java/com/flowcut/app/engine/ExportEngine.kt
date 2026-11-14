@@ -226,6 +226,7 @@ class ExportEngine(private val context: Context) {
         var muxerStarted = false
         var muxerReleased = false
 
+        val prevCanvasAspect = PreviewRenderer.canvasAspectRatio
         try {
             val mux = MediaMuxer(tempFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             muxer = mux
@@ -676,9 +677,17 @@ class ExportEngine(private val context: Context) {
                     PreviewRenderer.packAdjust(ClipColorAdjust.DEFAULT, adjB0, adjB1, adjB2)
                 }
 
+                val jt = if (isTransition) PreviewRenderer.getJunctionTransitionType(res.clipAIndex) else 0
+                val glTransType = if (jt > 0) jt else when (res.transitionType) {
+                    TransitionType.SLIDE -> 4
+                    TransitionType.CIRCLE -> 8
+                    TransitionType.ZOOM -> 6
+                    TransitionType.FADE -> 1
+                    else -> 0
+                }
                 drawSpec.type = res.transitionType
                 drawSpec.swapTextures = false
-                drawSpec.transitionType = if (isTransition) PreviewRenderer.getJunctionTransitionType(res.clipAIndex) else 0
+                drawSpec.transitionType = glTransType
                 drawSpec.easedP = res.easedP
                 drawSpec.matA = matA
                 drawSpec.matB = matB
@@ -892,6 +901,10 @@ class ExportEngine(private val context: Context) {
             }
 
         } finally {
+            try {
+                PreviewRenderer.setCanvasAspectRatio(prevCanvasAspect)
+                TransitionRenderer.canvasAspect = prevCanvasAspect
+            } catch (_: Exception) {}
             audioContributor.release()
             frameSourceA?.release()
             frameSourceB?.release()
