@@ -24,6 +24,8 @@ import android.provider.MediaStore
 import android.util.Log
 import com.flowcut.app.BuildConfig
 import com.flowcut.app.audio.ClipAudioContributor
+import com.flowcut.app.engine.export.ExportFrameTimeoutException
+import com.flowcut.app.engine.export.FrameGate
 import com.flowcut.app.core.model.map
 import com.flowcut.app.core.timeline.ActiveSet
 import com.flowcut.app.core.timeline.SnapshotHolder
@@ -63,9 +65,20 @@ data class ExportFrameResolution(
     val easedP: Float
 )
 
+data class ExportStats(
+    val totalFrames: Int = 0,
+    val timeoutsA: Int = 0,
+    val timeoutsB: Int = 0,
+    val duplicatesA: Int = 0,
+    val duplicatesB: Int = 0,
+    val elapsedMs: Long = 0L,
+    val avgFps: Double = 0.0
+)
+
 class ExportEngine(private val context: Context) {
 
     private val isCancelled = AtomicBoolean(false)
+    var lastStats: ExportStats? = null
 
     fun cancel() {
         isCancelled.set(true)
@@ -330,28 +343,19 @@ class ExportEngine(private val context: Context) {
             overlayTextureCache = otc
             val animEvaluator = AnimatedTransformEvaluator()
 
-            val frameSyncObjectA = java.lang.Object()
-            var frameAvailableA = false
-
-            val frameSyncObjectB = java.lang.Object()
-            var frameAvailableB = false
+            val gateA = FrameGate()
+            val gateB = FrameGate()
 
             val stA = SurfaceTexture(rnd.textureIdA()).apply {
                 setDefaultBufferSize(width, height)
                 setOnFrameAvailableListener {
-                    synchronized(frameSyncObjectA) {
-                        frameAvailableA = true
-                        frameSyncObjectA.notifyAll()
-                    }
+                    gateA.signal()
                 }
             }
             val stB = SurfaceTexture(rnd.textureIdB()).apply {
                 setDefaultBufferSize(width, height)
                 setOnFrameAvailableListener {
-                    synchronized(frameSyncObjectB) {
-                        frameAvailableB = true
-                        frameSyncObjectB.notifyAll()
-                    }
+                    gateB.signal()
                 }
             }
             surfaceTextureA = stA
@@ -571,6 +575,7 @@ class ExportEngine(private val context: Context) {
                 val clipA = snapshot.project.clips[res.clipAIndex]
                 val legacyClipA = PreviewRenderer.toLegacyClip(clipA)
 
+                gateA.arm()
                 val renderedA: Boolean
                 if (currentAIndex != res.clipAIndex || frameSourceA == null) {
                     frameSourceA?.release()
@@ -578,40 +583,32 @@ class ExportEngine(private val context: Context) {
                         prepare()
                     }
                     currentAIndex = res.clipAIndex
-                    renderedA = frameSourceA!!.seekTo(res.sourceUsA, fastKeyframeOnly = false)
+                    renderedA = frameSourceA!!.seekTo(res.sourceUsA, fastKeyframeOnly = false, isExport = true)
                 } else {
                     renderedA = frameSourceA!!.frameAtExport(res.sourceUsA)
                 }
 
                 if (renderedA) {
-                    var timedOutA = false
-                    synchronized(frameSyncObjectA) {
-                        var waits = 0
-                        while (!frameAvailableA && waits < 10) {
-                            waits++
-                            try {
-                                frameSyncObjectA.wait(25L)
-                            } catch (_: InterruptedException) {
-                                break
-                            }
-                        }
-                        if (!frameAvailableA) {
-                            timedOutA = true
-                        }
-                        frameAvailableA = false
-                    }
-                    if (timedOutA) {
+                    var ok = gateA.await(1500L)
+                    if (!ok) {
                         timeoutsA++
-                        duplicatesA++
+                        ok = gateA.await(1500L)
+                    }
+                    if (!ok) {
+                        throw ExportFrameTimeoutException(i)
+                    }
+                    try {
+                        stA.updateTexImage()
+                        stA.getTransformMatrix(rawMatA)
+                    } catch (e: Throwable) {
+                        throw IllegalStateException("Failed to updateTexImage for Slot A at export frame $i: ${e.message}", e)
                     }
                 } else {
+                    if (frameSourceA?.currentPtsUs == -1L) {
+                        throw IllegalStateException("FrameSource A has no latched frame for export at frame $i (targetUs=${res.sourceUsA})")
+                    }
                     duplicatesA++
                 }
-
-                try {
-                    stA.updateTexImage()
-                    stA.getTransformMatrix(rawMatA)
-                } catch (_: Exception) {}
 
                 val aScreen = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
                 val transformA = PreviewRenderer.getClipTransform(clipA.id)
@@ -642,6 +639,7 @@ class ExportEngine(private val context: Context) {
                 if (isTransition) {
                     val clipB = snapshot.project.clips[res.clipBIndex]
                     val legacyClipB = PreviewRenderer.toLegacyClip(clipB)
+                    gateB.arm()
                     val renderedB: Boolean
                     if (currentBIndex != res.clipBIndex || frameSourceB == null) {
                         frameSourceB?.release()
@@ -655,34 +653,26 @@ class ExportEngine(private val context: Context) {
                     }
 
                     if (renderedB) {
-                        var timedOutB = false
-                        synchronized(frameSyncObjectB) {
-                            var waits = 0
-                            while (!frameAvailableB && waits < 10) {
-                                waits++
-                                try {
-                                    frameSyncObjectB.wait(25L)
-                                } catch (_: InterruptedException) {
-                                    break
-                                }
-                            }
-                            if (!frameAvailableB) {
-                                timedOutB = true
-                            }
-                            frameAvailableB = false
-                        }
-                        if (timedOutB) {
+                        var ok = gateB.await(1500L)
+                        if (!ok) {
                             timeoutsB++
-                            duplicatesB++
+                            ok = gateB.await(1500L)
+                        }
+                        if (!ok) {
+                            throw ExportFrameTimeoutException(i)
+                        }
+                        try {
+                            stB.updateTexImage()
+                            stB.getTransformMatrix(rawMatB)
+                        } catch (e: Throwable) {
+                            throw IllegalStateException("Failed to updateTexImage for Slot B at export frame $i: ${e.message}", e)
                         }
                     } else {
+                        if (frameSourceB?.currentPtsUs == -1L) {
+                            throw IllegalStateException("FrameSource B has no latched frame for export at frame $i (targetUs=${res.sourceUsB})")
+                        }
                         duplicatesB++
                     }
-
-                    try {
-                        stB.updateTexImage()
-                        stB.getTransformMatrix(rawMatB)
-                    } catch (_: Exception) {}
 
                     val transformB = PreviewRenderer.getClipTransform(clipB.id)
                     opacityB = transformB.opacity
@@ -897,10 +887,21 @@ class ExportEngine(private val context: Context) {
             mux.release()
             muxerReleased = true
 
+            val elapsedMs = SystemClock.uptimeMillis() - exportStartTimeMs
+            val avgFps = if (elapsedMs > 0) (totalFrames.toDouble() * 1000.0) / elapsedMs else 0.0
+            val stats = ExportStats(
+                totalFrames = totalFrames,
+                timeoutsA = timeoutsA,
+                timeoutsB = timeoutsB,
+                duplicatesA = duplicatesA,
+                duplicatesB = duplicatesB,
+                elapsedMs = elapsedMs,
+                avgFps = avgFps
+            )
+            lastStats = stats
+
             if (BuildConfig.DEBUG) {
                 try {
-                    val elapsedMs = SystemClock.uptimeMillis() - exportStartTimeMs
-                    val avgFps = if (elapsedMs > 0) (totalFrames.toDouble() * 1000.0) / elapsedMs else 0.0
                     Log.d(
                         "EXPORTSTAT",
                         "Export completed: totalFrames=$totalFrames, timeoutsA=$timeoutsA, timeoutsB=$timeoutsB, duplicatesA=$duplicatesA, duplicatesB=$duplicatesB, elapsedMs=${elapsedMs}ms, avgFps=${String.format(Locale.US, "%.2f", avgFps)}"

@@ -31,7 +31,8 @@ class FrameSource(
     private var isPrepared = false
     private var inputEos = false
     private var outputEos = false
-    private var currentPtsUs: Long = -1L
+    var currentPtsUs: Long = -1L
+        private set
     private var currentMime: String = ""
     private var lastSeekTargetUs: Long = -1L
     private var lastKeyframePtsUs: Long = -1L

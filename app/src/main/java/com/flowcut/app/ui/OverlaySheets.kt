@@ -5285,20 +5285,6 @@ fun ExportScreen(
         }
     }
 
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
-                if (uiState.exportState is ExportState.Exporting) {
-                    onCancelExport("Export cancelled because app went to background")
-                }
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
 
     BackHandler(enabled = true) {
         handleBackOrCancel()

@@ -25,6 +25,8 @@ import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.ClipTransform
 import com.flowcut.app.engine.CompiledLayerPlan
 import com.flowcut.app.engine.ExportEngine
+import com.flowcut.app.engine.export.ExportCoordinator
+import com.flowcut.app.engine.export.ExportRequest
 import com.flowcut.app.engine.LayerTrackGroup
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
@@ -3565,6 +3567,39 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         loadInitialProject()
+        viewModelScope.launch {
+            ExportCoordinator.state.collect { state ->
+                when (state) {
+                    is ExportState.Exporting -> {
+                        _uiState.update {
+                            it.copy(
+                                exportState = state,
+                                currentScreen = if (it.currentScreen == AppScreen.HOME) it.currentScreen else AppScreen.EXPORT
+                            )
+                        }
+                    }
+                    is ExportState.Done -> {
+                        _uiState.update {
+                            it.copy(
+                                exportState = ExportState.Done,
+                                exportedUri = ExportCoordinator.exportedUri
+                            )
+                        }
+                    }
+                    is ExportState.Failed -> {
+                        _uiState.update {
+                            it.copy(
+                                exportState = ExportState.Failed,
+                                exportErrorMessage = ExportCoordinator.errorMessage ?: "Export failed. Please try again."
+                            )
+                        }
+                    }
+                    is ExportState.Ready -> {
+                        // Idle state
+                    }
+                }
+            }
+        }
     }
 
     fun initPreviewEngine(engine: PreviewEngine) {
@@ -4606,7 +4641,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         fps: Int = _uiState.value.exportFps,
         bitrateBps: Int = _uiState.value.exportBitrateBps
     ) {
-        exportJob?.cancel()
         pause()
         _uiState.update {
             it.copy(
@@ -4636,42 +4670,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val outWidth = rawWidth and 1.inv()
         val outHeight = rawHeight and 1.inv()
 
-        exportJob = viewModelScope.launch {
-            try {
-                val uri = exportEngine.export(
-                    snapshot = snapshot,
-                    width = outWidth,
-                    height = outHeight,
-                    fps = fps,
-                    bitrateBps = bitrateBps
-                ) { progress ->
-                    _uiState.update { it.copy(exportState = ExportState.Exporting(progress)) }
-                }
-                _uiState.update {
-                    it.copy(
-                        exportState = ExportState.Done,
-                        exportedUri = uri
-                    )
-                }
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) {
-                    val msg = _uiState.value.exportErrorMessage ?: "Export cancelled by user"
-                    _uiState.update {
-                        it.copy(
-                            exportState = ExportState.Failed,
-                            exportErrorMessage = msg
-                        )
-                    }
-                } else {
-                    _uiState.update {
-                        it.copy(
-                            exportState = ExportState.Failed,
-                            exportErrorMessage = e.message ?: "Export failed. Please try again."
-                        )
-                    }
-                }
-            }
-        }
+        val request = ExportRequest(
+            snapshot = snapshot,
+            width = outWidth,
+            height = outHeight,
+            fps = fps,
+            bitrateBps = bitrateBps
+        )
+        ExportCoordinator.start(getApplication(), request)
     }
 
     fun startExport() {
@@ -4688,8 +4694,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cancelExport(reason: String = "Export cancelled by user") {
-        exportEngine.cancel()
-        exportJob?.cancel()
+        ExportCoordinator.cancel(reason)
         _uiState.update {
             it.copy(
                 exportState = ExportState.Failed,
@@ -4702,6 +4707,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (_uiState.value.exportState is ExportState.Exporting) {
             cancelExport("Export cancelled by user")
         }
+        PreviewRenderer.resumeActiveDecoders()
         _uiState.update {
             it.copy(
                 currentScreen = AppScreen.EDITOR,
@@ -4714,16 +4720,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onAppBackground() {
         previewEngine?.onPause()
-        if (_uiState.value.exportState is ExportState.Exporting) {
-            cancelExport("Export cancelled because app went to background")
-            showToast("Export cancelled because app went to background")
-        }
     }
 
     fun onAppStop() {
-        if (_uiState.value.exportState is ExportState.Exporting) {
-            cancelExport("Export cancelled because app went to background")
-        }
     }
 
     fun onAppResume() {

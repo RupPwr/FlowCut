@@ -368,6 +368,13 @@ class PreviewRenderer(
     private var viewportHeight: Int = PREVIEW_H
 
     @Volatile
+    var isSuspendedForExport: Boolean = false
+
+    init {
+        activeInstance = this
+    }
+
+    @Volatile
     private var _canvasAspectRatio: Float = 9f / 16f
     val canvasAspectRatio: Float get() = _canvasAspectRatio
 
@@ -658,6 +665,12 @@ class PreviewRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        if (isSuspendedForExport) {
+            GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
+            GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+            return
+        }
         val startNs = System.nanoTime()
         val wasWaitingInitial = isWaitingForFrame
         try {
@@ -1723,7 +1736,28 @@ class PreviewRenderer(
         Matrix.setIdentityM(rawMatB, 0)
     }
 
+    fun suspendForExport() {
+        isSuspendedForExport = true
+        val gl = glSurfaceView
+        if (gl != null) {
+            gl.queueEvent {
+                releaseDecoders()
+            }
+        } else {
+            releaseDecoders()
+        }
+    }
+
+    fun resumeFromExport() {
+        isSuspendedForExport = false
+        onRenderRequested?.invoke()
+        glSurfaceView?.requestRender()
+    }
+
     fun release() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         trimPreviewTimeUs = -1L
         stopPrefetch()
         releaseDecoders()
@@ -1752,6 +1786,17 @@ class PreviewRenderer(
     }
 
     companion object {
+        @Volatile
+        var activeInstance: PreviewRenderer? = null
+
+        fun releaseActiveDecoders() {
+            activeInstance?.suspendForExport()
+        }
+
+        fun resumeActiveDecoders() {
+            activeInstance?.resumeFromExport()
+        }
+
         @Volatile
         private var _canvasAspectRatio: Float = 9f / 16f
         val canvasAspectRatio: Float get() = _canvasAspectRatio

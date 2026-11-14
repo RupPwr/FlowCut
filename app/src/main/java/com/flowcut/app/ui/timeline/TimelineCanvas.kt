@@ -74,6 +74,7 @@ import com.flowcut.app.engine.LayerTrackGroup
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.trackGroup
 import com.flowcut.app.engine.OverlayItem
+import com.flowcut.app.ui.media.PipThumbLoader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -251,65 +252,6 @@ private fun buildStackedCapPath(
     path.close()
 }
 
-/**
- * In-memory CPU thumbnail cache for 64x64 PIP overlays (zero allocations in onDraw, Rule R10).
- */
-private object PipThumbnailCache {
-    private val cache = object : android.util.LruCache<String, ImageBitmap>(32) {}
-
-    fun get(path: String): ImageBitmap? {
-        if (path.isEmpty()) return null
-        val cached = cache.get(path)
-        if (cached != null) return cached
-        try {
-            val file = java.io.File(path)
-            if (!file.exists()) return null
-            val isVideo = path.endsWith(".mp4", ignoreCase = true) ||
-                    path.endsWith(".mkv", ignoreCase = true) ||
-                    path.endsWith(".mov", ignoreCase = true) ||
-                    path.contains("overlay_vid_")
-            val bmp: android.graphics.Bitmap? = if (isVideo) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    try {
-                        android.media.ThumbnailUtils.createVideoThumbnail(
-                            file,
-                            android.util.Size(64, 64),
-                            null
-                        )
-                    } catch (_: Exception) {
-                        null
-                    }
-                } else {
-                    @Suppress("DEPRECATION")
-                    android.media.ThumbnailUtils.createVideoThumbnail(
-                        path,
-                        android.provider.MediaStore.Video.Thumbnails.MICRO_KIND
-                    )
-                }
-            } else {
-                val opts = android.graphics.BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                android.graphics.BitmapFactory.decodeFile(path, opts)
-                var sample = 1
-                while (opts.outWidth / (sample * 2) >= 64 && opts.outHeight / (sample * 2) >= 64) {
-                    sample *= 2
-                }
-                opts.inJustDecodeBounds = false
-                opts.inSampleSize = sample
-                android.graphics.BitmapFactory.decodeFile(path, opts)
-            }
-            if (bmp != null) {
-                val imageBmp = bmp.asImageBitmap()
-                cache.put(path, imageBmp)
-                return imageBmp
-            }
-        } catch (_: Exception) {
-            // Ignore decoding failure
-        }
-        return null
-    }
-}
 
 /**
  * Safely renders text on Canvas with softWrap and maxLines support (Bug 5).
@@ -635,64 +577,18 @@ fun TimelineCanvas(
 
     val activeTrimPlayheadUs = remember { mutableLongStateOf(Long.MIN_VALUE) }
 
-    // Asynchronous Filmstrip Thumbnail Cache for PIP Rows (Requirement 1 & Rule R10)
+    // Asynchronous Filmstrip Thumbnail Cache for PIP Rows (Task T1.4 & Rule R10)
     val pipMediaPaths = remember(overlayItems) {
         overlayItems.filter { it.type == LayerType.IMAGE || it.type == LayerType.VIDEO }
             .map { it.mediaPath }
             .filter { it.isNotEmpty() }
             .distinct()
     }
-    val pipThumbnails = remember { mutableStateMapOf<String, ImageBitmap>() }
+    val pipThumbLoader = remember(coroutineScope) { PipThumbLoader(coroutineScope, maxEntries = 256) }
 
     LaunchedEffect(pipMediaPaths) {
-        withContext(Dispatchers.IO) {
-            for (path in pipMediaPaths) {
-                if (!pipThumbnails.containsKey(path)) {
-                    try {
-                        val file = java.io.File(path)
-                        if (file.exists()) {
-                            val isVideo = path.endsWith(".mp4", ignoreCase = true) ||
-                                    path.endsWith(".mkv", ignoreCase = true) ||
-                                    path.endsWith(".mov", ignoreCase = true) ||
-                                    path.contains("overlay_vid_")
-                            val bmp: android.graphics.Bitmap? = if (isVideo) {
-                                val retriever = android.media.MediaMetadataRetriever()
-                                try {
-                                    retriever.setDataSource(path)
-                                    val raw = retriever.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                                    if (raw != null) {
-                                        val scaled = android.graphics.Bitmap.createScaledBitmap(raw, 56, 56, true)
-                                        if (scaled != raw) raw.recycle()
-                                        scaled
-                                    } else null
-                                } catch (_: Exception) {
-                                    null
-                                } finally {
-                                    try { retriever.release() } catch (_: Exception) {}
-                                }
-                            } else {
-                                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                android.graphics.BitmapFactory.decodeFile(path, opts)
-                                var sample = 1
-                                while (opts.outWidth / (sample * 2) >= 56 && opts.outHeight / (sample * 2) >= 56) {
-                                    sample *= 2
-                                }
-                                opts.inJustDecodeBounds = false
-                                opts.inSampleSize = sample
-                                val raw = android.graphics.BitmapFactory.decodeFile(path, opts)
-                                if (raw != null) {
-                                    val scaled = android.graphics.Bitmap.createScaledBitmap(raw, 56, 56, true)
-                                    if (scaled != raw) raw.recycle()
-                                    scaled
-                                } else null
-                            }
-                            if (bmp != null) {
-                                pipThumbnails[path] = bmp.asImageBitmap()
-                            }
-                        }
-                    } catch (_: Exception) {}
-                }
-            }
+        pipThumbLoader.ensure(pipMediaPaths) {
+            currentOnWakeFrameDriver()
         }
     }
 
@@ -2365,7 +2261,7 @@ fun TimelineCanvas(
                     clipPath(path = pipLaneCardPath) {
                         drawPath(path = pipLaneCardPath, color = colorPipExpandedBg)
 
-                        val thumb = pipThumbnails[item.mediaPath] ?: if (item.mediaPath.isNotEmpty()) PipThumbnailCache.get(item.mediaPath) else null
+                        val thumb = if (item.mediaPath.isNotEmpty()) pipThumbLoader.peek(item.mediaPath) else null
                         val cellWidthPx = pipTileWidthPx
                         if (thumb != null) {
                             var tileX = sX
