@@ -345,12 +345,13 @@ fun EditorScreen(
         PreviewRenderer(
             holder = snapshotHolder,
             playhead = playbackController.playhead,
-            context = context,
+            context = context
+        ).apply {
             onRenderRequested = {
                 stateDirtyCounter.incrementAndGet()
+                this.glSurfaceView?.requestRender()
             }
-        ).apply {
-            (glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
+            (this.glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
         }
     }
 
@@ -391,12 +392,13 @@ fun EditorScreen(
                     onPlaybackStateChangeState.value.invoke(false)
                 }
 
-                // 3. Skip redundant renders when paused
+                // 3. Skip redundant renders when paused, but never drop renders while waiting for a frame
                 val currentDirtyVersion = stateDirtyCounter.get()
                 val isDirty = currentDirtyVersion != lastRenderDirtyVersion
                 val shouldRender = (mode != PlayMode.PAUSED) ||
                         (tUs != lastRequestedTimeUs) ||
                         (mode != lastRequestedMode) ||
+                        previewRenderer.isWaitingForFrame ||
                         isDirty
 
                 if (shouldRender) {
@@ -956,10 +958,19 @@ fun EditorScreen(
 
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var isWaitingForFrameState by remember { mutableStateOf(previewRenderer.isWaitingForFrame) }
+    var showPreviewLoader by remember { mutableStateOf(false) }
+
     DisposableEffect(previewRenderer) {
         previewRenderer.onWaitingForFrameChanged = { waiting ->
             mainHandler.post {
                 isWaitingForFrameState = waiting
+                if (!waiting) {
+                    val busy = (resolvedViewModel?.uiState?.value?.isImporting == true) ||
+                               (resolvedViewModel?.uiState?.value?.isProcessingEdit == true)
+                    if (!busy) {
+                        showPreviewLoader = false
+                    }
+                }
             }
         }
         onDispose {
@@ -967,21 +978,35 @@ fun EditorScreen(
         }
     }
 
-    var showPreviewLoader by remember { mutableStateOf(false) }
     val isImporting = vmUiState?.isImporting == true
     val isProcessingEdit = vmUiState?.isProcessingEdit == true
     val isBusy = isWaitingForFrameState || previewRenderer.isWaitingForFrame || isImporting || isProcessingEdit
 
-    LaunchedEffect(isBusy) {
-        if (isBusy) {
-            kotlinx.coroutines.delay(80L)
-            if (isWaitingForFrameState || previewRenderer.isWaitingForFrame || vmUiState?.isImporting == true || vmUiState?.isProcessingEdit == true) {
-                showPreviewLoader = true
-                while (previewRenderer.isWaitingForFrame || vmUiState?.isImporting == true || vmUiState?.isProcessingEdit == true) {
-                    kotlinx.coroutines.delay(30L)
+    LaunchedEffect(isBusy, showPreviewLoader) {
+        if (isBusy || showPreviewLoader) {
+            var elapsedMs = 0L
+            while (isActive) {
+                val currentImporting = resolvedViewModel?.uiState?.value?.isImporting == true
+                val currentProcessing = resolvedViewModel?.uiState?.value?.isProcessingEdit == true
+                val currentWaiting = previewRenderer.isWaitingForFrame || isWaitingForFrameState
+                val currentlyBusy = currentWaiting || currentImporting || currentProcessing
+
+                if (!currentlyBusy) {
+                    showPreviewLoader = false
+                    isWaitingForFrameState = false
+                    break
                 }
-                showPreviewLoader = false
-                isWaitingForFrameState = false
+
+                if (elapsedMs >= 60L && !showPreviewLoader) {
+                    showPreviewLoader = true
+                }
+
+                if (previewRenderer.isWaitingForFrame) {
+                    previewRenderer.glSurfaceView?.requestRender()
+                }
+
+                delay(16L)
+                elapsedMs += 16L
             }
         } else {
             showPreviewLoader = false

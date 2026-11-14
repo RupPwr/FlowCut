@@ -279,7 +279,7 @@ class PreviewRenderer(
     val holder: SnapshotHolder = SnapshotHolder(),
     val playhead: PlayheadReader = DefaultPlayheadReader(),
     val context: Context? = null,
-    val onRenderRequested: (() -> Unit)? = null,
+    var onRenderRequested: (() -> Unit)? = null,
     val onVideoDecoderPrefetch: ((clipIndex: Int, sourceUs: Long) -> Unit)? = null
 ) : GLSurfaceView.Renderer {
 
@@ -302,9 +302,13 @@ class PreviewRenderer(
     @Volatile
     var isWaitingForFrame: Boolean = false
         set(value) {
+            val wasWaiting = field
             if (field != value) {
                 field = value
                 onWaitingForFrameChanged?.invoke(value)
+                if (wasWaiting && !value) {
+                    onRenderRequested?.invoke()
+                }
             }
         }
 
@@ -639,6 +643,7 @@ class PreviewRenderer(
 
     override fun onDrawFrame(gl: GL10?) {
         val startNs = System.nanoTime()
+        val wasWaitingInitial = isWaitingForFrame
         try {
             val s = holder.current
             val clips = s.project.clips
@@ -946,7 +951,16 @@ class PreviewRenderer(
                     renderOverlays(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
-            val isCatchingUp = if (isTransition) {
+            val hasValidFrameNear = if (isTransition) {
+                (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
+                        (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
+            }
+            val isCatchingUp = if (hasValidFrameNear) {
+                false
+            } else if (isTransition) {
                 !isFirstFrameLatched ||
                     (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
                     (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
@@ -1228,7 +1242,16 @@ class PreviewRenderer(
             renderOverlays(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
-            val isCatchingUp = if (isTransition) {
+            val hasValidFrameNear = if (isTransition) {
+                (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
+                        (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
+            }
+            val isCatchingUp = if (hasValidFrameNear) {
+                false
+            } else if (isTransition) {
                 !isFirstFrameLatched ||
                     (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
                     (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
@@ -1448,7 +1471,16 @@ class PreviewRenderer(
             renderOverlays(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
-            val isCatchingUp = if (isTransition) {
+            val hasValidFrameNear = if (isTransition) {
+                (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
+                        (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
+            }
+            val isCatchingUp = if (hasValidFrameNear) {
+                false
+            } else if (isTransition) {
                 !isFirstFrameLatched ||
                     (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
                     (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
@@ -1466,6 +1498,14 @@ class PreviewRenderer(
             }
         }
         } finally {
+            val finalWaiting = isWaitingForFrame
+            if (wasWaitingInitial && !finalWaiting) {
+                onRenderRequested?.invoke()
+            } else if (finalWaiting) {
+                onRenderRequested?.invoke()
+                glSurfaceView?.requestRender()
+            }
+
             val durationUs = (System.nanoTime() - startNs) / 1000L
             frameTimeSumUs += durationUs
             if (durationUs > frameTimeMaxUs) {
