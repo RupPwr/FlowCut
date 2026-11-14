@@ -47,6 +47,7 @@ import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.engine.TransitionRenderer
 import com.flowcut.app.model.MAX_CLIPS
 import com.flowcut.app.ui.EditorScreen
+import com.flowcut.app.engine.perf.SessionGuard
 import com.flowcut.app.ui.ExportState
 import com.flowcut.app.ui.FlowCutTheme
 import com.flowcut.app.ui.HomeScreen
@@ -59,6 +60,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SessionGuard(this).recordCrashIfAny()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)

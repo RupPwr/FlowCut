@@ -118,6 +118,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -129,6 +130,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.flowcut.app.engine.export.Aspect
+import com.flowcut.app.engine.export.BitrateTable
+import com.flowcut.app.engine.export.ExportBenchmark
+import com.flowcut.app.engine.export.ExportCapabilities
+import com.flowcut.app.engine.export.ExportCoordinator
+import com.flowcut.app.engine.export.ExportEstimator
+import com.flowcut.app.engine.export.OutCodec
+import com.flowcut.app.engine.export.OutputSpec
+import com.flowcut.app.engine.export.Quality
+import com.flowcut.app.engine.perf.SessionGuard
 import java.io.File
 import java.util.Locale
 
@@ -4958,11 +4969,17 @@ fun ExportConfigSheet(
     onStartExport: (resolution: Int, fps: Int, bitrateBps: Int) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    val capabilities = remember { ExportCapabilities() }
+    val sessionGuard = remember(context) { SessionGuard(context) }
+
     val resolutionOptions = remember {
         listOf(
             480 to "480p",
             720 to "720p (HD)",
-            1080 to "1080p (FHD)"
+            1080 to "1080p (FHD)",
+            1440 to "1440p (2K)",
+            2160 to "2160p (4K)"
         )
     }
     val initialResIndex = remember(initialResolution) {
@@ -4970,9 +4987,9 @@ fun ExportConfigSheet(
         if (idx >= 0) idx else 2 // default 1080p
     }
     var resolutionIndex by remember { mutableFloatStateOf(initialResIndex.toFloat()) }
-
-    val currentResolution = resolutionOptions[resolutionIndex.roundToInt().coerceIn(0, 2)].first
-    val currentResolutionLabel = resolutionOptions[resolutionIndex.roundToInt().coerceIn(0, 2)].second
+    val currentResPair = resolutionOptions[resolutionIndex.roundToInt().coerceIn(0, 4)]
+    val currentResolution = currentResPair.first
+    val currentResolutionLabel = currentResPair.second
 
     val fpsOptions = remember { listOf(24, 25, 30, 50, 60) }
     val initialFpsIndex = remember(initialFps) {
@@ -4982,16 +4999,81 @@ fun ExportConfigSheet(
     var fpsIndex by remember { mutableFloatStateOf(initialFpsIndex.toFloat()) }
     val currentFps = fpsOptions[fpsIndex.roundToInt().coerceIn(0, 4)]
 
-    val initialBitrateMbps = remember(initialBitrateBps, initialResolution, initialFps) {
-        val bps = initialBitrateBps?.takeIf { it > 0 }
-            ?: EditorViewModel.calculateRecommendedBitrateBps(currentResolution, currentFps)
-        (bps / 1_000_000f).coerceIn(2.0f, 30.0f)
+    val qualityOptions = remember {
+        listOf(
+            Quality.LOW to "Low",
+            Quality.MEDIUM to "Medium",
+            Quality.HIGH to "High",
+            Quality.ULTRA to "Ultra",
+            Quality.EXTREME to "Extreme"
+        )
     }
-    var bitrateMbps by remember { mutableFloatStateOf(initialBitrateMbps) }
+    val initialQualityIndex = remember(initialBitrateBps, initialResolution, initialFps) {
+        if (initialBitrateBps != null && initialBitrateBps > 0) {
+            val diffs = qualityOptions.mapIndexed { idx, q ->
+                val spec = OutputSpec(Aspect.R9_16, initialResolution, initialFps, q.first, OutCodec.AVC)
+                val s = spec.size()
+                val bps = BitrateTable.videoBps(s.w, s.h, spec.fps, spec.quality, spec.codec)
+                idx to kotlin.math.abs(bps - initialBitrateBps)
+            }
+            diffs.minByOrNull { it.second }?.first ?: 2
+        } else {
+            2 // default High
+        }
+    }
+    var qualityIndex by remember { mutableFloatStateOf(initialQualityIndex.toFloat()) }
+    val currentQualityPair = qualityOptions[qualityIndex.roundToInt().coerceIn(0, 4)]
+    val currentQuality = currentQualityPair.first
+    val currentQualityLabel = currentQualityPair.second
 
-    val targetBitrateBps = (bitrateMbps * 1_000_000f).roundToInt().coerceIn(2_000_000, 30_000_000)
-    val approxSizeMb = (targetBitrateBps.toDouble() * (totalDurationMs / 1000.0)) / (8.0 * 1_000_000.0)
-    val formattedDuration = String.format(Locale.US, "%02d:%02d", totalDurationMs / 60000L, (totalDurationMs % 60000L) / 1000L)
+    val candidateSpec = remember(currentResolution, currentFps, currentQuality) {
+        OutputSpec(Aspect.R9_16, currentResolution, currentFps, currentQuality, OutCodec.AVC)
+    }
+    val targetBitrateBps = remember(candidateSpec) {
+        val s = candidateSpec.size()
+        BitrateTable.videoBps(s.w, s.h, candidateSpec.fps, candidateSpec.quality, candidateSpec.codec)
+    }
+    val bitrateMbps = targetBitrateBps / 1_000_000f
+
+    val isCrashExcluded = remember(candidateSpec) {
+        sessionGuard.isExcluded(candidateSpec.key())
+    }
+    val choice = remember(candidateSpec) {
+        capabilities.find(candidateSpec, allowSoftware = true)
+    }
+    val isSupported = choice != null && !isCrashExcluded
+    val unsupportedReason = when {
+        isCrashExcluded -> "Excluded due to crash"
+        choice == null -> if (ExportCapabilities.isHardwareRequired(candidateSpec)) "Hardware unsupported" else "Encoder unsupported"
+        else -> null
+    }
+
+    val estimatedSizeBytes = remember(targetBitrateBps, totalDurationMs) {
+        ExportEstimator.sizeBytes(targetBitrateBps, totalDurationMs)
+    }
+    val approxSizeMb = estimatedSizeBytes.toDouble() / (1024.0 * 1024.0)
+    val formattedDuration = remember(totalDurationMs) {
+        String.format(Locale.US, "%02d:%02d", totalDurationMs / 60000L, (totalDurationMs % 60000L) / 1000L)
+    }
+
+    val measuredFps = remember(candidateSpec, choice) {
+        ExportBenchmark.getCachedFps(candidateSpec)
+            ?: ExportBenchmark.fallbackFps(candidateSpec, choice?.hardware ?: true)
+    }
+    val totalFrames = remember(totalDurationMs, currentFps) {
+        ExportEstimator.totalFrames(totalDurationMs, currentFps)
+    }
+    val etaMs = remember(totalFrames, measuredFps) {
+        ExportEstimator.etaMs(totalFrames, measuredFps)
+    }
+    val formattedEta = remember(etaMs) {
+        if (etaMs > 0L) {
+            val etaSec = (etaMs + 999L) / 1000L
+            if (etaSec >= 60L) "${etaSec / 60L}m ${etaSec % 60L}s" else "${etaSec}s"
+        } else {
+            "--"
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -5037,25 +5119,30 @@ fun ExportConfigSheet(
 
                 Button(
                     onClick = {
-                        onStartExport(currentResolution, currentFps, targetBitrateBps)
+                        if (isSupported) {
+                            onStartExport(currentResolution, currentFps, targetBitrateBps)
+                        }
                     },
+                    enabled = isSupported,
                     modifier = Modifier.height(34.dp),
                     shape = RoundedCornerShape(17.dp),
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = PINK_RED_ACCENT
+                        containerColor = PINK_RED_ACCENT,
+                        disabledContainerColor = PINK_RED_ACCENT.copy(alpha = 0.38f),
+                        disabledContentColor = Color.White.copy(alpha = 0.38f)
                     )
                 ) {
                     Icon(
                         imageVector = Icons.Default.Check,
                         contentDescription = "Export",
-                        tint = Color.White,
+                        tint = if (isSupported) Color.White else Color.White.copy(alpha = 0.38f),
                         modifier = Modifier.size(15.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "Export",
-                        color = Color.White,
+                        color = if (isSupported) Color.White else Color.White.copy(alpha = 0.38f),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -5085,15 +5172,10 @@ fun ExportConfigSheet(
                 Slider(
                     value = resolutionIndex,
                     onValueChange = { newVal ->
-                        val oldRes = currentResolution
                         resolutionIndex = newVal
-                        val newRes = resolutionOptions[newVal.roundToInt().coerceIn(0, 2)].first
-                        if (newRes != oldRes) {
-                            bitrateMbps = (EditorViewModel.calculateRecommendedBitrateBps(newRes, currentFps) / 1_000_000f).coerceIn(2.0f, 30.0f)
-                        }
                     },
-                    valueRange = 0f..2f,
-                    steps = 1,
+                    valueRange = 0f..4f,
+                    steps = 3,
                     modifier = Modifier.fillMaxWidth(),
                     colors = SliderDefaults.colors(
                         thumbColor = PINK_RED_ACCENT,
@@ -5106,10 +5188,19 @@ fun ExportConfigSheet(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     resolutionOptions.forEachIndexed { idx, pair ->
-                        val isSelected = idx == resolutionIndex.roundToInt().coerceIn(0, 2)
+                        val isSelected = idx == resolutionIndex.roundToInt().coerceIn(0, 4)
+                        val testSpec = OutputSpec(Aspect.R9_16, pair.first, currentFps, currentQuality, OutCodec.AVC)
+                        val isOptExcluded = sessionGuard.isExcluded(testSpec.key())
+                        val optChoice = capabilities.find(testSpec, allowSoftware = true)
+                        val isOptSupported = optChoice != null && !isOptExcluded
+
                         Text(
                             text = pair.second,
-                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.4f),
+                            color = when {
+                                isSelected -> Color.White
+                                !isOptSupported -> Color.White.copy(alpha = 0.38f)
+                                else -> Color.White.copy(alpha = 0.6f)
+                            },
                             fontSize = 11.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                         )
@@ -5140,12 +5231,7 @@ fun ExportConfigSheet(
                 Slider(
                     value = fpsIndex,
                     onValueChange = { newVal ->
-                        val oldFps = currentFps
                         fpsIndex = newVal
-                        val newFps = fpsOptions[newVal.roundToInt().coerceIn(0, 4)]
-                        if (newFps != oldFps) {
-                            bitrateMbps = (EditorViewModel.calculateRecommendedBitrateBps(currentResolution, newFps) / 1_000_000f).coerceIn(2.0f, 30.0f)
-                        }
                     },
                     valueRange = 0f..4f,
                     steps = 3,
@@ -5162,9 +5248,18 @@ fun ExportConfigSheet(
                 ) {
                     fpsOptions.forEachIndexed { idx, fpsVal ->
                         val isSelected = idx == fpsIndex.roundToInt().coerceIn(0, 4)
+                        val testSpec = OutputSpec(Aspect.R9_16, currentResolution, fpsVal, currentQuality, OutCodec.AVC)
+                        val isOptExcluded = sessionGuard.isExcluded(testSpec.key())
+                        val optChoice = capabilities.find(testSpec, allowSoftware = true)
+                        val isOptSupported = optChoice != null && !isOptExcluded
+
                         Text(
-                            text = "${fpsVal}",
-                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.4f),
+                            text = "$fpsVal",
+                            color = when {
+                                isSelected -> Color.White
+                                !isOptSupported -> Color.White.copy(alpha = 0.38f)
+                                else -> Color.White.copy(alpha = 0.6f)
+                            },
                             fontSize = 11.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                         )
@@ -5172,7 +5267,7 @@ fun ExportConfigSheet(
                 }
             }
 
-            // Slider 3 — Bitrate (Code Rate / Mbps)
+            // Slider 3 — Quality / Bitrate
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -5180,24 +5275,25 @@ fun ExportConfigSheet(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Bitrate",
+                        text = "Quality",
                         color = Color.White.copy(alpha = 0.7f),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "${String.format(Locale.US, "%.1f", bitrateMbps)} Mbps",
+                        text = "$currentQualityLabel • ${String.format(Locale.US, "%.1f", bitrateMbps)} Mbps",
                         color = PINK_RED_ACCENT,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
                 Slider(
-                    value = bitrateMbps,
+                    value = qualityIndex,
                     onValueChange = { newVal ->
-                        bitrateMbps = newVal
+                        qualityIndex = newVal
                     },
-                    valueRange = 2.0f..30.0f,
+                    valueRange = 0f..4f,
+                    steps = 3,
                     modifier = Modifier.fillMaxWidth(),
                     colors = SliderDefaults.colors(
                         thumbColor = PINK_RED_ACCENT,
@@ -5209,20 +5305,57 @@ fun ExportConfigSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(
-                        text = "2.0 Mbps (Low)",
-                        color = Color.White.copy(alpha = 0.4f),
-                        fontSize = 11.sp
-                    )
-                    Text(
-                        text = "30.0 Mbps (High)",
-                        color = Color.White.copy(alpha = 0.4f),
-                        fontSize = 11.sp
-                    )
+                    qualityOptions.forEachIndexed { idx, qPair ->
+                        val isSelected = idx == qualityIndex.roundToInt().coerceIn(0, 4)
+                        val testSpec = OutputSpec(Aspect.R9_16, currentResolution, currentFps, qPair.first, OutCodec.AVC)
+                        val isOptExcluded = sessionGuard.isExcluded(testSpec.key())
+                        val optChoice = capabilities.find(testSpec, allowSoftware = true)
+                        val isOptSupported = optChoice != null && !isOptExcluded
+
+                        Text(
+                            text = qPair.second,
+                            color = when {
+                                isSelected -> Color.White
+                                !isOptSupported -> Color.White.copy(alpha = 0.38f)
+                                else -> Color.White.copy(alpha = 0.6f)
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
                 }
             }
 
-            // Live Approximate File Size Banner below the 3 sliders
+            // Unsupported or Crash-Excluded Warning Banner
+            if (!isSupported && unsupportedReason != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x33FF453A), RoundedCornerShape(10.dp))
+                        .border(BorderStroke(1.dp, Color(0x66FF453A)), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Warning",
+                            tint = Color(0xFFFF453A),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "$unsupportedReason for ${currentResolution}p @ ${currentFps}fps",
+                            color = Color(0xFFFF8B8B),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            // Live Approximate File Size and ETA Banner below sliders
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -5248,9 +5381,9 @@ fun ExportConfigSheet(
                     }
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Estimated Size: ~${String.format(Locale.US, "%.1f", approxSizeMb)} MB  •  Duration: $formattedDuration",
+                        text = "Estimated Size: ~${String.format(Locale.US, "%.1f", approxSizeMb)} MB  •  Duration: $formattedDuration  •  Est. Time: $formattedEta",
                         color = Color.White.copy(alpha = 0.95f),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -5489,6 +5622,24 @@ fun ExportScreen(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
+                }
+
+                val fallbackNotice = uiState.exportFallbackNotice ?: ExportCoordinator.fallbackNotice
+                if (fallbackNotice != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0x33FFB300), RoundedCornerShape(8.dp))
+                            .border(BorderStroke(1.dp, Color(0x66FFB300)), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = fallbackNotice,
+                            color = Color(0xFFFFD54F),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
 

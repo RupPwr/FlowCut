@@ -25,8 +25,12 @@ import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.ClipTransform
 import com.flowcut.app.engine.CompiledLayerPlan
 import com.flowcut.app.engine.ExportEngine
+import com.flowcut.app.engine.export.Aspect
 import com.flowcut.app.engine.export.ExportCoordinator
 import com.flowcut.app.engine.export.ExportRequest
+import com.flowcut.app.engine.export.OutCodec
+import com.flowcut.app.engine.export.OutputSpec
+import com.flowcut.app.engine.export.Quality
 import com.flowcut.app.engine.LayerTrackGroup
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
@@ -94,6 +98,7 @@ data class EditorUiState(
     val exportState: ExportState = ExportState.Ready,
     val exportedUri: Uri? = null,
     val exportErrorMessage: String? = null,
+    val exportFallbackNotice: String? = null,
     val exportResolution: Int = 1080,
     val exportFps: Int = 30,
     val exportBitratePreset: Int = 1,
@@ -3574,6 +3579,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         _uiState.update {
                             it.copy(
                                 exportState = state,
+                                exportFallbackNotice = ExportCoordinator.fallbackNotice,
                                 currentScreen = if (it.currentScreen == AppScreen.HOME) it.currentScreen else AppScreen.EXPORT
                             )
                         }
@@ -3582,7 +3588,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         _uiState.update {
                             it.copy(
                                 exportState = ExportState.Done,
-                                exportedUri = ExportCoordinator.exportedUri
+                                exportedUri = ExportCoordinator.exportedUri,
+                                exportFallbackNotice = ExportCoordinator.fallbackNotice
                             )
                         }
                     }
@@ -4650,32 +4657,48 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 exportSheetVisible = false,
                 currentScreen = AppScreen.EXPORT,
                 exportState = ExportState.Exporting(0f),
-                exportErrorMessage = null
+                exportErrorMessage = null,
+                exportFallbackNotice = null
             )
         }
 
         val snapshot = getSnapshot()
         val ratioMode = _uiState.value.aspectRatioMode
 
-        val aspect = resolveEffectiveAspect(ratioMode)
-        val rawWidth: Int
-        val rawHeight: Int
-        if (aspect <= 1.0f) {
-            rawWidth = resolution
-            rawHeight = (resolution / aspect).roundToInt()
+        val aspect = if (ratioMode == AspectRatioMode.ORIGINAL) {
+            val clip0 = _uiState.value.project.clips.firstOrNull()
+            if (clip0 != null) {
+                val rot = clip0.rotation
+                val dispW = if (rot == 90 || rot == 270) clip0.height else clip0.width
+                val dispH = if (rot == 90 || rot == 270) clip0.width else clip0.height
+                Aspect(dispW.coerceAtLeast(1), dispH.coerceAtLeast(1))
+            } else {
+                Aspect.R9_16
+            }
         } else {
-            rawHeight = resolution
-            rawWidth = (resolution * aspect).roundToInt()
+            Aspect(ratioMode.ratioWidth.coerceAtLeast(1), ratioMode.ratioHeight.coerceAtLeast(1))
         }
-        val outWidth = rawWidth and 1.inv()
-        val outHeight = rawHeight and 1.inv()
+
+        val quality = when {
+            bitrateBps >= 25_000_000 -> Quality.EXTREME
+            bitrateBps >= 18_000_000 -> Quality.ULTRA
+            bitrateBps >= 10_000_000 -> Quality.HIGH
+            bitrateBps >= 5_000_000 -> Quality.MEDIUM
+            else -> Quality.LOW
+        }
+
+        val spec = OutputSpec(
+            aspect = aspect,
+            shortSide = resolution,
+            fps = fps,
+            quality = quality,
+            codec = OutCodec.AVC
+        )
 
         val request = ExportRequest(
             snapshot = snapshot,
-            width = outWidth,
-            height = outHeight,
-            fps = fps,
-            bitrateBps = bitrateBps
+            spec = spec,
+            explicitBitrateBps = if (bitrateBps > 0) bitrateBps else null
         )
         ExportCoordinator.start(getApplication(), request)
     }
@@ -4746,7 +4769,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val baseBps = when {
                 resolution <= 480 -> 4_000_000
                 resolution <= 720 -> 8_000_000
-                else -> 14_000_000
+                resolution <= 1080 -> 14_000_000
+                resolution <= 1440 -> 24_000_000
+                else -> 45_000_000
             }
             return if (fps >= 50) (baseBps * 1.35f).toInt() else baseBps
         }
@@ -4763,10 +4788,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     2 -> 12_000_000
                     else -> 8_000_000
                 }
-                else -> when (bitratePreset) {
+                resolution <= 1080 -> when (bitratePreset) {
                     0 -> 8_000_000
                     2 -> 22_000_000
                     else -> 14_000_000
+                }
+                resolution <= 1440 -> when (bitratePreset) {
+                    0 -> 16_000_000
+                    2 -> 35_000_000
+                    else -> 24_000_000
+                }
+                else -> when (bitratePreset) {
+                    0 -> 30_000_000
+                    2 -> 60_000_000
+                    else -> 45_000_000
                 }
             }
             return if (fps >= 50) (baseBps * 1.35f).toInt() else baseBps

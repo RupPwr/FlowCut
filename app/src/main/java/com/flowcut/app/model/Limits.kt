@@ -29,11 +29,17 @@ const val MIN_SOLO_MS = 200L
 const val UNDO_LIMIT = 30
 const val PREVIEW_W = 540
 const val PREVIEW_H = 960
+@Deprecated("Use OutputSpec instead")
 const val EXPORT_W = 1080
+@Deprecated("Use OutputSpec instead")
 const val EXPORT_H = 1920
+@Deprecated("Use OutputSpec instead")
 const val EXPORT_FPS = 30
+@Deprecated("Use OutputSpec instead")
 const val EXPORT_BITRATE = 10_000_000
+@Deprecated("Use OutputSpec instead")
 const val EXPORT_BITRATE_30 = 10_000_000
+@Deprecated("Use OutputSpec instead")
 const val EXPORT_BITRATE_60 = 16_000_000
 const val PREFETCH_MS = 2_000L
 const val AUTO_PLAY_MARGIN_MS = 700L

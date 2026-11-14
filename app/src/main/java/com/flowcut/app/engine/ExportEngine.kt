@@ -24,8 +24,15 @@ import android.provider.MediaStore
 import android.util.Log
 import com.flowcut.app.BuildConfig
 import com.flowcut.app.audio.ClipAudioContributor
+import com.flowcut.app.engine.export.Aspect
+import com.flowcut.app.engine.export.BitrateTable
+import com.flowcut.app.engine.export.ExportCapabilities
+import com.flowcut.app.engine.export.ExportEstimator
 import com.flowcut.app.engine.export.ExportFrameTimeoutException
 import com.flowcut.app.engine.export.FrameGate
+import com.flowcut.app.engine.export.OutCodec
+import com.flowcut.app.engine.export.OutputSpec
+import com.flowcut.app.engine.export.Quality
 import com.flowcut.app.core.model.map
 import com.flowcut.app.core.timeline.ActiveSet
 import com.flowcut.app.core.timeline.SnapshotHolder
@@ -95,6 +102,8 @@ class ExportEngine(private val context: Context) {
     ): ExportFrameResolution = Companion.resolveExportFrame(snapshot, frameIndex, fps, activeSet)
 
     companion object {
+        val DEFAULT_OUTPUT_SPEC = OutputSpec(Aspect.R9_16, 1080, 30, Quality.HIGH, OutCodec.AVC)
+
         fun resolveExportFrame(
             snapshot: TimelineSnapshot,
             frameIndex: Int,
@@ -188,10 +197,37 @@ class ExportEngine(private val context: Context) {
      */
     suspend fun export(
         snapshot: TimelineSnapshot,
+        spec: OutputSpec = DEFAULT_OUTPUT_SPEC,
+        onProgress: (Float) -> Unit
+    ): Uri = export(
+        snapshot = snapshot,
+        spec = spec,
+        explicitBitrateBps = null,
+        onProgress = onProgress
+    )
+
+    suspend fun export(
+        snapshot: TimelineSnapshot,
         width: Int = EXPORT_W,
         height: Int = EXPORT_H,
         fps: Int = EXPORT_FPS,
         bitrateBps: Int = EXPORT_BITRATE,
+        onProgress: (Float) -> Unit
+    ): Uri {
+        fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
+        val wSafe = width.coerceAtLeast(1)
+        val hSafe = height.coerceAtLeast(1)
+        val g = gcd(wSafe, hSafe)
+        val aspect = Aspect(wSafe / g, hSafe / g)
+        val shortSide = minOf(wSafe, hSafe)
+        val spec = OutputSpec(aspect, shortSide, fps, Quality.HIGH, OutCodec.AVC)
+        return export(snapshot = snapshot, spec = spec, explicitBitrateBps = bitrateBps, onProgress = onProgress)
+    }
+
+    suspend fun export(
+        snapshot: TimelineSnapshot,
+        spec: OutputSpec,
+        explicitBitrateBps: Int?,
         onProgress: (Float) -> Unit
     ): Uri = withContext(Dispatchers.IO) {
         isCancelled.set(false)
@@ -200,8 +236,18 @@ class ExportEngine(private val context: Context) {
             error("No clips to export")
         }
 
+        val capabilities = ExportCapabilities()
+        val choice = capabilities.find(spec, allowSoftware = true)
+            ?: throw UnsupportedOperationException("No supported encoder for ${spec.key()}")
+
+        val width = choice.width
+        val height = choice.height
+        val fps = spec.fps
+        val calculatedBps = explicitBitrateBps ?: BitrateTable.videoBps(width, height, fps, spec.quality, spec.codec)
+        val bitrateBps = ExportCapabilities.clampBitrate(calculatedBps, choice.minBps, choice.maxBps)
+
         val totalDurationMs = snapshot.totalMs
-        val totalFrames = ceil(totalDurationMs * fps / 1000.0).toInt().coerceAtLeast(1)
+        val totalFrames = ExportEstimator.totalFrames(totalDurationMs, fps).toInt().coerceAtLeast(1)
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val fileName = "FlowCut_$timestamp.mp4"
@@ -247,21 +293,9 @@ class ExportEngine(private val context: Context) {
             val mux = MediaMuxer(tempFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             muxer = mux
 
-            // Step 2: Configure H.264 video encoder (no B-frames)
-            val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                }
-                setInteger(MediaFormat.KEY_LATENCY, 0)
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileMain)
-            }
-
-            val vEnc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            // Step 2: Configure video encoder using probed capability
+            val videoFormat = ExportCapabilities.buildVideoFormat(spec, choice, bitrateBps)
+            val vEnc = MediaCodec.createByCodecName(choice.codecName)
             videoEncoder = vEnc
             vEnc.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val inputSurface = vEnc.createInputSurface()
@@ -269,10 +303,11 @@ class ExportEngine(private val context: Context) {
 
             if (BuildConfig.DEBUG) {
                 try {
-                    val isHw = vEnc.codecInfo.isHardwareAccelerated
+                    val isHw = choice.hardware
+                    val mime = if (spec.codec == OutCodec.AVC) MediaFormat.MIMETYPE_VIDEO_AVC else MediaFormat.MIMETYPE_VIDEO_HEVC
                     Log.d(
                         "CODEC",
-                        "Video encoder started: name=${vEnc.name}, isHardwareAccelerated=$isHw, size=${width}x${height}, fps=$fps, bitrate=$bitrateBps"
+                        "Video encoder started: name=${choice.codecName}, isHardwareAccelerated=$isHw, mime=$mime, size=${width}x${height}, fps=$fps, bitrate=$bitrateBps"
                     )
                 } catch (_: Throwable) {}
             }

@@ -3,23 +3,55 @@ package com.flowcut.app.engine.export
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.ExportEngine
 import com.flowcut.app.engine.PreviewRenderer
+import com.flowcut.app.engine.perf.SessionGuard
 import com.flowcut.app.ui.ExportState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicReference
 
+private fun buildLegacySpec(width: Int, height: Int, fps: Int): OutputSpec {
+    var a = width.coerceAtLeast(1)
+    var b = height.coerceAtLeast(1)
+    while (b != 0) {
+        val t = b
+        b = a % b
+        a = t
+    }
+    val g = a
+    val wSafe = width.coerceAtLeast(1)
+    val hSafe = height.coerceAtLeast(1)
+    return OutputSpec(Aspect(wSafe / g, hSafe / g), minOf(wSafe, hSafe), fps, Quality.HIGH, OutCodec.AVC)
+}
+
 data class ExportRequest(
     val snapshot: TimelineSnapshot,
-    val width: Int,
-    val height: Int,
-    val fps: Int,
-    val bitrateBps: Int
-)
+    val spec: OutputSpec,
+    val explicitBitrateBps: Int? = null
+) {
+    val width: Int get() = spec.size().w
+    val height: Int get() = spec.size().h
+    val fps: Int get() = spec.fps
+    val bitrateBps: Int get() = explicitBitrateBps ?: BitrateTable.videoBps(width, height, fps, spec.quality, spec.codec)
+
+    // Backward-compatible constructor for existing callers
+    constructor(
+        snapshot: TimelineSnapshot,
+        width: Int,
+        height: Int,
+        fps: Int,
+        bitrateBps: Int
+    ) : this(
+        snapshot = snapshot,
+        spec = buildLegacySpec(width, height, fps),
+        explicitBitrateBps = bitrateBps
+    )
+}
 
 object ExportCoordinator {
 
@@ -34,6 +66,17 @@ object ExportCoordinator {
     var errorMessage: String? = null
         private set
 
+    @Volatile
+    var lastCompletedSpec: OutputSpec? = null
+        private set
+
+    @Volatile
+    var fallbackNotice: String? = null
+        private set
+
+    @Volatile
+    private var isCancelRequested = false
+
     private val pendingRequest = AtomicReference<ExportRequest?>()
     private val activeEngine = AtomicReference<ExportEngine?>()
 
@@ -46,8 +89,11 @@ object ExportCoordinator {
             return
         }
 
+        isCancelRequested = false
         exportedUri = null
         errorMessage = null
+        lastCompletedSpec = null
+        fallbackNotice = null
         pendingRequest.set(request)
         _state.value = ExportState.Exporting(0f)
 
@@ -60,6 +106,7 @@ object ExportCoordinator {
     }
 
     fun cancel(reason: String = "Export cancelled by user") {
+        isCancelRequested = true
         activeEngine.get()?.cancel()
         errorMessage = reason
         _state.value = ExportState.Failed
@@ -75,22 +122,54 @@ object ExportCoordinator {
         request: ExportRequest,
         onProgress: (Int) -> Unit
     ) {
+        val guard = SessionGuard(context)
+        val ladder = ExportLadder.candidates(request.spec).filter { !guard.isExcluded(it.key()) }
+        val candidateSpecs = if (ladder.isNotEmpty()) ladder else listOf(request.spec)
+
         PreviewRenderer.releaseActiveDecoders()
         val engine = ExportEngine(context)
         activeEngine.set(engine)
+
+        var lastError: Throwable? = null
         try {
-            val uri = engine.export(
-                snapshot = request.snapshot,
-                width = request.width,
-                height = request.height,
-                fps = request.fps,
-                bitrateBps = request.bitrateBps
-            ) { progress ->
-                _state.value = ExportState.Exporting(progress)
-                onProgress((progress * 100).toInt().coerceIn(0, 100))
+            for ((attemptIndex, candidateSpec) in candidateSpecs.withIndex()) {
+                if (isCancelRequested) {
+                    throw kotlinx.coroutines.CancellationException("Export cancelled by user")
+                }
+
+                if (attemptIndex > 0) {
+                    val notice = "Export stepped down to ${candidateSpec.shortSide}p ${candidateSpec.fps}fps (${candidateSpec.codec})"
+                    fallbackNotice = notice
+                    Log.w("EXPORT", "Export fallback attempt $attemptIndex: $notice")
+                }
+
+                guard.markExportStart(candidateSpec.key())
+                try {
+                    val uri = engine.export(
+                        snapshot = request.snapshot,
+                        spec = candidateSpec,
+                        explicitBitrateBps = if (candidateSpec == request.spec) request.explicitBitrateBps else null
+                    ) { progress ->
+                        _state.value = ExportState.Exporting(progress)
+                        onProgress((progress * 100).toInt().coerceIn(0, 100))
+                    }
+                    guard.markExportEnd()
+                    lastCompletedSpec = candidateSpec
+                    exportedUri = uri
+                    _state.value = ExportState.Done
+                    return
+                } catch (e: Throwable) {
+                    guard.markExportEnd()
+                    val isCancelled = e is kotlinx.coroutines.CancellationException ||
+                            e.message?.contains("cancelled", ignoreCase = true) == true
+                    if (isCancelled) {
+                        throw e
+                    }
+                    Log.e("EXPORT", "Candidate ${candidateSpec.key()} failed: ${e.message}. Stepping down ladder.")
+                    lastError = e
+                }
             }
-            exportedUri = uri
-            _state.value = ExportState.Done
+            throw lastError ?: IllegalStateException("All export ladder candidates failed")
         } catch (e: Throwable) {
             val isCancelled = e is kotlinx.coroutines.CancellationException ||
                     e.message?.contains("cancelled", ignoreCase = true) == true

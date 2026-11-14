@@ -18,9 +18,11 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.flowcut.app.engine.export.ExportCoordinator
 
 sealed class ExportState {
     data object Ready : ExportState()
@@ -137,6 +139,16 @@ fun ExportSheet(
                         color = colors.textSecondary,
                         modifier = Modifier.align(Alignment.End)
                     )
+                    val fallbackNotice = ExportCoordinator.fallbackNotice
+                    if (fallbackNotice != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = fallbackNotice,
+                            fontSize = 12.sp,
+                            color = Color(0xFFFFD54F),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
                         onClick = onCancelExport,
@@ -161,6 +173,16 @@ fun ExportSheet(
                         fontWeight = FontWeight.Medium,
                         color = colors.textPrimary
                     )
+                    val fallbackNotice = ExportCoordinator.fallbackNotice
+                    if (fallbackNotice != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = fallbackNotice,
+                            fontSize = 12.sp,
+                            color = Color(0xFFFFD54F),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                     Spacer(modifier = Modifier.height(20.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
