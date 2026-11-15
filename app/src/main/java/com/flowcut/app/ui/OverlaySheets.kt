@@ -2754,15 +2754,17 @@ fun PipCropSheet(
     initialCropBottom: Float,
     intrinsicWidth: Int = 1080,
     intrinsicHeight: Int = 1920,
+    rotation: Int = 0,
     onLiveChange: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
     onDone: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var cropLeft by remember { mutableFloatStateOf(initialCropLeft.coerceIn(0f, 0.45f)) }
-    var cropTop by remember { mutableFloatStateOf(initialCropTop.coerceIn(0f, 0.45f)) }
-    var cropRight by remember { mutableFloatStateOf(initialCropRight.coerceIn(0.55f, 1f)) }
-    var cropBottom by remember { mutableFloatStateOf(initialCropBottom.coerceIn(0.55f, 1f)) }
+    val minSpan = 0.08f
+    var cropLeft by remember { mutableFloatStateOf(initialCropLeft.coerceIn(0f, 0.92f)) }
+    var cropTop by remember { mutableFloatStateOf(initialCropTop.coerceIn(0f, 0.92f)) }
+    var cropRight by remember { mutableFloatStateOf(initialCropRight.coerceIn((cropLeft + minSpan).coerceAtMost(1f), 1f)) }
+    var cropBottom by remember { mutableFloatStateOf(initialCropBottom.coerceIn((cropTop + minSpan).coerceAtMost(1f), 1f)) }
 
     fun notifyChange() {
         onLiveChange(cropLeft, cropTop, cropRight, cropBottom)
@@ -2778,26 +2780,43 @@ fun PipCropSheet(
             notifyChange()
             return
         }
-        val mediaW = if (intrinsicWidth > 0) intrinsicWidth.toFloat() else 1080f
-        val mediaH = if (intrinsicHeight > 0) intrinsicHeight.toFloat() else 1920f
+        val isRotSwapped = (rotation == 90 || rotation == 270)
+        val rawW = if (intrinsicWidth > 0) intrinsicWidth.toFloat() else 1080f
+        val rawH = if (intrinsicHeight > 0) intrinsicHeight.toFloat() else 1920f
+        val mediaW = if (isRotSwapped) rawH else rawW
+        val mediaH = if (isRotSwapped) rawW else rawH
         val mediaAspect = mediaW / mediaH
 
         if (mediaAspect > targetAspect) {
             // Media is wider than target aspect: crop left and right
             val effectiveW = targetAspect / mediaAspect
             val margin = ((1.0f - effectiveW) / 2.0f).coerceIn(0f, 0.45f)
-            cropLeft = margin
-            cropRight = 1.0f - margin
-            cropTop = 0.0f
-            cropBottom = 1.0f
+            if (isRotSwapped) {
+                cropTop = margin
+                cropBottom = 1.0f - margin
+                cropLeft = 0.0f
+                cropRight = 1.0f
+            } else {
+                cropLeft = margin
+                cropRight = 1.0f - margin
+                cropTop = 0.0f
+                cropBottom = 1.0f
+            }
         } else {
             // Media is taller than target aspect: crop top and bottom
             val effectiveH = mediaAspect / targetAspect
             val margin = ((1.0f - effectiveH) / 2.0f).coerceIn(0f, 0.45f)
-            cropLeft = 0.0f
-            cropRight = 1.0f
-            cropTop = margin
-            cropBottom = 1.0f - margin
+            if (isRotSwapped) {
+                cropLeft = margin
+                cropRight = 1.0f - margin
+                cropTop = 0.0f
+                cropBottom = 1.0f
+            } else {
+                cropLeft = 0.0f
+                cropRight = 1.0f
+                cropTop = margin
+                cropBottom = 1.0f - margin
+            }
         }
         notifyChange()
     }
@@ -2910,10 +2929,10 @@ fun PipCropSheet(
                         Slider(
                             value = cropLeft,
                             onValueChange = { v ->
-                                cropLeft = v.coerceIn(0f, (cropRight - 0.1f).coerceAtLeast(0f))
+                                cropLeft = v.coerceIn(0f, (cropRight - minSpan).coerceAtLeast(0f))
                                 notifyChange()
                             },
-                            valueRange = 0f..0.45f,
+                            valueRange = 0f..0.92f,
                             colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
                             modifier = Modifier.weight(1f)
                         )
@@ -2926,10 +2945,10 @@ fun PipCropSheet(
                         Slider(
                             value = cropTop,
                             onValueChange = { v ->
-                                cropTop = v.coerceIn(0f, (cropBottom - 0.1f).coerceAtLeast(0f))
+                                cropTop = v.coerceIn(0f, (cropBottom - minSpan).coerceAtLeast(0f))
                                 notifyChange()
                             },
-                            valueRange = 0f..0.45f,
+                            valueRange = 0f..0.92f,
                             colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
                             modifier = Modifier.weight(1f)
                         )
@@ -2940,32 +2959,32 @@ fun PipCropSheet(
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("Right", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, modifier = Modifier.width(48.dp))
                         Slider(
-                            value = cropRight,
-                            onValueChange = { v ->
-                                cropRight = v.coerceIn((cropLeft + 0.1f).coerceAtMost(1f), 1f)
+                            value = 1.0f - cropRight,
+                            onValueChange = { trim ->
+                                cropRight = (1.0f - trim).coerceIn((cropLeft + minSpan).coerceAtMost(1f), 1f)
                                 notifyChange()
                             },
-                            valueRange = 0.55f..1f,
+                            valueRange = 0f..0.92f,
                             colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
                             modifier = Modifier.weight(1f)
                         )
-                        Text("${(cropRight * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
+                        Text("${((1.0f - cropRight) * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
                     }
 
                     // Bottom Trim
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("Bottom", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, modifier = Modifier.width(48.dp))
                         Slider(
-                            value = cropBottom,
-                            onValueChange = { v ->
-                                cropBottom = v.coerceIn((cropTop + 0.1f).coerceAtMost(1f), 1f)
+                            value = 1.0f - cropBottom,
+                            onValueChange = { trim ->
+                                cropBottom = (1.0f - trim).coerceIn((cropTop + minSpan).coerceAtMost(1f), 1f)
                                 notifyChange()
                             },
-                            valueRange = 0.55f..1f,
+                            valueRange = 0f..0.92f,
                             colors = SliderDefaults.colors(thumbColor = PINK_RED_ACCENT, activeTrackColor = PINK_RED_ACCENT, inactiveTrackColor = Color(0xFF3A3A3C)),
                             modifier = Modifier.weight(1f)
                         )
-                        Text("${(cropBottom * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
+                        Text("${((1.0f - cropBottom) * 100f).roundToInt()}%", color = PINK_RED_ACCENT, fontSize = 11.sp, modifier = Modifier.width(36.dp))
                     }
                 }
             }

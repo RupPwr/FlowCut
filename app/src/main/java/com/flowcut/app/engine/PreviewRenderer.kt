@@ -2044,15 +2044,17 @@ class PreviewRenderer(
         fun computeVideoAspect(
             displayWidth: Int = 1080,
             displayHeight: Int = 1920,
-            transform: ClipTransform = ClipTransform.DEFAULT
+            transform: ClipTransform = ClipTransform.DEFAULT,
+            cropLeft: Float = 0.0f,
+            cropTop: Float = 0.0f,
+            cropRight: Float = 1.0f,
+            cropBottom: Float = 1.0f
         ): Float {
-            val rot = (((Math.round(transform.rotationDeg / 90.0).toInt() * 90) % 360 + 360) % 360)
-            val isSwapped = (rot == 90 || rot == 270)
-            val rawW = if (displayWidth > 0) displayWidth else 1080
-            val rawH = if (displayHeight > 0) displayHeight else 1920
-            val w = if (isSwapped) rawH else rawW
-            val h = if (isSwapped) rawW else rawH
-            return (w.toFloat() / h.toFloat()).coerceAtLeast(0.01f)
+            val rawW = if (displayWidth > 0) displayWidth.toFloat() else 1080f
+            val rawH = if (displayHeight > 0) displayHeight.toFloat() else 1920f
+            val cropW = (cropRight - cropLeft).coerceIn(0.05f, 1.0f)
+            val cropH = (cropBottom - cropTop).coerceIn(0.05f, 1.0f)
+            return ((rawW * cropW) / (rawH * cropH)).coerceIn(0.01f, 100f)
         }
 
         fun isForegroundCoveringCanvas(
@@ -2068,9 +2070,11 @@ class PreviewRenderer(
             }
             val aScreen = if (canvasAspect > 0f) canvasAspect else (9.0f / 16.0f)
             val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform)
+            val isRot90or270 = (nearestCardinal == 90 || nearestCardinal == 270)
+            val effAspect = if (isRot90or270) (1.0f / videoAspect) else videoAspect
 
-            val baseHw = if (videoAspect <= aScreen) 0.5f * (videoAspect / aScreen) else 0.5f
-            val baseHh = if (videoAspect <= aScreen) 0.5f else 0.5f * (aScreen / videoAspect)
+            val baseHw = if (effAspect <= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
+            val baseHh = if (effAspect <= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
             val scale = transform.scale.coerceIn(0.1f, 10.0f)
             val hw = baseHw * scale
             val hh = baseHh * scale
@@ -2086,11 +2090,15 @@ class PreviewRenderer(
             transform: ClipTransform,
             displayWidth: Int = 1080,
             displayHeight: Int = 1920,
-            canvasAspect: Float = canvasAspectRatio
+            canvasAspect: Float = canvasAspectRatio,
+            cropLeft: Float = 0.0f,
+            cropTop: Float = 0.0f,
+            cropRight: Float = 1.0f,
+            cropBottom: Float = 1.0f
         ) {
             Matrix.setIdentityM(outMat, 0)
             val aScreen = if (canvasAspect > 0f) canvasAspect else (9.0f / 16.0f)
-            val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform)
+            val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform, cropLeft, cropTop, cropRight, cropBottom)
 
             val fitScaleX: Float
             val fitScaleY: Float
@@ -2106,9 +2114,11 @@ class PreviewRenderer(
             Matrix.scaleM(outMat, 0, 1.0f / fitScaleX, 1.0f / fitScaleY, 1f)
             val sInv = 1.0f / transform.scale.coerceIn(0.1f, 10.0f)
             Matrix.scaleM(outMat, 0, sInv, sInv, 1f)
+            Matrix.scaleM(outMat, 0, 1.0f / aScreen, 1.0f, 1f)
             if (transform.rotationDeg != 0f) {
                 Matrix.rotateM(outMat, 0, -transform.rotationDeg, 0f, 0f, 1f)
             }
+            Matrix.scaleM(outMat, 0, aScreen, 1.0f, 1f)
             if (transform.isFlippedH) {
                 Matrix.scaleM(outMat, 0, -1f, 1f, 1f)
             }
@@ -2163,9 +2173,20 @@ class PreviewRenderer(
             out2[3] = 0f
         }
 
-        fun calculateClipCrop(displayWidth: Int, displayHeight: Int, transform: ClipTransform, out: FloatArray) {
-            out[0] = 1.0f
-            out[1] = 1.0f
+        fun calculateClipCrop(
+            displayWidth: Int,
+            displayHeight: Int,
+            transform: ClipTransform,
+            out: FloatArray,
+            cropLeft: Float = 0.0f,
+            cropTop: Float = 0.0f,
+            cropRight: Float = 1.0f,
+            cropBottom: Float = 1.0f
+        ) {
+            val cropW = (cropRight - cropLeft).coerceIn(0.01f, 1.0f)
+            val cropH = (cropBottom - cropTop).coerceIn(0.01f, 1.0f)
+            out[0] = cropW
+            out[1] = cropH
         }
 
         fun calculateCropInto(displayWidth: Int, displayHeight: Int, out: FloatArray) {
@@ -2184,9 +2205,14 @@ class PreviewRenderer(
             mat: FloatArray,
             transform: ClipTransform,
             displayWidth: Int = 1080,
-            displayHeight: Int = 1920
+            displayHeight: Int = 1920,
+            canvasAspect: Float = canvasAspectRatio,
+            cropLeft: Float = 0.0f,
+            cropTop: Float = 0.0f,
+            cropRight: Float = 1.0f,
+            cropBottom: Float = 1.0f
         ) {
-            computeFgNormMatrix(mat, transform, displayWidth, displayHeight)
+            computeFgNormMatrix(mat, transform, displayWidth, displayHeight, canvasAspect, cropLeft, cropTop, cropRight, cropBottom)
         }
 
         fun computeScissorRect(

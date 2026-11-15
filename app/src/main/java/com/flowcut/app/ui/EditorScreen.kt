@@ -1351,6 +1351,9 @@ fun EditorScreen(
 
                     // On-Preview Free Transform Gestures overlay when an Overlay Item is selected and active at current playhead
                     if (hasClips && selectedClipIndex == null && isSelectedOverlayActiveAtPlayhead && activeOverlay != null && activeOverlay.type != com.flowcut.app.engine.LayerType.FILTER && activeOverlayId != null) {
+                        val currentOverlayState by rememberUpdatedState(activeOverlay)
+                        val currentCanvasAspectState by rememberUpdatedState(targetCanvasAspect)
+                        val currentViewModelState by rememberUpdatedState(resolvedViewModel)
                         if (true) {
                             Box(
                                 modifier = Modifier
@@ -1365,11 +1368,15 @@ fun EditorScreen(
                                             val downPos = down.position
                                             var isDragOrTransform = false
 
+                                            val curOverlay = currentOverlayState ?: activeOverlay
+                                            val curAspect = currentCanvasAspectState
+                                            val curVm = currentViewModelState
+
                                             val currentPlayheadUs = playbackController.playhead.timeUs
-                                            val initialTransform = if (activeOverlay.keyframes.isNotEmpty()) {
-                                                animEvaluator.evaluate(activeOverlay, currentPlayheadUs)
+                                            val initialTransform = if (curOverlay.keyframes.isNotEmpty()) {
+                                                animEvaluator.evaluate(curOverlay, currentPlayheadUs)
                                             } else {
-                                                activeOverlay.transform
+                                                curOverlay.transform
                                             }
 
                                             var rawPanX = initialTransform.panX
@@ -1386,18 +1393,18 @@ fun EditorScreen(
                                             val containerAspect = if (outerH > 0f) outerW / outerH else 1f
                                             val previewW: Float
                                             val previewH: Float
-                                            if (targetCanvasAspect > containerAspect) {
+                                            if (curAspect > containerAspect) {
                                                 previewW = outerW
-                                                previewH = (outerW / targetCanvasAspect).coerceAtMost(outerH).coerceAtLeast(1f)
+                                                previewH = (outerW / curAspect).coerceAtMost(outerH).coerceAtLeast(1f)
                                             } else {
                                                 previewH = outerH
-                                                previewW = (outerH * targetCanvasAspect).coerceAtMost(outerW).coerceAtLeast(1f)
+                                                previewW = (outerH * curAspect).coerceAtMost(outerW).coerceAtLeast(1f)
                                             }
                                             val previewLeft = (outerW - previewW) / 2f
 
                                             // Calculate aspect-correct overlay dimensions and center in outer gesture coordinates
-                                            val displayText = if (activeOverlay.text.isBlank()) "Your Text" else activeOverlay.text
-                                            val aTex: Float = when (activeOverlay.type) {
+                                            val displayText = if (curOverlay.text.isBlank()) "Your Text" else curOverlay.text
+                                            val aTex: Float = when (curOverlay.type) {
                                                 com.flowcut.app.engine.LayerType.STICKER -> 1.0f
                                                 com.flowcut.app.engine.LayerType.TEXT -> {
                                                     val lines = displayText.split("\n")
@@ -1406,15 +1413,15 @@ fun EditorScreen(
                                                     (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
                                                 }
                                                 com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
-                                                    val tw = if (activeOverlay.intrinsicWidth > 0) activeOverlay.intrinsicWidth.toFloat() else 1f
-                                                    val th = if (activeOverlay.intrinsicHeight > 0) activeOverlay.intrinsicHeight.toFloat() else 1f
-                                                    val cropW = (activeOverlay.cropRight - activeOverlay.cropLeft).coerceIn(0.01f, 1.0f)
-                                                    val cropH = (activeOverlay.cropBottom - activeOverlay.cropTop).coerceIn(0.01f, 1.0f)
+                                                    val tw = if (curOverlay.intrinsicWidth > 0) curOverlay.intrinsicWidth.toFloat() else 1f
+                                                    val th = if (curOverlay.intrinsicHeight > 0) curOverlay.intrinsicHeight.toFloat() else 1f
+                                                    val cropW = (curOverlay.cropRight - curOverlay.cropLeft).coerceIn(0.01f, 1.0f)
+                                                    val cropH = (curOverlay.cropBottom - curOverlay.cropTop).coerceIn(0.01f, 1.0f)
                                                     ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
                                                 }
                                                 else -> 1.0f
                                             }
-                                            val aScreen = targetCanvasAspect
+                                            val aScreen = curAspect
                                             var hwInit = 0.6f
                                             var hhInit = hwInit / aTex
                                             if (hhInit * aScreen > 0.6f) {
@@ -1698,7 +1705,7 @@ fun EditorScreen(
                                                         rotationDeg = snappedRotationDeg,
                                                         isFlippedH = isFlippedH
                                                     )
-                                                    resolvedViewModel?.setOverlayTransformLive(activeOverlayId, currentTransform, currentPlayheadUs)
+                                                    curVm?.setOverlayTransformLive(activeOverlayId, currentTransform, currentPlayheadUs)
                                                     previewRenderer.requestRender()
                                                     frameDriver.wake()
                                                 }
@@ -1717,7 +1724,7 @@ fun EditorScreen(
                                             // Gesture completed (all fingers up)
                                             if (isDragOrTransform) {
                                                 if (activeHandle == 0 || activeHandle == 4 || activeHandle == 5) {
-                                                    resolvedViewModel?.commitOverlayTransform(activeOverlayId, currentTransform, currentPlayheadUs)
+                                                    curVm?.commitOverlayTransform(activeOverlayId, currentTransform, currentPlayheadUs)
                                                     previewRenderer.requestRender()
                                                     frameDriver.wake()
                                                 }
@@ -1730,7 +1737,7 @@ fun EditorScreen(
                                                             try {
                                                                 hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                                             } catch (_: Throwable) {}
-                                                            resolvedViewModel?.deleteSelectedOverlay()
+                                                            curVm?.deleteSelectedOverlay()
                                                             previewRenderer.requestRender()
                                                             frameDriver.wake()
                                                         }
@@ -1746,7 +1753,7 @@ fun EditorScreen(
                                                             try {
                                                                 hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                                             } catch (_: Throwable) {}
-                                                            resolvedViewModel?.copySelectedOverlay()
+                                                            curVm?.copySelectedOverlay()
                                                             previewRenderer.requestRender()
                                                             frameDriver.wake()
                                                         }
@@ -1759,7 +1766,7 @@ fun EditorScreen(
                                                                     panY = 0f,
                                                                     rotationDeg = 0f
                                                                 )
-                                                                resolvedViewModel?.commitOverlayTransform(activeOverlayId, resetTransform, currentPlayheadUs)
+                                                                curVm?.commitOverlayTransform(activeOverlayId, resetTransform, currentPlayheadUs)
                                                                 previewRenderer.requestRender()
                                                                 frameDriver.wake()
                                                                 lastTapTimeMs = 0L
@@ -5460,6 +5467,7 @@ private fun PipAdvancedSheetsHost(
             initialCropBottom = overlayItem.cropBottom,
             intrinsicWidth = overlayItem.intrinsicWidth,
             intrinsicHeight = overlayItem.intrinsicHeight,
+            rotation = (overlayItem.transform.rotationDeg.toInt() % 360 + 360) % 360,
             onLiveChange = { left, top, right, bottom ->
                 resolvedViewModel?.liveUpdatePipCrop(selectedOverlayId, left, top, right, bottom)
                 previewRenderer.requestRender()
@@ -6568,6 +6576,10 @@ private fun PreviewClipTransformOverlay(
     var guideSnapEdgeBottom by remember { mutableStateOf(false) }
     var guideBadgeText by remember { mutableStateOf<String?>(null) }
 
+    val currentCanvasAspect by rememberUpdatedState(targetCanvasAspect)
+    val currentViewModel by rememberUpdatedState(resolvedViewModel)
+    val currentClip by rememberUpdatedState(activeClip)
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -6581,7 +6593,7 @@ private fun PreviewClipTransformOverlay(
                     val downPos = down.position
                     var isDragOrTransform = false
 
-                    val initialTransform = resolvedViewModel?.getClipTransform(activeClipId)
+                    val initialTransform = currentViewModel?.getClipTransform(activeClipId)
                         ?: PreviewRenderer.getClipTransform(activeClipId)
 
                     var rawPanX = initialTransform.panX
@@ -6611,14 +6623,15 @@ private fun PreviewClipTransformOverlay(
                         val outerW = size.width.toFloat().coerceAtLeast(1f)
                         val outerH = size.height.toFloat().coerceAtLeast(1f)
                         val containerAspect = if (outerH > 0f) outerW / outerH else 1f
+                        val aScreen = currentCanvasAspect
                         val previewW: Float
                         val previewH: Float
-                        if (targetCanvasAspect > containerAspect) {
+                        if (aScreen > containerAspect) {
                             previewW = outerW
-                            previewH = (outerW / targetCanvasAspect).coerceAtMost(outerH).coerceAtLeast(1f)
+                            previewH = (outerW / aScreen).coerceAtMost(outerH).coerceAtLeast(1f)
                         } else {
                             previewH = outerH
-                            previewW = (outerH * targetCanvasAspect).coerceAtMost(outerW).coerceAtLeast(1f)
+                            previewW = (outerH * aScreen).coerceAtMost(outerW).coerceAtLeast(1f)
                         }
 
                         if (pressedList.size == 1) {
@@ -6678,23 +6691,23 @@ private fun PreviewClipTransformOverlay(
                             val snapRotationCardinal = diffRot <= 3.0f
                             val snappedRotationDeg = if (snapRotationCardinal) (nearestCardinal % 360f) else rawRotationDeg
 
-                            // 2. Scale Snap
+                            // 2. Scale Snap (smooth magnetic snap within tight 0.03f threshold)
                             val diffScale = kotlin.math.abs(rawScale - 1.0f)
-                            val snapScale100 = diffScale < 0.04f
+                            val snapScale100 = diffScale < 0.03f
                             val snappedScale = if (snapScale100) 1.0f else rawScale
 
-                            // 3. Effective Dimensions for Edge Snapping
-                            val aScreen = targetCanvasAspect
-                            val dispW = activeClip?.displayWidth ?: 1080
-                            val dispH = activeClip?.displayHeight ?: 1920
+                            // 3. Effective Dimensions for Edge Snapping (True FIT-mode matching PreviewRenderer)
+                            val dispW = currentClip?.displayWidth ?: 1080
+                            val dispH = currentClip?.displayHeight ?: 1920
                             val aClip = (dispW.toFloat() / dispH.toFloat()).coerceAtLeast(0.01f)
 
                             val cardinalAngle = ((Math.round(snappedRotationDeg / 90f) * 90) % 360 + 360) % 360
                             val isRot90or270 = (cardinalAngle == 90 || cardinalAngle == 270) && kotlin.math.abs(snappedRotationDeg - cardinalAngle) < 15f
                             val effAspect = if (isRot90or270) (1.0f / aClip) else aClip
 
-                            val baseHw = if (effAspect >= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
-                            val baseHh = if (effAspect >= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
+                            // True FIT-mode: when effAspect >= aScreen, width fits canvas (hw = 0.5f), height letterboxed (hh = 0.5f * (aScreen / effAspect))
+                            val baseHw = if (effAspect >= aScreen) 0.5f else 0.5f * (effAspect / aScreen)
+                            val baseHh = if (effAspect >= aScreen) 0.5f * (aScreen / effAspect) else 0.5f
                             val hw = baseHw * snappedScale
                             val hh = baseHh * snappedScale
 
@@ -6808,9 +6821,9 @@ private fun PreviewClipTransformOverlay(
 
                     // Gesture completed (all fingers up)
                     if (isDragOrTransform) {
-                        resolvedViewModel?.commitClipTransform(selectedClipIndex, currentTransform)
+                        currentViewModel?.commitClipTransform(selectedClipIndex, currentTransform)
                         if (USE_NEW_CORE) {
-                            resolvedViewModel?.let { vm ->
+                            currentViewModel?.let { vm ->
                                 snapshotHolder.current = vm.getSnapshot()
                             }
                         }
@@ -6831,9 +6844,9 @@ private fun PreviewClipTransformOverlay(
                                 panY = 0f,
                                 rotationDeg = 0f
                             )
-                            resolvedViewModel?.commitClipTransform(selectedClipIndex, resetTransform)
+                            currentViewModel?.commitClipTransform(selectedClipIndex, resetTransform)
                             if (USE_NEW_CORE) {
-                                resolvedViewModel?.let { vm ->
+                                currentViewModel?.let { vm ->
                                     snapshotHolder.current = vm.getSnapshot()
                                 }
                             }
