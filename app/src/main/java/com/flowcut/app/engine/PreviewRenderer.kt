@@ -160,10 +160,14 @@ class PrefetchCoordinator(
                 val currentClip = s.project.clips[currentClipIndex]
                 val nextClip = s.project.clips[nextClipIndex]
                 if (nextClip.id != currentClip.id) {
-                    val nextStartUs = msToUs(s.main.startMs[nextClipIndex])
-                    if (tUs + windowUs >= nextStartUs) {
-                        val sourceUs = nextClip.map().sourceUs(0L)
-                        onVideoDecoderPrefetch(nextClipIndex, sourceUs)
+                    val isContinuousSameFileSplit = (nextClip.path == currentClip.path) &&
+                            kotlin.math.abs(nextClip.map().inUs - currentClip.map().outUs) <= 50_000L
+                    if (!isContinuousSameFileSplit) {
+                        val nextStartUs = msToUs(s.main.startMs[nextClipIndex])
+                        if (tUs + windowUs >= nextStartUs) {
+                            val sourceUs = nextClip.map().sourceUs(0L)
+                            onVideoDecoderPrefetch(nextClipIndex, sourceUs)
+                        }
                     }
                 }
             }
@@ -1048,7 +1052,12 @@ class PreviewRenderer(
 
         // 0ms Instant Cut Handover at the Boundary:
         if (primarySlot == 0) {
-            if ((standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexB == frame.clipAIndex)) &&
+            val canSlotAContinue = frameSourceA != null && frameSourceA?.clip?.path == clipA.path &&
+                (frameSourceA!!.prewarmStage >= 3) &&
+                (kotlin.math.abs(frame.clipASourceUs - frameSourceA!!.lastDecodedPtsUs) <= 120_000L ||
+                 (frame.clipASourceUs >= frameSourceA!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceA!!.lastDecodedPtsUs <= 150_000L))
+
+            if (!canSlotAContinue && (standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexB == frame.clipAIndex)) &&
                 frameSourceB != null && (frameSourceB?.clip?.id == clipA.id || currentClipIndexB == frame.clipAIndex)) {
                 primarySlot = 1
                 standbySlotReadyForClipId = null
@@ -1059,13 +1068,18 @@ class PreviewRenderer(
                 currentClipIndexA = -1
             }
         } else {
+            val canSlotBContinue = frameSourceB != null && frameSourceB?.clip?.path == clipA.path &&
+                (frameSourceB!!.prewarmStage >= 3) &&
+                (kotlin.math.abs(frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs) <= 120_000L ||
+                 (frame.clipASourceUs >= frameSourceB!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs <= 150_000L))
+
             // primarySlot == 1: Release frameSourceA if it still held an old clip from before the transition
-            if (frameSourceA != null && frameSourceA?.clip?.id != clipA.id && currentClipIndexA < frame.clipAIndex) {
+            if (frameSourceA != null && frameSourceA?.clip?.id != clipA.id && currentClipIndexA < frame.clipAIndex && !canSlotBContinue) {
                 frameSourceA?.release()
                 frameSourceA = null
                 currentClipIndexA = -1
             }
-            if ((standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexA == frame.clipAIndex)) &&
+            if (!canSlotBContinue && (standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexA == frame.clipAIndex)) &&
                 frameSourceA != null && (frameSourceA?.clip?.id == clipA.id || currentClipIndexA == frame.clipAIndex)) {
                 primarySlot = 0
                 standbySlotReadyForClipId = null
@@ -1089,9 +1103,12 @@ class PreviewRenderer(
                     activeFs.clip = legacyClipA
                     currentClipIndexA = frame.clipAIndex
                     if (activeFs.prewarmStage >= 3) {
-                        val currentPts = activeFs.currentPtsUs
+                        val currentPts = activeFs.lastDecodedPtsUs
                         val targetPts = frame.clipASourceUs
-                        if (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L) {
+                        val isContinuous = (currentPts != -1L) &&
+                            (kotlin.math.abs(targetPts - currentPts) <= 120_000L ||
+                             (targetPts >= currentPts && targetPts - currentPts <= 150_000L))
+                        if (!isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)) {
                             activeFs.seekTo(targetPts, fastKeyframeOnly = false)
                         }
                     }
@@ -1146,7 +1163,10 @@ class PreviewRenderer(
             val m = frame.clipAIndex + 1
             if (m in s.project.clips.indices && !isScrubbing) {
                 val nextClip = s.project.clips[m]
-                val transitionStartUs = msToUs(s.main.startMs[m])
+                val isContinuousSameFileSplit = (nextClip.path == clipA.path) &&
+                        kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 50_000L
+                if (!isContinuousSameFileSplit) {
+                    val transitionStartUs = msToUs(s.main.startMs[m])
                 val timeUntilTransitionUs = transitionStartUs - frame.tUs
                 if (timeUntilTransitionUs in -500_000L..3_000_000L) {
                     val nextClipInUs = nextClip.map().inUs
@@ -1215,6 +1235,7 @@ class PreviewRenderer(
                         }
                     }
                 }
+            }
             } else if (!isScrubbing && standbySlotReadyForClipId != null && m !in s.project.clips.indices) {
                 frameSourceB?.release()
                 frameSourceB = null
@@ -1332,9 +1353,12 @@ class PreviewRenderer(
                     activeFs.clip = legacyClipA
                     currentClipIndexB = frame.clipAIndex
                     if (activeFs.prewarmStage >= 3) {
-                        val currentPts = activeFs.currentPtsUs
+                        val currentPts = activeFs.lastDecodedPtsUs
                         val targetPts = frame.clipASourceUs
-                        if (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L) {
+                        val isContinuous = (currentPts != -1L) &&
+                            (kotlin.math.abs(targetPts - currentPts) <= 120_000L ||
+                             (targetPts >= currentPts && targetPts - currentPts <= 150_000L))
+                        if (!isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)) {
                             activeFs.seekTo(targetPts, fastKeyframeOnly = false)
                         }
                     }
@@ -1389,7 +1413,10 @@ class PreviewRenderer(
             val m = frame.clipAIndex + 1
             if (m in s.project.clips.indices && !isScrubbing) {
                 val nextClip = s.project.clips[m]
-                val transitionStartUs = msToUs(s.main.startMs[m])
+                val isContinuousSameFileSplit = (nextClip.path == clipA.path) &&
+                        kotlin.math.abs(nextClip.map().inUs - clipA.map().outUs) <= 50_000L
+                if (!isContinuousSameFileSplit) {
+                    val transitionStartUs = msToUs(s.main.startMs[m])
                 val timeUntilTransitionUs = transitionStartUs - frame.tUs
                 if (timeUntilTransitionUs in -500_000L..3_000_000L) {
                     val nextClipInUs = nextClip.map().inUs
@@ -1458,6 +1485,7 @@ class PreviewRenderer(
                         }
                     }
                 }
+            }
             } else if (!isScrubbing && standbySlotReadyForClipId != null && m !in s.project.clips.indices) {
                 frameSourceA?.release()
                 frameSourceA = null

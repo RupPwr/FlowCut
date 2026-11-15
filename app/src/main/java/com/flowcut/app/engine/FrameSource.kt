@@ -33,6 +33,8 @@ class FrameSource(
     private var outputEos = false
     var currentPtsUs: Long = -1L
         private set
+    val lastDecodedPtsUs: Long get() = currentPtsUs
+    val currentDecoderPtsUs: Long get() = currentPtsUs
     private var currentMime: String = ""
     private var lastSeekTargetUs: Long = -1L
     private var lastKeyframePtsUs: Long = -1L
@@ -601,8 +603,8 @@ class FrameSource(
             }
 
             val isInitial = currentPtsUs == -1L
-            // Backward jump > 50ms
-            val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 50_000L
+            // Backward jump > 100ms (avoids redundant seek/flush on monotonic forward playback across split boundaries)
+            val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 100_000L
 
             // Decode whenever localUs >= currentPtsUs + 8_000L (8ms threshold instead of 25ms) so 30fps and 60fps clips never skip a frame during a fast transition
             if (!isInitial && !isBackwardJump && currentPtsUs != -1L && localUs < currentPtsUs + 8_000L) {
