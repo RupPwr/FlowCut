@@ -2,6 +2,8 @@ package com.flowcut.app.storage
 
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Process
+import kotlinx.coroutines.yield
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -14,7 +16,10 @@ import java.io.FileOutputStream
  */
 object KeyframeIndex {
 
-    fun build(videoPath: String, indexPath: String) {
+    suspend fun build(videoPath: String, indexPath: String) {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        } catch (_: Throwable) {}
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(videoPath)
@@ -30,11 +35,16 @@ object KeyframeIndex {
             extractor.selectTrack(videoTrack)
 
             val syncTimes = ArrayList<Long>()
+            var frameCount = 0
             while (true) {
                 val sampleTime = extractor.sampleTime
                 if (sampleTime < 0) break
                 if ((extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
                     syncTimes.add(sampleTime / 1000L) // in ms
+                }
+                frameCount++
+                if (frameCount % 400 == 0) {
+                    yield()
                 }
                 if (!extractor.advance()) break
             }

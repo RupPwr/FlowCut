@@ -363,13 +363,7 @@ fun EditorScreen(
                 stateDirtyCounter.incrementAndGet()
                 this.glSurfaceView?.requestRender()
             }
-            (this.glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
         }
-    }
-
-    SideEffect {
-        (glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
-        (previewRenderer.glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(720, 1280)
     }
 
     val frameDriver = remember(playbackController, previewRenderer) {
@@ -1188,6 +1182,25 @@ fun EditorScreen(
                     } else {
                         9f / 16f
                     }
+                }
+
+                LaunchedEffect(targetCanvasAspect, currentAspectRatioMode, timeline.project.clips.firstOrNull()?.id) {
+                    val firstClip = timeline.project.clips.firstOrNull()
+                    previewRenderer.setAspectRatioMode(currentAspectRatioMode, firstClip)
+                    previewRenderer.setCanvasAspectRatio(targetCanvasAspect)
+                    val bufW: Int
+                    val bufH: Int
+                    if (targetCanvasAspect >= 1f) {
+                        bufW = (720f * targetCanvasAspect).toInt() and 1.inv()
+                        bufH = 720
+                    } else {
+                        bufW = 720
+                        bufH = (720f / targetCanvasAspect).toInt() and 1.inv()
+                    }
+                    (glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(bufW, bufH)
+                    (previewRenderer.glSurfaceView as? android.view.SurfaceView)?.holder?.setFixedSize(bufW, bufH)
+                    previewRenderer.glSurfaceView?.requestRender()
+                    frameDriver.wake()
                 }
 
                 val openAspectRatioSheet = {

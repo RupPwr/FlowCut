@@ -11,7 +11,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -58,6 +62,32 @@ class ThumbnailService(
     private val inFlight = ConcurrentHashMap<String, Job>()
     private val failed = ConcurrentHashMap.newKeySet<String>()
 
+    private var lastNotifyTimeMs = 0L
+    private var pendingNotifyJob: Job? = null
+    private val notifyLock = Any()
+
+    private fun notifyChangeThrottled(onChanged: () -> Unit) {
+        val now = System.currentTimeMillis()
+        synchronized(notifyLock) {
+            if (now - lastNotifyTimeMs >= 120L) {
+                lastNotifyTimeMs = now
+                pendingNotifyJob?.cancel()
+                pendingNotifyJob = null
+                scope.launch(Dispatchers.Main) { onChanged() }
+            } else if (pendingNotifyJob == null || pendingNotifyJob?.isActive != true) {
+                val waitMs = (120L - (now - lastNotifyTimeMs)).coerceAtLeast(10L)
+                pendingNotifyJob = scope.launch(Dispatchers.Main) {
+                    delay(waitMs)
+                    synchronized(notifyLock) {
+                        lastNotifyTimeMs = System.currentTimeMillis()
+                        pendingNotifyJob = null
+                    }
+                    onChanged()
+                }
+            }
+        }
+    }
+
     init {
         try {
             if (!diskDir.exists()) {
@@ -81,7 +111,8 @@ class ThumbnailService(
      * Stale requests can be cancelled via cancelStaleRequests().
      */
     fun requestTiles(requests: List<TileRequest>, onChanged: () -> Unit) {
-        for (req in requests) {
+        val capped = requests.take(16)
+        for (req in capped) {
             if (req.path.isEmpty()) continue
             val key = req.key
             if (ready.containsKey(key) || failed.contains(key) || inFlight.containsKey(key)) {
@@ -90,12 +121,11 @@ class ThumbnailService(
 
             val job = scope.launch(Dispatchers.IO) {
                 try {
+                    coroutineContext.ensureActive()
                     val img = loadTile(req.path, req.bucketUs, key)
                     if (img != null) {
                         publish(key, img)
-                        withContext(Dispatchers.Main) {
-                            onChanged()
-                        }
+                        notifyChangeThrottled(onChanged)
                     } else {
                         failed.add(key)
                     }
@@ -129,6 +159,10 @@ class ThumbnailService(
      * Clears all in-memory and in-flight states.
      */
     fun clearMemory() {
+        synchronized(notifyLock) {
+            pendingNotifyJob?.cancel()
+            pendingNotifyJob = null
+        }
         inFlight.values.forEach { it.cancel() }
         inFlight.clear()
         failed.clear()
@@ -146,7 +180,7 @@ class ThumbnailService(
         } catch (_: Throwable) {}
     }
 
-    private fun loadTile(path: String, bucketUs: Long, key: String): ImageBitmap? {
+    private suspend fun loadTile(path: String, bucketUs: Long, key: String): ImageBitmap? {
         val diskFile = File(diskDir, "$key.jpg")
         if (diskFile.exists() && diskFile.length() > 0L) {
             try {
@@ -158,48 +192,58 @@ class ThumbnailService(
             } catch (_: Throwable) {}
         }
 
-        // Decode using OPTION_CLOSEST_SYNC for ultra-fast keyframe extraction
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(path)
-            val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                retriever.getScaledFrameAtTime(
-                    bucketUs.coerceAtLeast(0L),
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    TILE_WIDTH_PX,
-                    TILE_HEIGHT_PX
-                ) ?: retriever.getFrameAtTime(
-                    bucketUs.coerceAtLeast(0L),
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                )
-            } else {
-                retriever.getFrameAtTime(
-                    bucketUs.coerceAtLeast(0L),
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                )
-            }
+        // Stale scroll check BEFORE acquiring decodeSemaphore
+        kotlin.coroutines.coroutineContext.ensureActive()
 
-            if (bmp != null) {
-                // Persist to disk cache
-                try {
-                    val temp = File(diskDir, "$key.jpg.tmp")
-                    FileOutputStream(temp).use { fos ->
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 80, fos)
-                    }
-                    if (diskFile.exists()) diskFile.delete()
-                    if (temp.renameTo(diskFile)) {
-                        diskFile.setLastModified(System.currentTimeMillis())
-                        pruneDiskCache()
-                    }
-                } catch (_: Throwable) {}
-                bmp.asImageBitmap()
-            } else {
+        return decodeSemaphore.withPermit {
+            // Stale scroll check AFTER acquiring semaphore
+            kotlin.coroutines.coroutineContext.ensureActive()
+
+            // Decode using OPTION_CLOSEST_SYNC for ultra-fast keyframe extraction
+            val retriever = MediaMetadataRetriever()
+            try {
+                kotlin.coroutines.coroutineContext.ensureActive()
+                retriever.setDataSource(path)
+                kotlin.coroutines.coroutineContext.ensureActive()
+                val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    retriever.getScaledFrameAtTime(
+                        bucketUs.coerceAtLeast(0L),
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        TILE_WIDTH_PX,
+                        TILE_HEIGHT_PX
+                    ) ?: retriever.getFrameAtTime(
+                        bucketUs.coerceAtLeast(0L),
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    )
+                } else {
+                    retriever.getFrameAtTime(
+                        bucketUs.coerceAtLeast(0L),
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    )
+                }
+
+                if (bmp != null) {
+                    // Persist to disk cache
+                    try {
+                        val temp = File(diskDir, "$key.jpg.tmp")
+                        FileOutputStream(temp).use { fos ->
+                            bmp.compress(Bitmap.CompressFormat.JPEG, 80, fos)
+                        }
+                        if (diskFile.exists()) diskFile.delete()
+                        if (temp.renameTo(diskFile)) {
+                            diskFile.setLastModified(System.currentTimeMillis())
+                            pruneDiskCache()
+                        }
+                    } catch (_: Throwable) {}
+                    bmp.asImageBitmap()
+                } else {
+                    null
+                }
+            } catch (_: Throwable) {
                 null
+            } finally {
+                try { retriever.release() } catch (_: Throwable) {}
             }
-        } catch (_: Throwable) {
-            null
-        } finally {
-            try { retriever.release() } catch (_: Throwable) {}
         }
     }
 
@@ -232,6 +276,7 @@ class ThumbnailService(
     }
 
     companion object {
+        private val decodeSemaphore = Semaphore(2)
         const val TILE_WIDTH_PX = 80
         const val TILE_HEIGHT_PX = 80
         const val DEFAULT_MAX_DISK_BYTES = 100L * 1024L * 1024L // 100 MB

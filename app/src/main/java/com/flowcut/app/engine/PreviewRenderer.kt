@@ -380,7 +380,7 @@ class PreviewRenderer(
     }
 
     @Volatile
-    private var _canvasAspectRatio: Float = 9f / 16f
+    private var _canvasAspectRatio: Float = Companion.canvasAspectRatio
     val canvasAspectRatio: Float get() = _canvasAspectRatio
 
     fun setAspectRatioMode(mode: AspectRatioMode, firstClip: Any? = null) {
@@ -658,8 +658,13 @@ class PreviewRenderer(
             texelSize[1] = 1.0f / height.toFloat()
             val surfaceAspect = width.toFloat() / height.toFloat()
             val currentMode = currentAspectRatioMode
-            val effectiveAspect = Companion.resolveEffectiveAspect(currentMode, holder.current.project.clips.firstOrNull())
-            val targetAspect = if (effectiveAspect > 0f) effectiveAspect else surfaceAspect
+            val firstClip = holder.current.project.clips.firstOrNull()
+            val resolvedAspect = if (firstClip != null || currentMode != AspectRatioMode.ORIGINAL) {
+                Companion.resolveEffectiveAspect(currentMode, firstClip)
+            } else {
+                surfaceAspect
+            }
+            val targetAspect = if (resolvedAspect > 0f) resolvedAspect else if (_canvasAspectRatio > 0f) _canvasAspectRatio else surfaceAspect
             _canvasAspectRatio = targetAspect
             Companion.setCanvasAspectRatio(targetAspect)
             TransitionRenderer.canvasAspect = targetAspect
@@ -774,16 +779,16 @@ class PreviewRenderer(
                             } catch (_: Exception) {}
                         }
 
-                        computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
+                        computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
                         System.arraycopy(rawMatB, 0, matA, 0, 16)
                         calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
-                        computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                        computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
                         Matrix.multiplyMM(bgMatA, 0, rawMatB, 0, bgNormMat, 0)
 
-                        computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
+                        computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight, this.canvasAspectRatio)
                         System.arraycopy(rawMatA, 0, matB, 0, 16)
                         calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
-                        computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                        computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight, this.canvasAspectRatio)
                         Matrix.multiplyMM(bgMatB, 0, rawMatA, 0, bgNormMat, 0)
                     } else {
                         // Outgoing clipA is on Slot A (stA)
@@ -836,16 +841,16 @@ class PreviewRenderer(
                             } catch (_: Exception) {}
                         }
 
-                        computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
+                        computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
                         System.arraycopy(rawMatA, 0, matA, 0, 16)
                         calculateClipCrop(clipA.displayWidth, clipA.displayHeight, transformA, cropA)
-                        computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+                        computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
                         Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
 
-                        computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight)
+                        computeFgNormMatrix(fgNormMatB, transformB, clipB.displayWidth, clipB.displayHeight, this.canvasAspectRatio)
                         System.arraycopy(rawMatB, 0, matB, 0, 16)
                         calculateClipCrop(clipB.displayWidth, clipB.displayHeight, transformB, cropB)
-                        computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight)
+                        computeBgNormMatrix(bgNormMat, transformB, clipB.displayWidth, clipB.displayHeight, this.canvasAspectRatio)
                         Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
                     }
 
@@ -1205,8 +1210,8 @@ class PreviewRenderer(
                 standbyPreparedInUs = -1L
             }
 
-            computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight)
-            computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight)
+            computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
+            computeBgNormMatrix(bgNormMat, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
             Matrix.multiplyMM(bgMatA, 0, rawMatA, 0, bgNormMat, 0)
             val bgA = getClipBackground(clipA.id)
             var bgModeA = packBackground(bgA, bgParamsA)
@@ -1434,8 +1439,8 @@ class PreviewRenderer(
                 standbyPreparedInUs = -1L
             }
 
-            computeFgNormMatrix(fgNormMatB, transformB, clipA.displayWidth, clipA.displayHeight)
-            computeBgNormMatrix(bgNormMat, transformB, clipA.displayWidth, clipA.displayHeight)
+            computeFgNormMatrix(fgNormMatB, transformB, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
+            computeBgNormMatrix(bgNormMat, transformB, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
             Matrix.multiplyMM(bgMatB, 0, rawMatB, 0, bgNormMat, 0)
             val bgB = getClipBackground(clipA.id)
             var bgModeB = packBackground(bgB, bgParamsB)

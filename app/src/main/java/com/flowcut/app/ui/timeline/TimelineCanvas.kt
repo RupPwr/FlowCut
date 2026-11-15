@@ -618,18 +618,21 @@ fun TimelineCanvas(
     val currentClips = holder.current.project.clips
     val currentPlayheadUs = playhead.timeUs
     val currentDpPerSecond = zoomState.dpPerSecond
-    LaunchedEffect(currentClips, currentDpPerSecond, currentPlayheadUs / 500_000L) {
+    val playheadBucketUs = if (currentDpPerSecond < 30f) 1_000_000L else 500_000L
+    LaunchedEffect(currentClips, currentDpPerSecond, currentPlayheadUs / playheadBucketUs) {
+        kotlinx.coroutines.delay(120L)
         if (currentClips.isNotEmpty()) {
             val requests = mutableListOf<ThumbnailService.TileRequest>()
             val activeKeys = mutableSetOf<String>()
             val tUs = playhead.timeUs
             val pxPerSec = zoomState.pxPerSecond(density)
-            val cellStepUs = when {
+            val baseStepUs = when {
                 pxPerSec >= 120.0 -> 500_000L
                 pxPerSec >= 40.0 -> 1_000_000L
                 pxPerSec >= 15.0 -> 2_000_000L
                 else -> 5_000_000L
             }
+            val cellStepUs = if (currentDpPerSecond < 30f) maxOf(baseStepUs, 1_000_000L) else baseStepUs
             val visibleSpanUs = 10_000_000L
             val minVisibleUs = (tUs - visibleSpanUs).coerceAtLeast(0L)
             val maxVisibleUs = tUs + visibleSpanUs
@@ -2051,12 +2054,13 @@ fun TimelineCanvas(
             val k0 = maxOf(0, snapshot.main.lastStartAtOrBefore(leftMs) - 1)
             val k1 = minOf(n - 1, snapshot.main.lastStartAtOrBefore(rightMs) + 1)
 
-            val cellStepUs = when {
+            val baseStepUs = when {
                 pxPerSec >= 120.0 -> 500_000L
                 pxPerSec >= 40.0 -> 1_000_000L
                 pxPerSec >= 15.0 -> 2_000_000L
                 else -> 5_000_000L
             }
+            val cellStepUs = if (zoomState.dpPerSecond < 30f) maxOf(baseStepUs, 1_000_000L) else baseStepUs
 
             for (k in k0..k1) {
                 val clipStartMs = snapshot.main.startMs[k]

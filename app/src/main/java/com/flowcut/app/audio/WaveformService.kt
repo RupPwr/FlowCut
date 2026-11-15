@@ -4,12 +4,16 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Process
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -91,8 +95,10 @@ class WaveformService(
                     // 1. Try disk cache first
                     var data = readFromDisk(diskFile)
                     if (data == null) {
-                        // 2. Decode from media file
-                        data = decodeAudioWaveform(path)
+                        // 2. Decode from media file (strictly 1 concurrent decode across the app)
+                        data = waveformSemaphore.withPermit {
+                            decodeAudioWaveform(path)
+                        }
                         if (data != null) {
                             try {
                                 writeToDisk(diskFile, data)
@@ -143,7 +149,10 @@ class WaveformService(
         ready = next
     }
 
-    private fun decodeAudioWaveform(path: String): WaveformData? {
+    private suspend fun decodeAudioWaveform(path: String): WaveformData? {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        } catch (_: Throwable) {}
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -185,6 +194,7 @@ class WaveformService(
             var currentBucketFrames = 0.0
 
             val shortBuf = ShortArray(4096)
+            var outputBufferCount = 0
 
             while (!outputEos) {
                 if (!inputEos) {
@@ -206,6 +216,10 @@ class WaveformService(
 
                 val outIdx = dec.dequeueOutputBuffer(info, 10_000L)
                 if (outIdx >= 0) {
+                    outputBufferCount++
+                    if (outputBufferCount % 64 == 0) {
+                        yield()
+                    }
                     val outBuf = dec.getOutputBuffer(outIdx)
                     if (outBuf != null && info.size > 0) {
                         outBuf.position(info.offset)
@@ -253,6 +267,8 @@ class WaveformService(
 
             val peaksArray = FloatArray(accumulatedPeaks.size) { accumulatedPeaks[it] }
             return WaveformData(samplesPerSec, peaksArray)
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Throwable) {
             return null
         } finally {
@@ -263,6 +279,7 @@ class WaveformService(
     }
 
     companion object {
+        private val waveformSemaphore = Semaphore(1)
         const val DEFAULT_SAMPLES_PER_SEC = 50
         private const val MAGIC = 0x46435731 // "FCW1"
 
