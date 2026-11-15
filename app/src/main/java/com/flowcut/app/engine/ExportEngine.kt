@@ -375,7 +375,9 @@ class ExportEngine(private val context: Context) {
             val rnd = TransitionRenderer()
             renderer = rnd
             rnd.init()
-            val otc = OverlayTextureCache(proxyStore = OverlayTextureCache.defaultProxyStore ?: ProxyStore(context))
+            val otc = OverlayTextureCache(proxyStore = OverlayTextureCache.defaultProxyStore ?: ProxyStore(context)).apply {
+                bakeScale = (minOf(width, height).toFloat() / 1080f).coerceIn(1.0f, 2.0f)
+            }
             overlayTextureCache = otc
             val animEvaluator = AnimatedTransformEvaluator()
 

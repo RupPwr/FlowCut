@@ -1,12 +1,24 @@
 package com.flowcut.app.editor
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.SystemClock
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import com.flowcut.app.engine.perf.DeviceProfile
+import com.flowcut.app.engine.perf.DeviceProfileProbe
+import com.flowcut.app.engine.perf.Level
+import com.flowcut.app.engine.perf.QualityBudget
+import com.flowcut.app.engine.perf.QualityGovernor
+import com.flowcut.app.engine.perf.ThermalMonitor
+import com.flowcut.app.engine.perf.TierPolicy
 import androidx.compose.runtime.mutableStateListOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -153,6 +165,19 @@ fun getLayerCapLimitMessage(type: LayerType): String {
 }
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
+
+    val deviceProfile: DeviceProfile = DeviceProfileProbe(application).probe()
+    val qualityBudget: QualityBudget = TierPolicy.budget(deviceProfile)
+
+    private val perfExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "FlowCut-PerfGovernor")
+    }
+    private val thermalMonitor = ThermalMonitor(application, perfExecutor)
+    val qualityGovernor = QualityGovernor()
+
+    private val isMemoryPressureActive = AtomicBoolean(false)
+    private var lastLateFrames: Long = 0L
+    private var lastRenderedFrames: Long = 0L
 
     private val projectStore = ProjectStore(application)
     private val proxyStore = ProxyStore(application)
@@ -1284,7 +1309,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             naturalDurationUs = if (naturalDurUs > 0L) naturalDurUs else durationUs
         )
         val added = if (addLayerItem(item)) _layerItems.lastOrNull() else null
-        if (added != null) {
+        if (added != null && (qualityBudget.autoProxy || qualityGovernor.currentLevel != Level.FULL)) {
             pipProxyGenerator.getOrGenerateProxy(mediaPath).invokeOnCompletion {
                 previewEngine?.requestRender()
             }
@@ -3590,6 +3615,43 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         OverlayTextureCache.defaultProxyStore = proxyStore
+        OverlayTextureCache.defaultMaxByteBudget = qualityBudget.overlayTexBudgetMb * 1024L * 1024L
+        OverlayTextureCache.defaultPipUpdateFps = qualityBudget.pipUpdateFps
+
+        thermalMonitor.start()
+        perfExecutor.scheduleWithFixedDelay({
+            try {
+                val nowMs = SystemClock.uptimeMillis()
+                val currentLate = PreviewRenderer.activeLateFrames()
+                val currentRendered = PreviewRenderer.activeRenderedFrames()
+                val dLate = (currentLate - lastLateFrames).coerceAtLeast(0L)
+                val dRendered = (currentRendered - lastRenderedFrames).coerceAtLeast(0L)
+                lastLateFrames = currentLate
+                lastRenderedFrames = currentRendered
+
+                val latePct = if (dRendered > 0L) (dLate.toFloat() / dRendered.toFloat()) * 100f else 0f
+                val level = qualityGovernor.update(
+                    nowMs = nowMs,
+                    moderate = thermalMonitor.isModerate,
+                    severe = thermalMonitor.isSevere,
+                    headroom = thermalMonitor.headroom,
+                    lateFramePct = latePct,
+                    memLow = isMemoryPressureActive.get()
+                )
+
+                val targetFps = when (level) {
+                    Level.FULL -> qualityBudget.pipUpdateFps
+                    Level.REDUCED -> 15
+                    Level.MINIMAL -> 10
+                }
+                OverlayTextureCache.defaultPipUpdateFps = targetFps
+
+                if (level != Level.FULL) {
+                    OverlayTextureCache.pruneDefaultCache()
+                }
+            } catch (_: Throwable) {}
+        }, 2, 3, TimeUnit.SECONDS)
+
         loadInitialProject()
         viewModelScope.launch {
             ExportCoordinator.state.collect { state ->
@@ -3980,6 +4042,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun warmProxiesForVideoLayers() {
+        if (!qualityBudget.autoProxy && qualityGovernor.currentLevel == Level.FULL) return
         for (item in _layerItems) {
             if (item.type == LayerType.VIDEO && item.mediaPath.isNotEmpty()) {
                 if (proxyStore.getReadyProxyPath(item.mediaPath) == null) {
@@ -4843,8 +4906,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun onTrimMemory(level: Int) {
+        val isLow = level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE
+        isMemoryPressureActive.set(isLow)
+        if (isLow) {
+            qualityGovernor.update(
+                nowMs = SystemClock.uptimeMillis(),
+                moderate = thermalMonitor.isModerate,
+                severe = thermalMonitor.isSevere,
+                headroom = thermalMonitor.headroom,
+                lateFramePct = 0f,
+                memLow = true
+            )
+            OverlayTextureCache.pruneDefaultCache()
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
+        try {
+            thermalMonitor.stop()
+            perfExecutor.shutdownNow()
+        } catch (_: Throwable) {}
         pipProxyGenerator.release()
         previewEngine?.release()
     }

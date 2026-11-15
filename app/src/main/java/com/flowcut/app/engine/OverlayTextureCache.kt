@@ -28,8 +28,11 @@ class CachedOverlayTex(
     var texId: Int = 0,
     var contentHash: Int = 0,
     var width: Int = 0,
-    var height: Int = 0
-)
+    var height: Int = 0,
+    var lastUsedNs: Long = 0L
+) {
+    val byteSize: Long get() = width.toLong() * height.toLong() * 4L
+}
 
 /**
  * One-time GPU Texture Baker & Cache for multi-layer overlays (TEXT, STICKER, IMAGE).
@@ -39,6 +42,14 @@ class OverlayTextureCache(
     @Volatile var proxyStore: ProxyStore? = null,
     pipDecodeThreads: Int = defaultPipDecodeThreads()
 ) {
+
+    @Volatile
+    var maxByteBudget: Long = defaultMaxByteBudget
+
+    @Volatile
+    var pipUpdateFps: Int = defaultPipUpdateFps
+
+    var bakeScale: Float = 1.0f
 
     private val cache = HashMap<String, CachedOverlayTex>()
     private val videoStates = HashMap<String, VideoPipState>()
@@ -85,6 +96,7 @@ class OverlayTextureCache(
         h = 31 * h + if (item.isItalic) 1 else 0
         h = 31 * h + if (item.isUnderline) 1 else 0
         h = 31 * h + if (item.isUppercase) 1 else 0
+        h = 31 * h + (bakeScale.coerceIn(1.0f, 2.5f) * 100).toInt()
         return h
     }
 
@@ -100,6 +112,7 @@ class OverlayTextureCache(
         val targetHash = computeContentHash(item)
         val existing = cache[item.id]
         if (existing != null && existing.contentHash == targetHash && existing.texId > 0) {
+            existing.lastUsedNs = System.nanoTime()
             return existing
         }
 
@@ -143,7 +156,50 @@ class OverlayTextureCache(
         entry.contentHash = targetHash
         entry.width = w
         entry.height = h
+        entry.lastUsedNs = System.nanoTime()
+
+        pruneToBudget(setOf(item.id))
         return entry
+    }
+
+    /**
+     * Computes total VRAM bytes currently occupied by cached textures.
+     */
+    fun currentTotalBytes(): Long {
+        var total = 0L
+        for (entry in cache.values) {
+            if (entry.texId > 0) total += entry.byteSize
+        }
+        for (v in videoStates.values) {
+            if (v.texEntry.texId > 0) total += v.texEntry.byteSize
+        }
+        return total
+    }
+
+    /**
+     * LRU Cache Pruning (Task T5.4):
+     * Evicts oldest unreferenced textures via glDeleteTextures when total bytes exceed maxByteBudget.
+     * Protected items (currently visible/active in frame) are NEVER evicted.
+     */
+    fun pruneToBudget(protectedItemIds: Set<String> = emptySet()) {
+        var total = currentTotalBytes()
+        if (total <= maxByteBudget) return
+
+        val candidates = cache.entries
+            .filter { it.value.texId > 0 && it.key !in protectedItemIds }
+            .sortedBy { it.value.lastUsedNs }
+
+        val deleteIds = IntArray(1)
+        for ((id, entry) in candidates) {
+            if (total <= maxByteBudget) break
+            if (entry.texId > 0) {
+                deleteIds[0] = entry.texId
+                GLES20.glDeleteTextures(1, deleteIds, 0)
+                entry.texId = 0
+            }
+            total -= entry.byteSize
+            cache.remove(id)
+        }
     }
 
     private fun resolveTypeface(fontName: String, customFontPath: String, isBold: Boolean, isItalic: Boolean): Typeface {
@@ -180,6 +236,7 @@ class OverlayTextureCache(
         val rawText = if (item.isUppercase) displayText.uppercase() else displayText
         if (rawText.isEmpty()) return null
 
+        val effScale = bakeScale.coerceIn(1.0f, 2.5f)
         val textA = (item.textAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
         val fillTextColor = (item.textColorArgb and 0x00FFFFFF) or (textA shl 24)
 
@@ -187,7 +244,7 @@ class OverlayTextureCache(
 
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = fillTextColor
-            textSize = 68f
+            textSize = 68f * effScale
             this.typeface = typeface
             letterSpacing = item.letterSpacing.coerceIn(-0.08f, 1.40f)
             isUnderlineText = item.isUnderline
@@ -204,7 +261,8 @@ class OverlayTextureCache(
 
         // Measure text using full desired width so wide character spacing never clips
         val desiredWidth = ceil(StaticLayout.getDesiredWidth(rawText, textPaint)).toInt().coerceAtLeast(1)
-        val textW = desiredWidth.coerceIn(1, 1920)
+        val maxTextW = (1920 * effScale).toInt().coerceIn(1920, 4096)
+        val textW = desiredWidth.coerceIn(1, maxTextW)
 
         val layout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, textPaint, textW)
             .setAlignment(alignment)
@@ -215,12 +273,12 @@ class OverlayTextureCache(
         val textH = layout.height.coerceAtLeast(1)
 
         val hasLabel = item.labelAlpha > 0.01f || item.bgStyle in 1..2
-        val strokeOffset = (item.borderAlpha.coerceIn(0f, 1f) * 20f).toInt() + 16
-        val padX = if (hasLabel) 64 else (40 + strokeOffset)
-        val padY = if (hasLabel) 44 else (28 + strokeOffset)
+        val strokeOffset = ((item.borderAlpha.coerceIn(0f, 1f) * 20f).toInt() + 16) * effScale
+        val padX = if (hasLabel) (64f * effScale).toInt() else (40f * effScale + strokeOffset).toInt()
+        val padY = if (hasLabel) (44f * effScale).toInt() else (28f * effScale + strokeOffset).toInt()
 
-        val bmpW = (textW + padX * 2).coerceAtMost(2048)
-        val bmpH = (textH + padY * 2).coerceAtMost(2048)
+        val bmpW = (textW + padX * 2).coerceIn(1, 4096)
+        val bmpH = (textH + padY * 2).coerceIn(1, 4096)
         val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
@@ -232,24 +290,24 @@ class OverlayTextureCache(
                 color = labelColor
                 style = Paint.Style.FILL
             }
-            val rect = RectF(12f, 10f, bmpW - 12f, bmpH - 10f)
-            val cornerRadius = 32f
+            val rect = RectF(12f * effScale, 10f * effScale, bmpW - 12f * effScale, bmpH - 10f * effScale)
+            val cornerRadius = 32f * effScale
             canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
         } else if (item.bgStyle == 1) {
             val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = 0xCC000000.toInt()
                 style = Paint.Style.FILL
             }
-            val rect = RectF(12f, 10f, bmpW - 12f, bmpH - 10f)
-            val cornerRadius = 32f
+            val rect = RectF(12f * effScale, 10f * effScale, bmpW - 12f * effScale, bmpH - 10f * effScale)
+            val cornerRadius = 32f * effScale
             canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
         } else if (item.bgStyle == 2) {
             val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = 0xFFFFFFFF.toInt()
                 style = Paint.Style.FILL
             }
-            val rect = RectF(12f, 10f, bmpW - 12f, bmpH - 10f)
-            val cornerRadius = 32f
+            val rect = RectF(12f * effScale, 10f * effScale, bmpW - 12f * effScale, bmpH - 10f * effScale)
+            val cornerRadius = 32f * effScale
             canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
         }
 
@@ -257,7 +315,7 @@ class OverlayTextureCache(
         if (item.borderAlpha > 0.01f) {
             val borderA = (item.borderAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
             val borderColor = (item.borderColorArgb and 0x00FFFFFF) or (borderA shl 24)
-            val dynamicStrokeWidth = (item.borderAlpha.coerceIn(0f, 1f) * 20f).coerceAtLeast(1.5f)
+            val dynamicStrokeWidth = (item.borderAlpha.coerceIn(0f, 1f) * 20f).coerceAtLeast(1.5f) * effScale
             val strokePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = borderColor
                 textSize = textPaint.textSize
@@ -286,10 +344,10 @@ class OverlayTextureCache(
                 this.typeface = textPaint.typeface
                 letterSpacing = textPaint.letterSpacing
                 style = Paint.Style.STROKE
-                strokeWidth = 10f
+                strokeWidth = 10f * effScale
                 strokeJoin = Paint.Join.ROUND
                 strokeCap = Paint.Cap.ROUND
-                setShadowLayer(8f, 2f, 4f, 0x88000000.toInt())
+                setShadowLayer(8f * effScale, 2f * effScale, 4f * effScale, 0x88000000.toInt())
             }
             val strokeLayout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, strokePaint, textW)
                 .setAlignment(alignment)
@@ -307,8 +365,8 @@ class OverlayTextureCache(
         if (item.shadowAlpha > 0.01f) {
             val shadowA = (item.shadowAlpha.coerceIn(0f, 1f) * 255f).roundToInt()
             val shadowColor = (item.shadowColorArgb and 0x00FFFFFF) or (shadowA shl 24)
-            val shadowRadius = (item.shadowAlpha.coerceIn(0f, 1f) * 22f).coerceAtLeast(1f)
-            textPaint.setShadowLayer(shadowRadius, 8f, 8f, shadowColor)
+            val shadowRadius = (item.shadowAlpha.coerceIn(0f, 1f) * 22f).coerceAtLeast(1f) * effScale
+            textPaint.setShadowLayer(shadowRadius, 8f * effScale, 8f * effScale, shadowColor)
         }
 
         // 4. Draw primary text fill
@@ -324,18 +382,21 @@ class OverlayTextureCache(
         val glyph = item.text
         if (glyph.isEmpty()) return null
 
-        val bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+        val effScale = bakeScale.coerceIn(1.0f, 2.5f)
+        val size = (256 * effScale).roundToInt().coerceIn(256, 1024)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = 170f
+            textSize = 170f * effScale
             textAlign = Paint.Align.CENTER
-            setShadowLayer(14f, 0f, 6f, 0x55000000.toInt())
+            setShadowLayer(14f * effScale, 0f, 6f * effScale, 0x55000000.toInt())
         }
 
         val fontMetrics = paint.fontMetrics
-        val baseline = 128f - (fontMetrics.descent + fontMetrics.ascent) / 2f
-        canvas.drawText(glyph, 128f, baseline, paint)
+        val center = size / 2f
+        val baseline = center - (fontMetrics.descent + fontMetrics.ascent) / 2f
+        canvas.drawText(glyph, center, baseline, paint)
         return bitmap
     }
 
@@ -487,7 +548,9 @@ class OverlayTextureCache(
         val localUs = (timelineUs - item.startUs).coerceAtLeast(0L)
         val speedVal = if (item.speed > 0f) item.speed.toDouble() else 1.0
         val targetSourceUs = item.sourceInUs + (localUs.toDouble() * speedVal).toLong()
-        val frameBucket = targetSourceUs / 33_333L
+        val effectiveFps = pipUpdateFps.coerceIn(10, 30)
+        val bucketStepUs = 1_000_000L / effectiveFps.toLong()
+        val frameBucket = targetSourceUs / bucketStepUs
 
         if (isSynchronous) {
             // Offline Export: frame-accurate synchronous decode
@@ -520,7 +583,11 @@ class OverlayTextureCache(
                     state.currentBucket = frameBucket
                 }
             }
-            return if (state.texEntry.texId > 0) state.texEntry else null
+            if (state.texEntry.texId > 0) {
+                state.texEntry.lastUsedNs = System.nanoTime()
+                return state.texEntry
+            }
+            return null
         }
 
         // Live Preview: Non-blocking asynchronous decoding
@@ -593,7 +660,11 @@ class OverlayTextureCache(
             }
         }
 
-        return if (state.texEntry.texId > 0) state.texEntry else null
+        if (state.texEntry.texId > 0) {
+            state.texEntry.lastUsedNs = System.nanoTime()
+            return state.texEntry
+        }
+        return null
     }
 
     fun remove(itemId: String) {
@@ -649,8 +720,18 @@ class OverlayTextureCache(
         @Volatile
         var defaultProxyStore: ProxyStore? = null
 
+        @Volatile
+        var defaultMaxByteBudget: Long = 128L * 1024L * 1024L
+
+        @Volatile
+        var defaultPipUpdateFps: Int = 30
+
         fun defaultPipDecodeThreads(): Int =
             if (Runtime.getRuntime().availableProcessors() >= 4) 2 else 1
+
+        fun pruneDefaultCache() {
+            PreviewRenderer.activeInstance?.overlayTextureCache?.pruneToBudget()
+        }
     }
 }
 

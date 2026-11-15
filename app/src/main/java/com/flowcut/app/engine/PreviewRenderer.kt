@@ -316,7 +316,12 @@ class PreviewRenderer(
         }
 
     var onWaitingForFrameChanged: ((Boolean) -> Unit)? = null
-    private val overlayTextureCache = OverlayTextureCache().apply {
+    @Volatile
+    var lateFrames: Long = 0L
+    @Volatile
+    var renderedFrames: Long = 0L
+
+    val overlayTextureCache = OverlayTextureCache().apply {
         onFrameReady = { requestRender() }
     }
     private val animEvaluator = AnimatedTransformEvaluator()
@@ -1536,6 +1541,10 @@ class PreviewRenderer(
             }
 
             val durationUs = (System.nanoTime() - startNs) / 1000L
+            renderedFrames++
+            if (durationUs > 16_666L) {
+                lateFrames++
+            }
             frameTimeSumUs += durationUs
             if (durationUs > frameTimeMaxUs) {
                 frameTimeMaxUs = durationUs
@@ -1796,6 +1805,9 @@ class PreviewRenderer(
         fun resumeActiveDecoders() {
             activeInstance?.resumeFromExport()
         }
+
+        fun activeLateFrames(): Long = activeInstance?.lateFrames ?: 0L
+        fun activeRenderedFrames(): Long = activeInstance?.renderedFrames ?: 0L
 
         @Volatile
         private var _canvasAspectRatio: Float = 9f / 16f
