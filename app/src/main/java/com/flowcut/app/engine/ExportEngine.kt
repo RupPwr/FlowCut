@@ -24,6 +24,7 @@ import android.provider.MediaStore
 import android.util.Log
 import com.flowcut.app.BuildConfig
 import com.flowcut.app.audio.ClipAudioContributor
+import com.flowcut.app.engine.proxy.ProxyStore
 import com.flowcut.app.engine.export.Aspect
 import com.flowcut.app.engine.export.BitrateTable
 import com.flowcut.app.engine.export.ExportCapabilities
@@ -374,7 +375,7 @@ class ExportEngine(private val context: Context) {
             val rnd = TransitionRenderer()
             renderer = rnd
             rnd.init()
-            val otc = OverlayTextureCache()
+            val otc = OverlayTextureCache(proxyStore = OverlayTextureCache.defaultProxyStore ?: ProxyStore(context))
             overlayTextureCache = otc
             val animEvaluator = AnimatedTransformEvaluator()
 

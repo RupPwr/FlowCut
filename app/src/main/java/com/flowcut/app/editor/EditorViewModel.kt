@@ -47,6 +47,9 @@ import com.flowcut.app.engine.trackGroup
 import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.Clip
+import com.flowcut.app.engine.OverlayTextureCache
+import com.flowcut.app.engine.proxy.PipProxyGenerator
+import com.flowcut.app.engine.proxy.ProxyStore
 import com.flowcut.app.model.MAX_CLIPS
 import com.flowcut.app.model.MAX_TOTAL_MS
 import com.flowcut.app.model.ProgramTimeline
@@ -152,6 +155,8 @@ fun getLayerCapLimitMessage(type: LayerType): String {
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
 
     private val projectStore = ProjectStore(application)
+    private val proxyStore = ProxyStore(application)
+    private val pipProxyGenerator = PipProxyGenerator(application, proxyStore, viewModelScope)
     private val clipImporter = ClipImporter(application)
     private val exportEngine = ExportEngine(application)
     private val undoStack = UndoStack()
@@ -1278,7 +1283,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             intrinsicHeight = intrinsicHeight,
             naturalDurationUs = if (naturalDurUs > 0L) naturalDurUs else durationUs
         )
-        return if (addLayerItem(item)) _layerItems.lastOrNull() else null
+        val added = if (addLayerItem(item)) _layerItems.lastOrNull() else null
+        if (added != null) {
+            pipProxyGenerator.getOrGenerateProxy(mediaPath).invokeOnCompletion {
+                previewEngine?.requestRender()
+            }
+        }
+        return added
     }
 
     fun updateTextOverlay(itemId: String, text: String, textColorArgb: Int, bgStyle: Int, fontIndex: Int = 0): Boolean {
@@ -1525,6 +1536,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun removeLayerItem(itemId: String): Boolean {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return false
+        val itemToRemove = _layerItems[idx]
         pushUndoState()
         _layerItems.removeAt(idx)
         syncLayerPlan()
@@ -1536,6 +1548,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         updateProject(_uiState.value.project, recordUndo = false)
+        if (itemToRemove.type == LayerType.VIDEO && itemToRemove.mediaPath.isNotEmpty()) {
+            val stillUsed = _layerItems.any { it.type == LayerType.VIDEO && it.mediaPath == itemToRemove.mediaPath }
+            if (!stillUsed) {
+                proxyStore.deleteProxyFor(itemToRemove.mediaPath)
+            }
+        }
         return true
     }
 
@@ -3571,6 +3589,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        OverlayTextureCache.defaultProxyStore = proxyStore
         loadInitialProject()
         viewModelScope.launch {
             ExportCoordinator.state.collect { state ->
@@ -3736,6 +3755,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             val plan = CompiledLayerPlan.compile(_layerItems.toList())
             PreviewRenderer.setLayerPlan(plan)
+            warmProxiesForVideoLayers()
             val audioOverlays = _layerItems.filter { it.type == LayerType.AUDIO || (it.type == LayerType.VIDEO && it.volume > 0.001f) }
             ClipAudioContributor.syncAudioOverlays(audioOverlays)
             for (item in audioOverlays) {
@@ -3954,14 +3974,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 ClipAudioContributor.prewarmAudioPath(item.mediaPath)
             }
         }
+        warmProxiesForVideoLayers()
         _uiState.update { it.copy(currentScreen = AppScreen.EDITOR) }
         previewEngine?.seekTo(_uiState.value.currentMs)
+    }
+
+    private fun warmProxiesForVideoLayers() {
+        for (item in _layerItems) {
+            if (item.type == LayerType.VIDEO && item.mediaPath.isNotEmpty()) {
+                if (proxyStore.getReadyProxyPath(item.mediaPath) == null) {
+                    pipProxyGenerator.getOrGenerateProxy(item.mediaPath).invokeOnCompletion {
+                        previewEngine?.requestRender()
+                    }
+                }
+            }
+        }
     }
 
     fun resetProject(onComplete: () -> Unit = {}) {
         isNewerProjectBlocked = false
         viewModelScope.launch {
             projectStore.clearAll()
+            proxyStore.clearAll()
+            pipProxyGenerator.cancelAll()
             undoStack.clear()
             undoTimeMaps.clear()
             redoTimeMaps.clear()
@@ -4810,6 +4845,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        pipProxyGenerator.release()
         previewEngine?.release()
     }
 }

@@ -14,6 +14,7 @@ import android.os.Build
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
+import com.flowcut.app.engine.proxy.ProxyStore
 import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.ceil
@@ -34,7 +35,10 @@ class CachedOverlayTex(
  * One-time GPU Texture Baker & Cache for multi-layer overlays (TEXT, STICKER, IMAGE).
  * Instantiated per GL context (PreviewRenderer and ExportEngine) and freed on release().
  */
-class OverlayTextureCache {
+class OverlayTextureCache(
+    @Volatile var proxyStore: ProxyStore? = null,
+    pipDecodeThreads: Int = defaultPipDecodeThreads()
+) {
 
     private val cache = HashMap<String, CachedOverlayTex>()
     private val videoStates = HashMap<String, VideoPipState>()
@@ -44,7 +48,7 @@ class OverlayTextureCache {
     /**
      * Dedicated background executor for non-blocking preview PIP video frame decoding.
      */
-    private val pipDecodeExecutor = Executors.newSingleThreadExecutor { runnable ->
+    private val pipDecodeExecutor = Executors.newFixedThreadPool(pipDecodeThreads.coerceIn(1, 4)) { runnable ->
         Thread(runnable, "FlowCut-PipDecode")
     }
 
@@ -423,6 +427,7 @@ class OverlayTextureCache {
 
     /**
      * Extracts a scaled video frame from the bounded retriever pool.
+     * Prefers 640px all-intra proxy when available, falling back to original media.
      */
     private fun extractScaledVideoFrame(
         path: String,
@@ -431,27 +436,40 @@ class OverlayTextureCache {
         targetH: Int
     ): Bitmap? {
         if (path.isEmpty()) return null
-        val retriever = retrieverPool.getRetriever(path) ?: return null
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                retriever.getScaledFrameAtTime(
-                    targetSourceUs.coerceAtLeast(0L),
-                    MediaMetadataRetriever.OPTION_CLOSEST,
-                    targetW,
-                    targetH
-                ) ?: retriever.getFrameAtTime(
-                    targetSourceUs.coerceAtLeast(0L),
-                    MediaMetadataRetriever.OPTION_CLOSEST
-                )
-            } else {
-                retriever.getFrameAtTime(
-                    targetSourceUs.coerceAtLeast(0L),
-                    MediaMetadataRetriever.OPTION_CLOSEST
-                )
+        val store = proxyStore ?: defaultProxyStore
+        val proxyPath = store?.getReadyProxyPath(path)
+        val effectivePath = proxyPath ?: path
+
+        fun decodeFrom(targetPath: String): Bitmap? {
+            val retriever = retrieverPool.getRetriever(targetPath) ?: return null
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    retriever.getScaledFrameAtTime(
+                        targetSourceUs.coerceAtLeast(0L),
+                        MediaMetadataRetriever.OPTION_CLOSEST,
+                        targetW,
+                        targetH
+                    ) ?: retriever.getFrameAtTime(
+                        targetSourceUs.coerceAtLeast(0L),
+                        MediaMetadataRetriever.OPTION_CLOSEST
+                    )
+                } else {
+                    retriever.getFrameAtTime(
+                        targetSourceUs.coerceAtLeast(0L),
+                        MediaMetadataRetriever.OPTION_CLOSEST
+                    )
+                }
+            } catch (_: Throwable) {
+                null
             }
-        } catch (_: Throwable) {
-            null
         }
+
+        var bmp = decodeFrom(effectivePath)
+        if (bmp == null && effectivePath != path) {
+            // Seamless fallback to original source media if proxy failed to decode
+            bmp = decodeFrom(path)
+        }
+        return bmp
     }
 
     /**
@@ -625,6 +643,14 @@ class OverlayTextureCache {
         try {
             pipDecodeExecutor.shutdownNow()
         } catch (_: Throwable) {}
+    }
+
+    companion object {
+        @Volatile
+        var defaultProxyStore: ProxyStore? = null
+
+        fun defaultPipDecodeThreads(): Int =
+            if (Runtime.getRuntime().availableProcessors() >= 4) 2 else 1
     }
 }
 
