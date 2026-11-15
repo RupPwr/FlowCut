@@ -44,8 +44,12 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import com.flowcut.app.audio.WaveformService
+import com.flowcut.app.audio.WaveformData
+import com.flowcut.app.ui.media.ThumbnailService
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -585,6 +589,80 @@ fun TimelineCanvas(
             .distinct()
     }
     val pipThumbLoader = remember(coroutineScope) { PipThumbLoader(coroutineScope, maxEntries = 256) }
+
+    val context = LocalContext.current
+    val thumbnailService = remember(context, coroutineScope) { ThumbnailService(context, coroutineScope) }
+    val waveformService = remember(context, coroutineScope) { WaveformService(context, coroutineScope) }
+
+    // Waveform collection for all media paths (Clips + Audio Overlays + Video Overlays)
+    val allWaveformPaths = remember(holder.current.project.clips, overlayItems) {
+        val paths = mutableListOf<String>()
+        for (c in holder.current.project.clips) {
+            if (c.path.isNotEmpty()) paths.add(c.path)
+        }
+        for (o in overlayItems) {
+            if ((o.type == LayerType.AUDIO || o.type == LayerType.VIDEO) && o.mediaPath.isNotEmpty()) {
+                paths.add(o.mediaPath)
+            }
+        }
+        paths.distinct()
+    }
+
+    LaunchedEffect(allWaveformPaths) {
+        waveformService.ensure(allWaveformPaths) {
+            currentOnWakeFrameDriver()
+        }
+    }
+
+    // Main-Track Filmstrip Thumbnail Request Collection (outside onDraw, Rule R10)
+    val currentClips = holder.current.project.clips
+    val currentPlayheadUs = playhead.timeUs
+    val currentDpPerSecond = zoomState.dpPerSecond
+    LaunchedEffect(currentClips, currentDpPerSecond, currentPlayheadUs / 500_000L) {
+        if (currentClips.isNotEmpty()) {
+            val requests = mutableListOf<ThumbnailService.TileRequest>()
+            val activeKeys = mutableSetOf<String>()
+            val tUs = playhead.timeUs
+            val pxPerSec = zoomState.pxPerSecond(density)
+            val cellStepUs = when {
+                pxPerSec >= 120.0 -> 500_000L
+                pxPerSec >= 40.0 -> 1_000_000L
+                pxPerSec >= 15.0 -> 2_000_000L
+                else -> 5_000_000L
+            }
+            val visibleSpanUs = 10_000_000L
+            val minVisibleUs = (tUs - visibleSpanUs).coerceAtLeast(0L)
+            val maxVisibleUs = tUs + visibleSpanUs
+
+            val snap = holder.current
+            val nClips = snap.main.n
+            for (k in 0 until nClips) {
+                val clipStartUs = msToUs(snap.main.startMs[k])
+                val clipEndUs = msToUs(snap.main.endMs[k])
+                if (clipEndUs < minVisibleUs || clipStartUs > maxVisibleUs) continue
+
+                val clipObj = snap.project.clips.getOrNull(k) ?: continue
+                if (clipObj.path.isEmpty()) continue
+
+                val stepStartUs = maxOf(clipStartUs, minVisibleUs)
+                val stepEndUs = minOf(clipEndUs, maxVisibleUs)
+                var cellUs = stepStartUs
+                while (cellUs < stepEndUs) {
+                    val localUs = cellUs - clipStartUs
+                    val sourceUs = clipObj.map().sourceUs(localUs)
+                    val req = ThumbnailService.TileRequest(clipObj.path, sourceUs)
+                    requests.add(req)
+                    activeKeys.add(req.key)
+                    cellUs += cellStepUs
+                }
+            }
+
+            thumbnailService.requestTiles(requests) {
+                currentOnWakeFrameDriver()
+            }
+            thumbnailService.cancelStaleRequests(activeKeys)
+        }
+    }
 
     LaunchedEffect(pipMediaPaths) {
         pipThumbLoader.ensure(pipMediaPaths) {
@@ -2006,67 +2084,115 @@ fun TimelineCanvas(
 
                 drawPath(path = clipPath, color = clipBgColor)
 
-                // Internal Filmstrip motion cues
-                val visibleStartUs = maxOf(clipStartUs, tUs - spanUs)
-                val visibleEndUs = minOf(clipEndUs, tUs + spanUs)
-                val cell0 = maxOf(0L, (visibleStartUs - clipStartUs) / cellStepUs)
-                val cell1 = minOf((clipEndUs - clipStartUs) / cellStepUs + 1L, ((visibleEndUs - clipStartUs) / cellStepUs) + 1L)
+                clipPath(path = clipPath) {
+                    val clipObj = snapshot.project.clips.getOrNull(k)
+                    val clipMediaPath = clipObj?.path.orEmpty()
 
-                for (cellIdx in cell0..cell1) {
-                    val cellTimeUs = clipStartUs + cellIdx * cellStepUs
-                    if (cellTimeUs >= clipEndUs) break
+                    // Internal Filmstrip Thumbnails (Task T4.2 & Rule R10)
+                    val visibleStartUs = maxOf(clipStartUs, tUs - spanUs)
+                    val visibleEndUs = minOf(clipEndUs, tUs + spanUs)
+                    val cell0 = maxOf(0L, (visibleStartUs - clipStartUs) / cellStepUs)
+                    val cell1 = minOf((clipEndUs - clipStartUs) / cellStepUs + 1L, ((visibleEndUs - clipStartUs) / cellStepUs) + 1L)
 
-                    val cellX = zoomState.timeUsToX(cellTimeUs, offsetPx, halfWidthInt, pxPerUs)
-                    val nextCellTimeUs = minOf(clipEndUs, cellTimeUs + cellStepUs)
-                    val nextCellX = zoomState.timeUsToX(nextCellTimeUs, offsetPx, halfWidthInt, pxPerUs)
+                    for (cellIdx in cell0..cell1) {
+                        val cellTimeUs = clipStartUs + cellIdx * cellStepUs
+                        if (cellTimeUs >= clipEndUs) break
 
-                    if (cellIdx % 2L == 1L) {
-                        val stripLeft = maxOf(leftX, cellX)
-                        val stripRight = minOf(rightX, nextCellX)
-                        if (stripRight > stripLeft) {
-                            drawRect(
-                                color = clipAltCellColor,
-                                topLeft = Offset(stripLeft, mainClipTop),
-                                size = Size(stripRight - stripLeft, mainClipHeight)
+                        val cellX = zoomState.timeUsToX(cellTimeUs, offsetPx, halfWidthInt, pxPerUs)
+                        val nextCellTimeUs = minOf(clipEndUs, cellTimeUs + cellStepUs)
+                        val nextCellX = zoomState.timeUsToX(nextCellTimeUs, offsetPx, halfWidthInt, pxPerUs)
+
+                        val localTimelineUs = (cellTimeUs - clipStartUs).coerceAtLeast(0L)
+                        val sourceUs = clipObj?.map()?.sourceUs(localTimelineUs) ?: localTimelineUs
+                        val thumb = if (clipMediaPath.isNotEmpty()) {
+                            thumbnailService.peek(clipMediaPath, sourceUs)
+                        } else null
+
+                        if (thumb != null) {
+                            val cellW = maxOf(1, (nextCellX - cellX).toInt())
+                            val cellH = maxOf(1, mainClipHeight.toInt())
+                            drawImage(
+                                image = thumb,
+                                dstOffset = IntOffset(cellX.toInt(), mainClipTop.toInt()),
+                                dstSize = IntSize(cellW, cellH)
                             )
+                        } else if (cellIdx % 2L == 1L) {
+                            val stripLeft = maxOf(leftX, cellX)
+                            val stripRight = minOf(rightX, nextCellX)
+                            if (stripRight > stripLeft) {
+                                drawRect(
+                                    color = clipAltCellColor,
+                                    topLeft = Offset(stripLeft, mainClipTop),
+                                    size = Size(stripRight - stripLeft, mainClipHeight)
+                                )
+                            }
+                        }
+
+                        if (cellX > leftX + 2f && cellX < rightX - 2f) {
+                            drawLine(
+                                color = clipCellDividerColor,
+                                start = Offset(cellX, mainClipTop),
+                                end = Offset(cellX, mainClipBottom),
+                                strokeWidth = 1f * density
+                            )
+                        }
+
+                        if (cellIdx == 0L) {
+                            val textLeft = leftX + 8f * density
+                            val textTop = mainClipTop + 4f * density
+                            if (textLeft < rightX - 16f * density) {
+                                val title = clipTitleCache.get(k)
+                                drawTextSafe(
+                                    textMeasurer = textMeasurer,
+                                    text = title,
+                                    x = textLeft,
+                                    y = textTop,
+                                    style = clipLabelStyle
+                                )
+                            }
+                        } else {
+                            val textLeft = cellX + 4f * density
+                            val textTop = mainClipTop + 4f * density
+                            if (textLeft < rightX - 12f * density) {
+                                val secOffset = (cellTimeUs - clipStartUs) / 1_000_000L
+                                val marker = secondOffsetCache.get(secOffset)
+                                drawTextSafe(
+                                    textMeasurer = textMeasurer,
+                                    text = marker,
+                                    x = textLeft,
+                                    y = textTop,
+                                    style = clipLabelStyle
+                                )
+                            }
                         }
                     }
 
-                    if (cellX > leftX + 2f && cellX < rightX - 2f) {
-                        drawLine(
-                            color = clipCellDividerColor,
-                            start = Offset(cellX, mainClipTop),
-                            end = Offset(cellX, mainClipBottom),
-                            strokeWidth = 1f * density
-                        )
-                    }
-
-                    if (cellIdx == 0L) {
-                        val textLeft = leftX + 8f * density
-                        val textTop = mainClipTop + 4f * density
-                        if (textLeft < rightX - 16f * density) {
-                            val title = clipTitleCache.get(k)
-                            drawTextSafe(
-                                textMeasurer = textMeasurer,
-                                text = title,
-                                x = textLeft,
-                                y = textTop,
-                                style = clipLabelStyle
-                            )
-                        }
-                    } else {
-                        val textLeft = cellX + 4f * density
-                        val textTop = mainClipTop + 4f * density
-                        if (textLeft < rightX - 12f * density) {
-                            val secOffset = (cellTimeUs - clipStartUs) / 1_000_000L
-                            val marker = secondOffsetCache.get(secOffset)
-                            drawTextSafe(
-                                textMeasurer = textMeasurer,
-                                text = marker,
-                                x = textLeft,
-                                y = textTop,
-                                style = clipLabelStyle
-                            )
+                    // Audio Waveform overlay on Main Clip (Task T4.4 & Rule R10/R11)
+                    if (clipMediaPath.isNotEmpty()) {
+                        val clipWave = waveformService.peek(clipMediaPath)
+                        if (clipWave != null && clipWave.peaks.isNotEmpty()) {
+                            val waveBaseY = mainClipBottom - (2f * density)
+                            val maxWaveH = 14f * density
+                            val waveStepPx = 3f * density
+                            var waveX = leftX + (2f * density)
+                            while (waveX <= rightX - (2f * density)) {
+                                if (waveX in -50f..(size.width + 50f)) {
+                                    val tickTimelineUs = zoomState.xToTimeUs(waveX, offsetPx, halfWidthInt, pxPerUs)
+                                    val localUs = (tickTimelineUs - clipStartUs).coerceAtLeast(0L)
+                                    val sourceUs = clipObj?.map()?.sourceUs(localUs) ?: localUs
+                                    val peakIdx = ((sourceUs * clipWave.samplesPerSec) / 1_000_000L).toInt().coerceIn(0, clipWave.peaks.lastIndex)
+                                    val peakVal = clipWave.peaks[peakIdx]
+                                    val barH = maxOf(1.5f * density, peakVal * maxWaveH)
+                                    drawLine(
+                                        color = Color(0x66FFFFFF),
+                                        start = Offset(waveX, waveBaseY - barH),
+                                        end = Offset(waveX, waveBaseY),
+                                        strokeWidth = 1.2f * density,
+                                        cap = StrokeCap.Round
+                                    )
+                                }
+                                waveX += waveStepPx
+                            }
                         }
                     }
                 }
@@ -2689,6 +2815,8 @@ fun TimelineCanvas(
                     } else {
                         // When audio exists: HIDE the text label completely and show ONLY beat waveform bars
                         val soundCenterY = soundBarTop + (soundBarBottom - soundBarTop) / 2f
+                        val maxBarH = (soundBarBottom - soundBarTop) * 0.7f
+                        val minBarH = 2f * density
                         for (itemIdx in overlayItems.indices) {
                             val aItem = overlayItems[itemIdx]
                             if (aItem.type != LayerType.AUDIO) continue
@@ -2697,15 +2825,27 @@ fun TimelineCanvas(
                             val clampedSX = maxOf(aSX, soundBarLeft)
                             val clampedEX = minOf(aEX, soundBarRight)
                             if (clampedEX > clampedSX + 4f * density) {
+                                val wave = if (aItem.mediaPath.isNotEmpty()) waveformService.peek(aItem.mediaPath) else null
                                 var tickX = clampedSX + (2f * density)
                                 var tickIdx = 0
                                 while (tickX <= clampedEX - (2f * density)) {
-                                    val tickH = when (tickIdx % 5) {
-                                        0 -> 10f * density
-                                        1 -> 6f * density
-                                        2 -> 13f * density
-                                        3 -> 7f * density
-                                        else -> 11f * density
+                                    val tickH: Float
+                                    if (wave != null && wave.peaks.isNotEmpty()) {
+                                        val tickTimelineUs = zoomState.xToTimeUs(tickX, offsetPx, halfWidthInt, pxPerUs)
+                                        val localUs = (tickTimelineUs - aItem.startUs).coerceAtLeast(0L)
+                                        val speedVal = if (aItem.speed > 0f) aItem.speed.toDouble() else 1.0
+                                        val sourceUs = aItem.sourceInUs + (localUs.toDouble() * speedVal).toLong()
+                                        val pIdx = ((sourceUs * wave.samplesPerSec) / 1_000_000L).toInt().coerceIn(0, wave.peaks.lastIndex)
+                                        val peakVal = wave.peaks[pIdx]
+                                        tickH = maxOf(minBarH, peakVal * maxBarH)
+                                    } else {
+                                        tickH = when (tickIdx % 5) {
+                                            0 -> 10f * density
+                                            1 -> 6f * density
+                                            2 -> 13f * density
+                                            3 -> 7f * density
+                                            else -> 11f * density
+                                        }
                                     }
                                     drawLine(
                                         color = colorSoundWaveformTick,

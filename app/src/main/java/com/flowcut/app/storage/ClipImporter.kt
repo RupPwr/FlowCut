@@ -5,6 +5,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.flowcut.app.audio.WaveformService
 import com.flowcut.app.engine.media.ColorInfoCheck
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.MAX_1080P_LONG_SIDE
@@ -15,6 +16,7 @@ import com.flowcut.app.model.MAX_TOTAL_MS
 import com.flowcut.app.model.MIN_CLIP_MS
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -27,6 +29,8 @@ sealed class ImportValidationResult {
 }
 
 class ClipImporter(private val context: Context) {
+
+    private val waveformService = WaveformService(context, CoroutineScope(Dispatchers.IO + SupervisorJob()))
 
     private val clipsDir: File
         get() = File(context.filesDir, "clips").apply { if (!exists()) mkdirs() }
@@ -47,6 +51,7 @@ class ClipImporter(private val context: Context) {
                 is ImportValidationResult.Success -> {
                     importedClips.add(res.clip)
                     runningTotalMs += res.clip.durationMs
+                    waveformService.ensure(listOf(res.clip.path)) {}
                 }
                 is ImportValidationResult.Error -> {
                     withContext(Dispatchers.Main) {
