@@ -62,6 +62,8 @@ import com.flowcut.app.model.Clip
 import com.flowcut.app.engine.OverlayTextureCache
 import com.flowcut.app.engine.proxy.PipProxyGenerator
 import com.flowcut.app.engine.proxy.ProxyStore
+import com.flowcut.app.model.MAX_4K_LONG_SIDE
+import com.flowcut.app.model.MAX_4K_SHORT_SIDE
 import com.flowcut.app.model.MAX_CLIPS
 import com.flowcut.app.model.MAX_TOTAL_MS
 import com.flowcut.app.model.ProgramTimeline
@@ -1270,9 +1272,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         val endUs = startUs + durationUs
-        var intrinsicWidth = 0
-        var intrinsicHeight = 0
         var naturalDurUs = 0L
+        val formatW = if (videoTrackFormat.containsKey(MediaFormat.KEY_WIDTH)) {
+            videoTrackFormat.getInteger(MediaFormat.KEY_WIDTH)
+        } else 0
+        val formatH = if (videoTrackFormat.containsKey(MediaFormat.KEY_HEIGHT)) {
+            videoTrackFormat.getInteger(MediaFormat.KEY_HEIGHT)
+        } else 0
+        val formatRot = if (videoTrackFormat.containsKey(MediaFormat.KEY_ROTATION)) {
+            videoTrackFormat.getInteger(MediaFormat.KEY_ROTATION)
+        } else -1
+
+        var retrW = 0
+        var retrH = 0
+        var retrRot = 0
+
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(mediaPath)
@@ -1281,20 +1295,52 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val rotationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
             val durMsStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
             naturalDurUs = (durMsStr?.toLongOrNull() ?: 0L) * 1000L
-            var w = widthStr?.toIntOrNull() ?: 0
-            var h = heightStr?.toIntOrNull() ?: 0
-            val rotation = rotationStr?.toIntOrNull() ?: 0
-            if (rotation == 90 || rotation == 270) {
-                val tmp = w
-                w = h
-                h = tmp
-            }
-            intrinsicWidth = w
-            intrinsicHeight = h
+            retrW = widthStr?.toIntOrNull() ?: 0
+            retrH = heightStr?.toIntOrNull() ?: 0
+            retrRot = rotationStr?.toIntOrNull() ?: 0
         } catch (_: Throwable) {
         } finally {
             try { retriever.release() } catch (_: Throwable) {}
         }
+
+        val canonicalRot = when {
+            formatRot in listOf(0, 90, 180, 270) -> formatRot
+            retrRot in listOf(0, 90, 180, 270) -> retrRot
+            else -> 0
+        }
+
+        val rawW: Int
+        val rawH: Int
+        if (formatW > 0 && formatH > 0) {
+            rawW = formatW
+            rawH = formatH
+        } else if (retrW > 0 && retrH > 0) {
+            if ((canonicalRot == 90 || canonicalRot == 270) && retrW < retrH) {
+                // Guard against OEM MediaMetadataRetriever implementations that already return pre-rotated display dimensions
+                rawW = retrH
+                rawH = retrW
+            } else {
+                rawW = retrW
+                rawH = retrH
+            }
+        } else {
+            rawW = maxOf(formatW, retrW)
+            rawH = maxOf(formatH, retrH)
+        }
+
+        val displayW = if (canonicalRot == 90 || canonicalRot == 270) rawH else rawW
+        val displayH = if (canonicalRot == 90 || canonicalRot == 270) rawW else rawH
+        val shortSide = minOf(displayW, displayH)
+        val longSide = maxOf(displayW, displayH)
+
+        if (shortSide > MAX_4K_SHORT_SIDE || longSide > MAX_4K_LONG_SIDE) {
+            showToast("Video resolution (${displayW}x${displayH}) exceeds maximum 4K limit (${MAX_4K_LONG_SIDE}px).")
+            try { java.io.File(mediaPath).delete() } catch (_: Throwable) {}
+            return null
+        }
+
+        val intrinsicWidth = displayW
+        val intrinsicHeight = displayH
 
         val item = OverlayItem(
             id = UUID.randomUUID().toString(),
