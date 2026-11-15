@@ -130,7 +130,18 @@ data class EditorUiState(
     val canvasColorArgb: Int = 0xFF000000.toInt(),
     val canvasGradientId: Int = -1
 ) {
-    val aspectRatioFloat: Float get() = if (aspectRatioMode.aspect > 0f) aspectRatioMode.aspect else (9f / 16f)
+    val aspectRatioFloat: Float get() = when {
+        aspectRatioMode == AspectRatioMode.ORIGINAL -> {
+            val c = project.clips.firstOrNull()
+            if (c != null && c.displayWidth > 0 && c.displayHeight > 0) {
+                c.displayWidth.toFloat() / c.displayHeight.toFloat()
+            } else {
+                9f / 16f
+            }
+        }
+        aspectRatioMode.aspect > 0f -> aspectRatioMode.aspect
+        else -> 9f / 16f
+    }
 }
 
 data class SplitResult(
@@ -242,6 +253,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val undoAspectRatios = ArrayDeque<AspectRatioMode>()
     private val redoAspectRatios = ArrayDeque<AspectRatioMode>()
     private var preSheetAspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16
+    private var isAspectRatioUserLocked: Boolean = false
+    private var preSheetUserLocked: Boolean = false
     private val _layerItems = mutableStateListOf<OverlayItem>()
     val layerItems: List<OverlayItem> get() = _layerItems
 
@@ -1087,11 +1100,46 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun findMatchingAspectRatioMode(displayWidth: Int, displayHeight: Int): AspectRatioMode {
+        if (displayWidth <= 0 || displayHeight <= 0) return AspectRatioMode.RATIO_9_16
+        val clipAspect = displayWidth.toFloat() / displayHeight.toFloat()
+        val standardModes = listOf(
+            AspectRatioMode.RATIO_16_9,
+            AspectRatioMode.RATIO_9_16,
+            AspectRatioMode.RATIO_1_1,
+            AspectRatioMode.RATIO_4_5,
+            AspectRatioMode.RATIO_4_3,
+            AspectRatioMode.RATIO_3_4,
+            AspectRatioMode.RATIO_5_4,
+            AspectRatioMode.RATIO_3_2,
+            AspectRatioMode.RATIO_2_3,
+            AspectRatioMode.RATIO_2_1,
+            AspectRatioMode.RATIO_1_2,
+            AspectRatioMode.RATIO_21_9
+        )
+        var bestMode: AspectRatioMode? = null
+        var minDiff = Float.MAX_VALUE
+        for (mode in standardModes) {
+            val diff = kotlin.math.abs(clipAspect - mode.aspect)
+            if (diff < minDiff) {
+                minDiff = diff
+                bestMode = mode
+            }
+        }
+        return if (minDiff <= 0.02f && bestMode != null) {
+            bestMode
+        } else {
+            AspectRatioMode.ORIGINAL
+        }
+    }
+
     fun startAspectRatioEditing() {
         preSheetAspectRatioMode = _uiState.value.aspectRatioMode
+        preSheetUserLocked = isAspectRatioUserLocked
     }
 
     fun setAspectRatioLive(mode: AspectRatioMode) {
+        isAspectRatioUserLocked = true
         _uiState.update { it.copy(aspectRatioMode = mode) }
         val effective = resolveEffectiveAspect(mode)
         PreviewRenderer.setAspectRatioMode(mode, _uiState.value.project.clips.firstOrNull())
@@ -1107,6 +1155,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun commitAspectRatio(mode: AspectRatioMode? = null) {
+        isAspectRatioUserLocked = true
         val finalMode = mode ?: _uiState.value.aspectRatioMode
         if (finalMode != preSheetAspectRatioMode) {
             val currentProject = _uiState.value.project
@@ -1137,6 +1186,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cancelAspectRatio() {
+        isAspectRatioUserLocked = preSheetUserLocked
         _uiState.update { it.copy(aspectRatioMode = preSheetAspectRatioMode) }
         val effective = resolveEffectiveAspect(preSheetAspectRatioMode)
         PreviewRenderer.setAspectRatioMode(preSheetAspectRatioMode, _uiState.value.project.clips.firstOrNull())
@@ -3854,6 +3904,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val restoredAspectMode = AspectRatioMode.entries.firstOrNull { it.name == draft.aspectRatioModeName }
                 ?: AspectRatioMode.RATIO_9_16
             preSheetAspectRatioMode = restoredAspectMode
+            isAspectRatioUserLocked = loaded.clips.isNotEmpty()
             PreviewRenderer.setAspectRatioMode(restoredAspectMode, loaded.clips.firstOrNull())
 
             // Restore Overlays
@@ -4072,6 +4123,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         PreviewRenderer.syncFilterStates(clipFilterStates)
         PreviewRenderer.syncJunctionTransitions(junctionTransitionModes)
         PreviewRenderer.setAspectRatioMode(_uiState.value.aspectRatioMode, _uiState.value.project.clips.firstOrNull())
+        if (_uiState.value.project.clips.isNotEmpty()) {
+            isAspectRatioUserLocked = true
+        }
         val items = _layerItems.toList()
         val plan = CompiledLayerPlan.compile(items)
         PreviewRenderer.setLayerPlan(plan)
@@ -4135,6 +4189,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             undoAspectRatios.clear()
             redoAspectRatios.clear()
             preSheetAspectRatioMode = AspectRatioMode.RATIO_9_16
+            isAspectRatioUserLocked = false
             junctionTransitionModes.clear()
             preSheetTransitions = null
             preSheetJunctionModes = null
@@ -4170,6 +4225,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun createNewProject(uris: List<Uri>) {
         if (uris.isEmpty()) return
         isNewerProjectBlocked = false
+        isAspectRatioUserLocked = false
         val urisToProcess = uris.take(MAX_CLIPS)
 
         viewModelScope.launch {
@@ -4222,6 +4278,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 if (clampedClips.isNotEmpty()) {
+                    val firstClip = clampedClips.first()
+                    val autoMode = if (!isAspectRatioUserLocked) {
+                        findMatchingAspectRatioMode(firstClip.displayWidth, firstClip.displayHeight)
+                    } else {
+                        _uiState.value.aspectRatioMode
+                    }
                     val newProject = ProgramTimeline.addClips(Project(), clampedClips)
                     undoStack.clear()
                     updateProject(newProject, recordUndo = false)
@@ -4231,10 +4293,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                             currentMs = 0L,
                             selectedClipIndex = null,
                             selectedJunctionIndex = null,
-                            selectedOverlayId = null
+                            selectedOverlayId = null,
+                            aspectRatioMode = autoMode
                         )
                     }
+                    preSheetAspectRatioMode = autoMode
+                    val effective = resolveEffectiveAspect(autoMode)
+                    PreviewRenderer.setAspectRatioMode(autoMode, firstClip)
+                    PreviewRenderer.setCanvasAspectRatio(effective)
                     previewEngine?.seekTo(0L)
+                    previewEngine?.requestRender()
                 }
             }
 
@@ -4246,6 +4314,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun importClips(uris: List<Uri>) {
         val currentClips = _uiState.value.project.clips
+        val wasEmpty = currentClips.isEmpty()
         val currentClipsCount = currentClips.size
         if (currentClipsCount >= MAX_CLIPS) {
             showToast("Maximum clip limit reached ($MAX_CLIPS clips)")
@@ -4313,6 +4382,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if (clampedClips.isNotEmpty()) {
                     val newProject = ProgramTimeline.addClips(_uiState.value.project, clampedClips)
                     updateProject(newProject, recordUndo = true)
+
+                    if (wasEmpty && !isAspectRatioUserLocked) {
+                        val firstClip = clampedClips.first()
+                        val autoMode = findMatchingAspectRatioMode(firstClip.displayWidth, firstClip.displayHeight)
+                        _uiState.update {
+                            it.copy(aspectRatioMode = autoMode)
+                        }
+                        preSheetAspectRatioMode = autoMode
+                        val effective = resolveEffectiveAspect(autoMode)
+                        PreviewRenderer.setAspectRatioMode(autoMode, firstClip)
+                        PreviewRenderer.setCanvasAspectRatio(effective)
+                        previewEngine?.requestRender()
+                    }
                 }
             }
 

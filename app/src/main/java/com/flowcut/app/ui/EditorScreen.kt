@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import com.flowcut.app.engine.AspectRatioMode
+import com.flowcut.app.engine.export.Aspect
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -3499,7 +3500,22 @@ private fun ExportConfigSheetHost(
             val res = resolvedViewModel?.uiState?.value?.exportResolution ?: 1080
             val fps = resolvedViewModel?.uiState?.value?.exportFps ?: 30
             val bitrateBps = resolvedViewModel?.uiState?.value?.exportBitrateBps ?: 14_000_000
+            val ratioMode = resolvedViewModel?.uiState?.value?.aspectRatioMode ?: AspectRatioMode.RATIO_9_16
+            val exportAspect = if (ratioMode == AspectRatioMode.ORIGINAL) {
+                val clip0 = resolvedViewModel?.uiState?.value?.project?.clips?.firstOrNull()
+                if (clip0 != null) {
+                    val rot = clip0.rotation
+                    val dispW = if (rot == 90 || rot == 270) clip0.height else clip0.width
+                    val dispH = if (rot == 90 || rot == 270) clip0.width else clip0.height
+                    Aspect(dispW.coerceAtLeast(1), dispH.coerceAtLeast(1))
+                } else {
+                    Aspect.R9_16
+                }
+            } else {
+                Aspect(ratioMode.ratioWidth.coerceAtLeast(1), ratioMode.ratioHeight.coerceAtLeast(1))
+            }
             ExportConfigSheet(
+                exportAspect = exportAspect,
                 initialResolution = res,
                 initialFps = fps,
                 initialBitrateBps = bitrateBps,

@@ -4962,6 +4962,7 @@ fun ClipAdjustSheet(
  */
 @Composable
 fun ExportConfigSheet(
+    exportAspect: Aspect = Aspect.R9_16,
     initialResolution: Int = 1080,
     initialFps: Int = 30,
     initialBitrateBps: Int? = null,
@@ -5008,10 +5009,10 @@ fun ExportConfigSheet(
             Quality.EXTREME to "Extreme"
         )
     }
-    val initialQualityIndex = remember(initialBitrateBps, initialResolution, initialFps) {
+    val initialQualityIndex = remember(exportAspect, initialBitrateBps, initialResolution, initialFps) {
         if (initialBitrateBps != null && initialBitrateBps > 0) {
             val diffs = qualityOptions.mapIndexed { idx, q ->
-                val spec = OutputSpec(Aspect.R9_16, initialResolution, initialFps, q.first, OutCodec.AVC)
+                val spec = OutputSpec(exportAspect, initialResolution, initialFps, q.first, OutCodec.AVC)
                 val s = spec.size()
                 val bps = BitrateTable.videoBps(s.w, s.h, spec.fps, spec.quality, spec.codec)
                 idx to kotlin.math.abs(bps - initialBitrateBps)
@@ -5026,8 +5027,8 @@ fun ExportConfigSheet(
     val currentQuality = currentQualityPair.first
     val currentQualityLabel = currentQualityPair.second
 
-    val candidateSpec = remember(currentResolution, currentFps, currentQuality) {
-        OutputSpec(Aspect.R9_16, currentResolution, currentFps, currentQuality, OutCodec.AVC)
+    val candidateSpec = remember(exportAspect, currentResolution, currentFps, currentQuality) {
+        OutputSpec(exportAspect, currentResolution, currentFps, currentQuality, OutCodec.AVC)
     }
     val targetBitrateBps = remember(candidateSpec) {
         val s = candidateSpec.size()
@@ -5189,7 +5190,7 @@ fun ExportConfigSheet(
                 ) {
                     resolutionOptions.forEachIndexed { idx, pair ->
                         val isSelected = idx == resolutionIndex.roundToInt().coerceIn(0, 4)
-                        val testSpec = OutputSpec(Aspect.R9_16, pair.first, currentFps, currentQuality, OutCodec.AVC)
+                        val testSpec = OutputSpec(exportAspect, pair.first, currentFps, currentQuality, OutCodec.AVC)
                         val isOptExcluded = sessionGuard.isExcluded(testSpec.key())
                         val optChoice = capabilities.find(testSpec, allowSoftware = true)
                         val isOptSupported = optChoice != null && !isOptExcluded
@@ -5248,7 +5249,7 @@ fun ExportConfigSheet(
                 ) {
                     fpsOptions.forEachIndexed { idx, fpsVal ->
                         val isSelected = idx == fpsIndex.roundToInt().coerceIn(0, 4)
-                        val testSpec = OutputSpec(Aspect.R9_16, currentResolution, fpsVal, currentQuality, OutCodec.AVC)
+                        val testSpec = OutputSpec(exportAspect, currentResolution, fpsVal, currentQuality, OutCodec.AVC)
                         val isOptExcluded = sessionGuard.isExcluded(testSpec.key())
                         val optChoice = capabilities.find(testSpec, allowSoftware = true)
                         val isOptSupported = optChoice != null && !isOptExcluded
@@ -5307,7 +5308,7 @@ fun ExportConfigSheet(
                 ) {
                     qualityOptions.forEachIndexed { idx, qPair ->
                         val isSelected = idx == qualityIndex.roundToInt().coerceIn(0, 4)
-                        val testSpec = OutputSpec(Aspect.R9_16, currentResolution, currentFps, qPair.first, OutCodec.AVC)
+                        val testSpec = OutputSpec(exportAspect, currentResolution, currentFps, qPair.first, OutCodec.AVC)
                         val isOptExcluded = sessionGuard.isExcluded(testSpec.key())
                         val optChoice = capabilities.find(testSpec, allowSoftware = true)
                         val isOptSupported = optChoice != null && !isOptExcluded
