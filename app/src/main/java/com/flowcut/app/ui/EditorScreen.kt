@@ -633,6 +633,7 @@ fun EditorScreen(
         if (result != null) {
             snapshotHolder.current = result.newSnapshot
             playbackController.seekTo(currentPlayheadUs)
+            previewRenderer.requestRender()
             frameDriver.wake()
         }
     }

@@ -40,6 +40,10 @@ class FrameSource(
     private var isAccuratePausedFrameLatched: Boolean = false
     private var catchUpStartMs: Long = 0L
     private var _isCatchingUpFromSeek: Boolean = false
+    private var mediaDurationUs: Long = -1L
+
+    private val effectiveMediaDurationUs: Long
+        get() = if (mediaDurationUs > 0L) mediaDurationUs else (clip.durationMs * 1000L)
 
     var isCatchingUpFromSeek: Boolean
         get() {
@@ -68,7 +72,7 @@ class FrameSource(
 
     fun hasValidFrameNear(targetUs: Long): Boolean {
         checkCatchUpTimeout()
-        val durationUs = clip.durationMs * 1000L
+        val durationUs = effectiveMediaDurationUs
         val isNearEos = durationUs > 0L && targetUs >= durationUs - 85_000L
         if (isNearEos && (outputEos || (currentPtsUs != -1L && currentPtsUs >= durationUs - 85_000L))) {
             return true
@@ -175,6 +179,11 @@ class FrameSource(
                 currentMime = rawMime
             }
             videoFormat = format
+            if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                try {
+                    mediaDurationUs = format.getLong(MediaFormat.KEY_DURATION)
+                } catch (_: Exception) {}
+            }
             prewarmStage = 1
             return true
         } catch (_: Exception) {
@@ -312,7 +321,7 @@ class FrameSource(
 
             // Drain up to 4 output buffers (first drain with 3,000us timeout, subsequent 0L)
             var drained = 0
-            val clipDurationUs = clip.durationMs * 1000L
+            val clipDurationUs = effectiveMediaDurationUs
             while (drained < 4 && !outputEos) {
                 val timeoutUs = if (drained == 0) 3_000L else 0L
                 drained++
@@ -359,7 +368,7 @@ class FrameSource(
     fun ensureDecodedAt(targetUs: Long): Boolean {
         checkCatchUpTimeout()
         if (prewarmStage >= 3 && codec != null && !isCatchingUpFromSeek) return true
-        val clipDurationUs = clip.durationMs * 1000L
+        val clipDurationUs = effectiveMediaDurationUs
         val isNearClipEnd = clipDurationUs > 0L && targetUs >= clipDurationUs - 85_000L
         if (isPrepared && currentPtsUs != -1L && (kotlin.math.abs(targetUs - currentPtsUs) <= 45_000L || (isNearClipEnd && currentPtsUs >= clipDurationUs - 85_000L))) {
             prewarmStage = 3
@@ -418,7 +427,7 @@ class FrameSource(
 
     fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false, isExport: Boolean = false): Boolean {
         checkCatchUpTimeout()
-        val clipDurationUs = clip.durationMs * 1000L
+        val clipDurationUs = effectiveMediaDurationUs
         val isNearClipEnd = clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L
         if (isPrepared && currentPtsUs != -1L) {
             if (kotlin.math.abs(localUs - currentPtsUs) <= 45_000L ||
@@ -550,7 +559,7 @@ class FrameSource(
         checkCatchUpTimeout()
         val ext = extractor ?: return false
         val dec = codec ?: return false
-        val clipDurationUs = clip.durationMs * 1000L
+        val clipDurationUs = effectiveMediaDurationUs
         val isNearClipEnd = clipDurationUs > 0L && (localUs >= clipDurationUs - 85_000L || (currentPtsUs != -1L && currentPtsUs >= clipDurationUs - 85_000L))
 
         try {
@@ -835,6 +844,7 @@ class FrameSource(
         catchUpStartMs = 0L
         lastForwardKeyframeHopUs = -1L
         prewarmStage = 0
+        mediaDurationUs = -1L
 
         releaseExecutor.execute {
             try {

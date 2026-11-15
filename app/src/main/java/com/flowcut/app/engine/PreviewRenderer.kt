@@ -159,7 +159,7 @@ class PrefetchCoordinator(
             if (nextClipIndex < s.main.n && currentClipIndex in s.project.clips.indices) {
                 val currentClip = s.project.clips[currentClipIndex]
                 val nextClip = s.project.clips[nextClipIndex]
-                if (nextClip.path != currentClip.path) {
+                if (nextClip.id != currentClip.id) {
                     val nextStartUs = msToUs(s.main.startMs[nextClipIndex])
                     if (tUs + windowUs >= nextStartUs) {
                         val sourceUs = nextClip.map().sourceUs(0L)
@@ -1082,10 +1082,24 @@ class PreviewRenderer(
             val clipAChanged = frameSourceA == null || frameSourceA?.clip?.id != clipA.id || currentClipIndexA != frame.clipAIndex
 
             if (clipAChanged) {
-                frameSourceA?.release()
                 val legacyClipA = toLegacyClip(clipA)
-                frameSourceA = FrameSource(legacyClipA, stA)
-                currentClipIndexA = frame.clipAIndex
+                val activeFs = frameSourceA
+                if (activeFs != null && activeFs.clip.path == clipA.path && activeFs.canReuse(legacyClipA)) {
+                    // Reuse active decoder across split clips sharing the same media path
+                    activeFs.clip = legacyClipA
+                    currentClipIndexA = frame.clipAIndex
+                    if (activeFs.prewarmStage >= 3) {
+                        val currentPts = activeFs.currentPtsUs
+                        val targetPts = frame.clipASourceUs
+                        if (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L) {
+                            activeFs.seekTo(targetPts, fastKeyframeOnly = false)
+                        }
+                    }
+                } else {
+                    frameSourceA?.release()
+                    frameSourceA = FrameSource(legacyClipA, stA)
+                    currentClipIndexA = frame.clipAIndex
+                }
             } else {
                 currentClipIndexA = frame.clipAIndex
             }
@@ -1311,10 +1325,24 @@ class PreviewRenderer(
             val clipBChanged = frameSourceB == null || frameSourceB?.clip?.id != clipA.id || currentClipIndexB != frame.clipAIndex
 
             if (clipBChanged) {
-                frameSourceB?.release()
                 val legacyClipA = toLegacyClip(clipA)
-                frameSourceB = FrameSource(legacyClipA, stB)
-                currentClipIndexB = frame.clipAIndex
+                val activeFs = frameSourceB
+                if (activeFs != null && activeFs.clip.path == clipA.path && activeFs.canReuse(legacyClipA)) {
+                    // Reuse active decoder across split clips sharing the same media path
+                    activeFs.clip = legacyClipA
+                    currentClipIndexB = frame.clipAIndex
+                    if (activeFs.prewarmStage >= 3) {
+                        val currentPts = activeFs.currentPtsUs
+                        val targetPts = frame.clipASourceUs
+                        if (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L) {
+                            activeFs.seekTo(targetPts, fastKeyframeOnly = false)
+                        }
+                    }
+                } else {
+                    frameSourceB?.release()
+                    frameSourceB = FrameSource(legacyClipA, stB)
+                    currentClipIndexB = frame.clipAIndex
+                }
             } else {
                 currentClipIndexB = frame.clipAIndex
             }
@@ -2116,7 +2144,7 @@ class PreviewRenderer(
             Matrix.scaleM(outMat, 0, sInv, sInv, 1f)
             Matrix.scaleM(outMat, 0, 1.0f / aScreen, 1.0f, 1f)
             if (transform.rotationDeg != 0f) {
-                Matrix.rotateM(outMat, 0, -transform.rotationDeg, 0f, 0f, 1f)
+                Matrix.rotateM(outMat, 0, transform.rotationDeg, 0f, 0f, 1f)
             }
             Matrix.scaleM(outMat, 0, aScreen, 1.0f, 1f)
             if (transform.isFlippedH) {
@@ -2149,7 +2177,7 @@ class PreviewRenderer(
 
             Matrix.translateM(outMat, 0, 0.5f, 0.5f, 0f)
             if (rot != 0) {
-                Matrix.rotateM(outMat, 0, -rot.toFloat(), 0f, 0f, 1f)
+                Matrix.rotateM(outMat, 0, rot.toFloat(), 0f, 0f, 1f)
             }
             if (transform.isFlippedH) {
                 Matrix.scaleM(outMat, 0, -1f, 1f, 1f)
