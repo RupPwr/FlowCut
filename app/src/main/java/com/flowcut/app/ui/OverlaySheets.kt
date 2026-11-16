@@ -5955,48 +5955,42 @@ fun ClipSortSheet(
     val spacingDp = 8.dp
     val slotWidthPx = with(density) { (cardSizeDp + spacingDp).toPx() }
     val cardSizePx = with(density) { cardSizeDp.toPx() }
+    val cardHalfWidthPx = cardSizePx / 2f
 
     var draggingClipId by remember { mutableStateOf<String?>(null) }
-    var dragPointerRootX by remember { mutableFloatStateOf(0f) }
-    var grabOffsetInsideCardPx by remember { mutableFloatStateOf(0f) }
+    var fingerXInStrip by remember { mutableFloatStateOf(0f) }
     val listState = rememberLazyListState()
-    var viewportWidthPx by remember { mutableFloatStateOf(0f) }
-    var lazyRowBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
-    var lazyRowLeftInRootPx by remember { mutableFloatStateOf(0f) }
-    var dragCardCenterScreenX by remember { mutableFloatStateOf(0f) }
+    var stripWidthPx by remember { mutableFloatStateOf(0f) }
     var lastSwapTimeMs by remember { mutableLongStateOf(0L) }
-    var lastKnownSlotLeftInRoot by remember { mutableFloatStateOf(0f) }
 
     fun performSlotSwap(targetId: String) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastSwapTimeMs < 120L) return
+        if (now - lastSwapTimeMs < 110L) return
         val currentIdx = workingClips.indexOfFirst { it.id == targetId }
         if (currentIdx == -1) return
 
-        val floatingCardLeftInRoot = dragPointerRootX - grabOffsetInsideCardPx
-        val floatingCardCenterRootX = floatingCardLeftInRoot + (cardSizePx / 2f)
-        val deadzonePx = with(density) { 12.dp.toPx() }
         val visibleItems = listState.layoutInfo.visibleItemsInfo
         if (visibleItems.isEmpty()) return
 
-        val hoveredItem = visibleItems.firstOrNull { item ->
-            val itemLeft = lazyRowLeftInRootPx + item.offset
-            val itemRight = itemLeft + item.size
-            floatingCardCenterRootX >= (itemLeft + deadzonePx) && floatingCardCenterRootX <= (itemRight - deadzonePx)
+        val deadzonePx = slotWidthPx * 0.2f
+
+        // Compute which slot center inside visibleItemsInfo is closest to fingerXInStrip
+        val closestItem = visibleItems.minByOrNull { item ->
+            val center = item.offset + item.size / 2f
+            kotlin.math.abs(fingerXInStrip - center)
+        } ?: return
+
+        val targetIndex = closestItem.index
+        if (targetIndex == currentIdx) return
+
+        val targetCenter = closestItem.offset + closestItem.size / 2f
+        val canSwap = if (targetIndex > currentIdx) {
+            fingerXInStrip >= targetCenter - deadzonePx
+        } else {
+            fingerXInStrip <= targetCenter + deadzonePx
         }
 
-        val targetIndex = when {
-            hoveredItem != null -> hoveredItem.index
-            floatingCardCenterRootX > (lazyRowLeftInRootPx + visibleItems.last().offset + visibleItems.last().size - deadzonePx) && !listState.canScrollForward -> {
-                visibleItems.last().index
-            }
-            floatingCardCenterRootX < (lazyRowLeftInRootPx + visibleItems.first().offset + deadzonePx) && !listState.canScrollBackward -> {
-                visibleItems.first().index
-            }
-            else -> null
-        }
-
-        if (targetIndex != null && targetIndex != currentIdx && targetIndex in workingClips.indices) {
+        if (canSwap && targetIndex in workingClips.indices) {
             val updated = workingClips.toMutableList().apply {
                 add(targetIndex, removeAt(currentIdx))
             }
@@ -6008,66 +6002,61 @@ fun ClipSortSheet(
 
     LaunchedEffect(draggingClipId) {
         val clipId = draggingClipId ?: return@LaunchedEffect
-        val edgeZonePx = with(density) { 48.dp.toPx() }
+        val edgeZonePx = with(density) { 56.dp.toPx() }
         while (isActive && draggingClipId != null) {
-            withFrameNanos { }
-            val effectiveViewportWidth = if (viewportWidthPx > 0f) viewportWidthPx else lazyRowBoundsInRoot.width
-            val effectiveLeft = if (lazyRowLeftInRootPx > 0f) lazyRowLeftInRootPx else lazyRowBoundsInRoot.left
-            val cardCenterInViewport = if (effectiveLeft > 0f) {
-                dragCardCenterScreenX - effectiveLeft
-            } else {
-                dragCardCenterScreenX
-            }
-
-            val shouldScrollForward = cardCenterInViewport > (effectiveViewportWidth - edgeZonePx) && listState.canScrollForward
-            val shouldScrollBackward = cardCenterInViewport < edgeZonePx && cardCenterInViewport > 0f && listState.canScrollBackward
+            val shouldScrollForward = fingerXInStrip > (stripWidthPx - edgeZonePx) && listState.canScrollForward
+            val shouldScrollBackward = fingerXInStrip < edgeZonePx && listState.canScrollBackward
 
             if (shouldScrollForward && listState.canScrollForward) {
-                val overflow = (cardCenterInViewport - (effectiveViewportWidth - edgeZonePx)).coerceAtLeast(0f)
+                val overflow = (fingerXInStrip - (stripWidthPx - edgeZonePx)).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
-                val scrollSpeedPx = 4f + 6f * ratio
-                val scrolled = listState.scrollBy(scrollSpeedPx)
-                if (scrolled != 0f) {
-                    performSlotSwap(clipId)
-                }
+                val deltaPx = 8f + 8f * ratio
+                listState.scrollBy(deltaPx)
             } else if (shouldScrollBackward && listState.canScrollBackward) {
-                val overflow = (edgeZonePx - cardCenterInViewport).coerceAtLeast(0f)
+                val overflow = (edgeZonePx - fingerXInStrip).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
-                val scrollSpeedPx = 4f + 6f * ratio
-                val scrolled = listState.scrollBy(-scrollSpeedPx)
-                if (scrolled != 0f) {
-                    performSlotSwap(clipId)
-                }
-            } else {
-                performSlotSwap(clipId)
+                val deltaPx = -(8f + 8f * ratio)
+                listState.scrollBy(deltaPx)
             }
+            performSlotSwap(clipId)
+            delay(16L)
         }
     }
 
     val thumbnailCache = remember { androidx.compose.runtime.mutableStateMapOf<String, ImageBitmap>() }
-    val thumbnailSemaphore = remember { Semaphore(2) }
+    val thumbnailSemaphore = remember { Semaphore(1) }
 
     LaunchedEffect(clips) {
         withContext(Dispatchers.IO) {
-            for (clip in clips) {
-                val timeMap = clipTimeMaps[clip.id]
-                val inUs = timeMap?.inUs ?: 0L
-                val cacheKey = "${clip.path}_$inUs"
-                if (thumbnailCache.containsKey(cacheKey) || clip.path.isEmpty()) continue
+            val uncachedClipsByPath = clips
+                .filter { it.path.isNotEmpty() }
+                .filter { clip ->
+                    val timeMap = clipTimeMaps[clip.id]
+                    val inUs = timeMap?.inUs ?: 0L
+                    !thumbnailCache.containsKey("${clip.path}_$inUs")
+                }
+                .groupBy { it.path }
+
+            for ((path, clipsForPath) in uncachedClipsByPath) {
                 launch {
                     thumbnailSemaphore.withPermit {
-                        if (thumbnailCache.containsKey(cacheKey)) return@withPermit
                         val retriever = MediaMetadataRetriever()
                         try {
-                            retriever.setDataSource(clip.path)
-                            val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                                retriever.getScaledFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 180, 180)
-                                    ?: retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                            } else {
-                                retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                            }
-                            if (bmp != null) {
-                                thumbnailCache[cacheKey] = bmp.asImageBitmap()
+                            retriever.setDataSource(path)
+                            for (clip in clipsForPath) {
+                                val timeMap = clipTimeMaps[clip.id]
+                                val inUs = timeMap?.inUs ?: 0L
+                                val cacheKey = "${clip.path}_$inUs"
+                                if (thumbnailCache.containsKey(cacheKey)) continue
+                                val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                                    retriever.getScaledFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 180, 180)
+                                        ?: retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                } else {
+                                    retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                }
+                                if (bmp != null) {
+                                    thumbnailCache[cacheKey] = bmp.asImageBitmap()
+                                }
                             }
                         } catch (_: Throwable) {
                         } finally {
@@ -6110,9 +6099,7 @@ fun ClipSortSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { coords ->
-                        viewportWidthPx = coords.size.width.toFloat()
-                        lazyRowBoundsInRoot = coords.boundsInRoot()
-                        lazyRowLeftInRootPx = coords.boundsInRoot().left
+                        stripWidthPx = coords.size.width.toFloat()
                     }
             ) {
                 LazyRow(
@@ -6138,8 +6125,6 @@ fun ClipSortSheet(
                         val inUs = timeMap?.inUs ?: 0L
                         val thumbnail = thumbnailCache["${clip.path}_$inUs"]
 
-                        var cardBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
-
                         Box(
                             modifier = Modifier
                                 .size(cardSizeDp)
@@ -6148,52 +6133,29 @@ fun ClipSortSheet(
                                         alpha = 0.25f
                                     }
                                 }
-                                .onGloballyPositioned { coords ->
-                                    cardBoundsInRoot = coords.boundsInRoot()
-                                }
                                 .pointerInput(clip.id) {
                                     detectDragGesturesAfterLongPress(
                                         onDragStart = { offset ->
                                             val startItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
-                                            val itemLeftInRoot = if (startItem != null) {
-                                                lazyRowLeftInRootPx + startItem.offset
+                                            fingerXInStrip = if (startItem != null) {
+                                                startItem.offset + startItem.size / 2f
                                             } else {
-                                                cardBoundsInRoot.left
-                                            }
-                                            lastKnownSlotLeftInRoot = itemLeftInRoot
+                                                cardHalfWidthPx
+                                            }.coerceIn(cardHalfWidthPx, (stripWidthPx - cardHalfWidthPx).coerceAtLeast(cardHalfWidthPx))
                                             draggingClipId = clip.id
-                                            grabOffsetInsideCardPx = offset.x
-                                            dragPointerRootX = itemLeftInRoot + offset.x
-                                            dragCardCenterScreenX = itemLeftInRoot + (cardSizePx / 2f)
                                             activeClipId = clip.id
                                             hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                         },
                                         onDragEnd = {
                                             draggingClipId = null
-                                            dragPointerRootX = 0f
-                                            grabOffsetInsideCardPx = 0f
-                                            dragCardCenterScreenX = 0f
-                                            lastKnownSlotLeftInRoot = 0f
                                         },
                                         onDragCancel = {
                                             draggingClipId = null
-                                            dragPointerRootX = 0f
-                                            grabOffsetInsideCardPx = 0f
-                                            dragCardCenterScreenX = 0f
-                                            lastKnownSlotLeftInRoot = 0f
                                         },
-                                        onDrag = { change, _ ->
+                                        onDrag = { change, dragAmount ->
                                             change.consume()
-                                            val currentItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
-                                            val itemLeftInRoot = if (currentItem != null) {
-                                                val left = lazyRowLeftInRootPx + currentItem.offset
-                                                lastKnownSlotLeftInRoot = left
-                                                left
-                                            } else {
-                                                if (lastKnownSlotLeftInRoot > 0f) lastKnownSlotLeftInRoot else (dragPointerRootX - grabOffsetInsideCardPx)
-                                            }
-                                            dragPointerRootX = itemLeftInRoot + change.position.x
-                                            dragCardCenterScreenX = dragPointerRootX - grabOffsetInsideCardPx + (cardSizePx / 2f)
+                                            val maxBound = (stripWidthPx - cardHalfWidthPx).coerceAtLeast(cardHalfWidthPx)
+                                            fingerXInStrip = (fingerXInStrip + dragAmount.x).coerceIn(cardHalfWidthPx, maxBound)
                                             performSlotSwap(clip.id)
                                         }
                                     )
@@ -6201,8 +6163,8 @@ fun ClipSortSheet(
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(DARK_CARD_BG)
                                 .border(
-                                    width = if (isSelected) 2.dp else 1.dp,
-                                    color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                    width = if (isDraggingThis) 1.5.dp else if (isSelected) 2.dp else 1.dp,
+                                    color = if (isDraggingThis) Color.White.copy(alpha = 0.35f) else if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
                                     shape = RoundedCornerShape(8.dp)
                                 )
                                 .clickable {
@@ -6285,21 +6247,18 @@ fun ClipSortSheet(
                         val inUs = activeTimeMap?.inUs ?: 0L
                         val activeThumbnail = thumbnailCache["${activeClip.path}_$inUs"]
 
-                        val maxOverlayX = (viewportWidthPx - cardSizePx).coerceAtLeast(0f)
-                        val overlayTranslationX = (dragPointerRootX - grabOffsetInsideCardPx - lazyRowLeftInRootPx).coerceIn(0f, maxOverlayX)
-
                         Box(
                             modifier = Modifier
                                 .size(cardSizeDp)
                                 .graphicsLayer {
-                                    translationX = overlayTranslationX
-                                    scaleX = 1.06f
-                                    scaleY = 1.06f
-                                    shadowElevation = with(density) { 8.dp.toPx() }
+                                    translationX = fingerXInStrip - cardHalfWidthPx
+                                    scaleX = 1.08f
+                                    scaleY = 1.08f
+                                    shadowElevation = with(density) { 10.dp.toPx() }
                                     clip = true
                                     shape = RoundedCornerShape(8.dp)
                                 }
-                                .zIndex(100f)
+                                .zIndex(20f)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(DARK_CARD_BG)
                                 .border(
