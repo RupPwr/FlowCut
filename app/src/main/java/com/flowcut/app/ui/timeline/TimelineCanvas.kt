@@ -338,6 +338,7 @@ fun TimelineCanvas(
     onToggleTrackMute: () -> Unit = {},
     onToast: (String) -> Unit = {},
     customCoverBitmap: ImageBitmap? = null,
+    onScrollingStateChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current.density
@@ -377,6 +378,7 @@ fun TimelineCanvas(
     val currentOnToast by rememberUpdatedState(onToast)
     val currentCustomCoverBitmap by rememberUpdatedState(customCoverBitmap)
     val currentIsLoaderActive by rememberUpdatedState(isLoaderActive)
+    val currentOnScrollingStateChanged by rememberUpdatedState(onScrollingStateChanged)
 
     val clipNaturalDurationCache = remember { mutableMapOf<String, Long>() }
     val draggedOverlayId = remember { mutableStateOf<String?>(null) }
@@ -1343,6 +1345,7 @@ fun TimelineCanvas(
                                         isDragging = true
                                         longPressJob?.cancel()
                                         controller.beginScrub()
+                                        currentOnScrollingStateChanged(true)
                                         currentOnWakeFrameDriver()
                                     }
 
@@ -1375,6 +1378,9 @@ fun TimelineCanvas(
                         autoScrollJob?.cancel()
                         activeTrimPlayheadUs.longValue = Long.MIN_VALUE
                         draggedOverlayId.value = null
+                        if (isDragging && playhead.mode != PlayMode.FLINGING) {
+                            currentOnScrollingStateChanged(false)
+                        }
                     }
 
                     if (isPinCandidate && isPinDragging && curPinItem != null) {
@@ -1395,24 +1401,31 @@ fun TimelineCanvas(
                         val pxPerUsAtEnd = zoomState.pxPerUs(density)
                         val velocityUsPerSec = if (pxPerUsAtEnd > 0.0) -velocityPxPerSec / pxPerUsAtEnd else 0.0
                         controller.endScrub(velocityUsPerSec, pxPerUsAtEnd)
+                        currentOnScrollingStateChanged(playhead.mode == PlayMode.FLINGING)
                         currentOnWakeFrameDriver()
                     } else if (!currentIsLoaderActive && !wasLongPressed && !isZooming && !isTrimming && !isPinDragging && !isBarDragging) {
-                        val halfWidthPx = size.width / 2f
-                        val hit = TimelineHitTester.hitTest(
-                            tapX = startPos.x,
-                            tapY = startPos.y,
-                            playheadUs = playhead.timeUs,
-                            halfWidthPx = halfWidthPx,
-                            density = density,
-                            snapshot = holder.current,
-                            zoomState = zoomState,
-                            selectedClipIndex = selectedClipIndex,
-                            selectedOverlayId = selectedOverlayId,
-                            overlayItems = currentOverlayItems,
-                            focusMode = focus
-                        )
-                        currentOnSelect(hit)
-                        currentOnWakeFrameDriver()
+                        if (wasMovingOnDown) {
+                            controller.pause()
+                            currentOnScrollingStateChanged(false)
+                            currentOnWakeFrameDriver()
+                        } else {
+                            val halfWidthPx = size.width / 2f
+                            val hit = TimelineHitTester.hitTest(
+                                tapX = startPos.x,
+                                tapY = startPos.y,
+                                playheadUs = playhead.timeUs,
+                                halfWidthPx = halfWidthPx,
+                                density = density,
+                                snapshot = holder.current,
+                                zoomState = zoomState,
+                                selectedClipIndex = selectedClipIndex,
+                                selectedOverlayId = selectedOverlayId,
+                                overlayItems = currentOverlayItems,
+                                focusMode = focus
+                            )
+                            currentOnSelect(hit)
+                            currentOnWakeFrameDriver()
+                        }
                     }
                 }
             }

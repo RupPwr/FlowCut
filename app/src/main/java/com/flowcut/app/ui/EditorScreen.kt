@@ -347,6 +347,10 @@ fun EditorScreen(
     val frameTick = remember { mutableLongStateOf(0L) }
     val displayedMs = remember { mutableLongStateOf(currentMs) }
 
+    val isTimelineScrollingState = remember { mutableStateOf(false) }
+    var isTimelineScrolling by isTimelineScrollingState
+    var timelineBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+
     val isPlayingState = rememberUpdatedState(isPlaying)
     val onPlaybackStateChangeState = rememberUpdatedState(onPlaybackStateChange)
     val onPlayheadUpdateState = rememberUpdatedState(onPlayheadUpdate)
@@ -381,6 +385,12 @@ fun EditorScreen(
                 val tMs = usToMs(tUs)
                 val curSec = tMs / 1000L
                 val mode = playbackController.playhead.mode
+
+                if (mode != PlayMode.FLINGING && mode != PlayMode.SCRUBBING) {
+                    if (isTimelineScrollingState.value) {
+                        isTimelineScrollingState.value = false
+                    }
+                }
 
                 // 1. Local fast state: updates on every frame for instant timecode display
                 displayedMs.longValue = tMs
@@ -426,6 +436,13 @@ fun EditorScreen(
             }
         )
     }
+
+    val stopTimelineScrollNow = {
+        playbackController.pause()
+        isTimelineScrolling = false
+        frameDriver.wake()
+    }
+    val currentStopTimelineScrollNow by rememberUpdatedState(stopTimelineScrollNow)
 
     LaunchedEffect(coreProject) {
         snapshotHolder.current = TimelineSnapshot(System.nanoTime(), coreProject)
@@ -1132,18 +1149,22 @@ fun EditorScreen(
         modifier = modifier
             .fillMaxSize()
             .background(colors.surface0)
-            .pointerInput(playbackController) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
-                    if (playbackController.playhead.mode == PlayMode.PLAYING) {
-                        if (!playPauseBoundsInRoot.contains(down.position)) {
-                            playbackController.pause()
-                            frameDriver.wake()
-                            onPlaybackStateChange(false)
-                        }
-                    }
+            .editorTouchInterceptor(
+                isActivelyScrolling = {
+                    isTimelineScrolling ||
+                        playbackController.playhead.mode == PlayMode.FLINGING ||
+                        playbackController.playhead.mode == PlayMode.SCRUBBING
+                },
+                isPlaying = { playbackController.playhead.mode == PlayMode.PLAYING },
+                timelineBounds = { timelineBoundsInRoot },
+                playPauseBounds = { playPauseBoundsInRoot },
+                onStopScroll = currentStopTimelineScrollNow,
+                onPausePlayback = {
+                    playbackController.pause()
+                    frameDriver.wake()
+                    onPlaybackStateChange(false)
                 }
-            }
+            )
     ) {
         Column(
             modifier = Modifier
@@ -2218,137 +2239,34 @@ fun EditorScreen(
 
                 // 4. Timeline block: constant fixed height (New Core TimelineCanvas or legacy TimelineBlock)
                 if (USE_NEW_CORE) {
-                    val timelineHeight = 224.dp
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(timelineHeight)
-                            .background(colors.surface1, RoundedCornerShape(8.dp))
-                    ) {
-                        TimelineCanvas(
-                            holder = snapshotHolder,
-                            playhead = playbackController.playhead,
-                            controller = playbackController,
-                            zoomState = zoomState,
-                            frameTick = frameTick,
-                            selection = selection,
-                            focusMode = currentFocus,
-                            overlayItems = resolvedViewModel?.layerItems ?: emptyList(),
-                            isLoaderActive = showPreviewLoader,
-                            customCoverBitmap = customCoverBitmap,
-                            onSelect = { sel ->
-                                when (sel) {
-                                    is TimelineSelection.ClipSelected -> {
-                                        if (selectedClipIndex == sel.index) {
-                                            showClipSortSheet = true
-                                        } else {
-                                            onSelectClip(sel.index)
-                                        }
-                                    }
-                                    is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
-                                    is TimelineSelection.TransitionClicked -> onSelectJunction(sel.junctionIndex)
-                                    is TimelineSelection.OverlaySelected -> {
-                                        overlappingConflictItemIds = null
-                                        resolvedViewModel?.selectOverlay(sel.itemId)
-                                    }
-                                    is TimelineSelection.OverlappingPinsClicked -> {
-                                        overlappingConflictItemIds = sel.itemIds
-                                    }
-                                    TimelineSelection.PipGroupClicked -> {
-                                        resolvedViewModel?.setFocusMode(TimelineFocusState.S1_PIP_GROUP)
-                                    }
-                                    TimelineSelection.CoverClicked -> {
-                                        showCoverDialog = true
-                                    }
-                                    TimelineSelection.AddClipClicked -> {
-                                        onAddClipsClick()
-                                    }
-                                    TimelineSelection.AudioGroupClicked -> {
-                                        resolvedViewModel?.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
-                                    }
-                                    TimelineSelection.None -> {
-                                        overlappingConflictItemIds = null
-                                        onDeselectAll()
-                                    }
-                                    is TimelineSelection.LaneItemSelected -> {}
-                                    is TimelineSelection.TrimHandleLeft -> {}
-                                    is TimelineSelection.TrimHandleRight -> {}
-                                    TimelineSelection.TrackMuteClicked -> {
-                                        resolvedViewModel?.toggleTrackMute()
-                                    }
-                                }
-                            },
-                            onLongPress = { sel ->
-                                when (sel) {
-                                    is TimelineSelection.JunctionSelected -> {
-                                        val j = sel.index
-                                        val currentT = timeline.project.transitions.getOrNull(j)
-                                        if (currentT != null && currentT.type != TransitionType.NONE) {
-                                            onApplyTransition(currentT.type)
-                                        }
-                                    }
-                                    is TimelineSelection.ClipSelected -> {
-                                        onSelectClip(sel.index)
-                                        showClipSortSheet = true
-                                    }
-                                    else -> {}
-                                }
-                            },
-                            onCommitTrim = { k, inUs, outUs, durMs ->
-                                resolvedViewModel?.commitClipTrim(k, inUs, outUs, durMs)
-                                onCommitTrim(k, inUs, outUs, durMs)
-                            },
-                            onCommitOverlayTrim = { id, startUs, endUs ->
-                                resolvedViewModel?.commitOverlayTrim(id, startUs, endUs)
-                                previewRenderer.requestRender()
-                                frameDriver.wake()
-                            },
-                            onLiveOverlayTrim = { id, startUs, endUs ->
-                                resolvedViewModel?.liveOverlayTrim(id, startUs, endUs)
-                                previewRenderer.requestRender()
-                                frameDriver.wake()
-                            },
-                            onCommitOverlayMove = { id, laneIndex, startUs, endUs ->
-                                resolvedViewModel?.commitOverlayMove(id, laneIndex, startUs, endUs)
-                                previewRenderer.requestRender()
-                                frameDriver.wake()
-                            },
-                            onLiveOverlayMove = { id, laneIndex, startUs, endUs ->
-                                resolvedViewModel?.liveOverlayMove(id, laneIndex, startUs, endUs)
-                                previewRenderer.requestRender()
-                                frameDriver.wake()
-                            },
-                            onTrimPreview = { previewUs ->
-                                previewRenderer.trimPreviewTimeUs = previewUs
-                                frameDriver.wake()
-                            },
-                            getClipNaturalDurationUs = { k ->
-                                resolvedViewModel?.getClipNaturalDurationUs(k)
-                                    ?: run {
-                                        val clip = snapshotHolder.current.project.clips.getOrNull(k)
-                                        clip?.let { c ->
-                                            try {
-                                                val file = java.io.File(c.path)
-                                                if (file.exists()) {
-                                                    val retriever = android.media.MediaMetadataRetriever()
-                                                    retriever.setDataSource(file.absolutePath)
-                                                    val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-                                                    retriever.release()
-                                                    durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(c.durationMs)
-                                                } else msToUs(c.durationMs)
-                                            } catch (_: Exception) {
-                                                msToUs(c.durationMs)
-                                            }
-                                        } ?: 0L
-                                    }
-                            },
-                            onWakeFrameDriver = { frameDriver.wake() },
-                            isMainTrackMuted = isMainTrackMuted,
-                            onToggleTrackMute = { resolvedViewModel?.toggleTrackMute() },
-                            onToast = { resolvedViewModel?.showToast(it) },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
+                    EditorTimelineCanvasHost(
+                        snapshotHolder = snapshotHolder,
+                        playbackController = playbackController,
+                        zoomState = zoomState,
+                        frameTick = frameTick,
+                        selection = selection,
+                        currentFocus = currentFocus,
+                        layerItems = resolvedViewModel?.layerItems ?: emptyList(),
+                        showPreviewLoader = showPreviewLoader,
+                        customCoverBitmap = customCoverBitmap,
+                        selectedClipIndex = selectedClipIndex,
+                        timelineTransitions = timeline.project.transitions,
+                        resolvedViewModel = resolvedViewModel,
+                        previewRenderer = previewRenderer,
+                        frameDriver = frameDriver,
+                        isMainTrackMuted = isMainTrackMuted,
+                        onPositionTimeline = { timelineBoundsInRoot = it },
+                        onScrollingStateChanged = { isTimelineScrolling = it },
+                        onSelectClip = onSelectClip,
+                        onSelectJunction = onSelectJunction,
+                        onDeselectAll = onDeselectAll,
+                        onApplyTransition = onApplyTransition,
+                        onAddClipsClick = onAddClipsClick,
+                        onCommitTrim = onCommitTrim,
+                        onOpenClipSortSheet = { showClipSortSheet = true },
+                        onOpenCoverDialog = { showCoverDialog = true },
+                        onSetOverlappingConflictItemIds = { overlappingConflictItemIds = it }
+                    )
                 } else {
                     TimelineBlock(
                         timeline = timeline,
@@ -3446,6 +3364,208 @@ fun EditorScreen(
             previewRenderer = previewRenderer,
             onDismiss = { showClipSortSheet = false }
         )
+    }
+}
+
+@Composable
+private fun EditorTimelineCanvasHost(
+    snapshotHolder: com.flowcut.app.core.timeline.SnapshotHolder,
+    playbackController: PlaybackController,
+    zoomState: TimelineZoomState,
+    frameTick: MutableLongState,
+    selection: TimelineSelection,
+    currentFocus: TimelineFocusState,
+    layerItems: List<com.flowcut.app.engine.OverlayItem>,
+    showPreviewLoader: Boolean,
+    customCoverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    selectedClipIndex: Int?,
+    timelineTransitions: List<com.flowcut.app.model.Transition>,
+    resolvedViewModel: EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    frameDriver: com.flowcut.app.engine.FrameDriver,
+    isMainTrackMuted: Boolean,
+    onPositionTimeline: (androidx.compose.ui.geometry.Rect) -> Unit,
+    onScrollingStateChanged: (Boolean) -> Unit,
+    onSelectClip: (Int) -> Unit,
+    onSelectJunction: (Int) -> Unit,
+    onDeselectAll: () -> Unit,
+    onApplyTransition: (TransitionType) -> Unit,
+    onAddClipsClick: () -> Unit,
+    onCommitTrim: (Int, Long, Long, Long) -> Unit,
+    onOpenClipSortSheet: () -> Unit,
+    onOpenCoverDialog: () -> Unit,
+    onSetOverlappingConflictItemIds: (List<String>?) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = FlowCutTheme.colors
+    val timelineHeight = 224.dp
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(timelineHeight)
+            .background(colors.surface1, RoundedCornerShape(8.dp))
+            .onGloballyPositioned { coords ->
+                onPositionTimeline(coords.boundsInRoot())
+            }
+    ) {
+        TimelineCanvas(
+            holder = snapshotHolder,
+            playhead = playbackController.playhead,
+            controller = playbackController,
+            zoomState = zoomState,
+            frameTick = frameTick,
+            selection = selection,
+            focusMode = currentFocus,
+            overlayItems = layerItems,
+            isLoaderActive = showPreviewLoader,
+            customCoverBitmap = customCoverBitmap,
+            onScrollingStateChanged = onScrollingStateChanged,
+            onSelect = { sel ->
+                when (sel) {
+                    is TimelineSelection.ClipSelected -> {
+                        if (selectedClipIndex == sel.index) {
+                            onOpenClipSortSheet()
+                        } else {
+                            onSelectClip(sel.index)
+                        }
+                    }
+                    is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
+                    is TimelineSelection.TransitionClicked -> onSelectJunction(sel.junctionIndex)
+                    is TimelineSelection.OverlaySelected -> {
+                        onSetOverlappingConflictItemIds(null)
+                        resolvedViewModel?.selectOverlay(sel.itemId)
+                    }
+                    is TimelineSelection.OverlappingPinsClicked -> {
+                        onSetOverlappingConflictItemIds(sel.itemIds)
+                    }
+                    TimelineSelection.PipGroupClicked -> {
+                        resolvedViewModel?.setFocusMode(TimelineFocusState.S1_PIP_GROUP)
+                    }
+                    TimelineSelection.CoverClicked -> {
+                        onOpenCoverDialog()
+                    }
+                    TimelineSelection.AddClipClicked -> {
+                        onAddClipsClick()
+                    }
+                    TimelineSelection.AudioGroupClicked -> {
+                        resolvedViewModel?.setFocusMode(TimelineFocusState.S5_AUDIO_GROUP)
+                    }
+                    TimelineSelection.None -> {
+                        onSetOverlappingConflictItemIds(null)
+                        onDeselectAll()
+                    }
+                    is TimelineSelection.LaneItemSelected -> {}
+                    is TimelineSelection.TrimHandleLeft -> {}
+                    is TimelineSelection.TrimHandleRight -> {}
+                    TimelineSelection.TrackMuteClicked -> {
+                        resolvedViewModel?.toggleTrackMute()
+                    }
+                }
+            },
+            onLongPress = { sel ->
+                when (sel) {
+                    is TimelineSelection.JunctionSelected -> {
+                        val j = sel.index
+                        val currentT = timelineTransitions.getOrNull(j)
+                        if (currentT != null && currentT.type != TransitionType.NONE) {
+                            onApplyTransition(currentT.type)
+                        }
+                    }
+                    is TimelineSelection.ClipSelected -> {
+                        onSelectClip(sel.index)
+                        onOpenClipSortSheet()
+                    }
+                    else -> {}
+                }
+            },
+            onCommitTrim = { k, inUs, outUs, durMs ->
+                resolvedViewModel?.commitClipTrim(k, inUs, outUs, durMs)
+                onCommitTrim(k, inUs, outUs, durMs)
+            },
+            onCommitOverlayTrim = { id, startUs, endUs ->
+                resolvedViewModel?.commitOverlayTrim(id, startUs, endUs)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onLiveOverlayTrim = { id, startUs, endUs ->
+                resolvedViewModel?.liveOverlayTrim(id, startUs, endUs)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onCommitOverlayMove = { id, laneIndex, startUs, endUs ->
+                resolvedViewModel?.commitOverlayMove(id, laneIndex, startUs, endUs)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onLiveOverlayMove = { id, laneIndex, startUs, endUs ->
+                resolvedViewModel?.liveOverlayMove(id, laneIndex, startUs, endUs)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onTrimPreview = { previewUs ->
+                previewRenderer.trimPreviewTimeUs = previewUs
+                frameDriver.wake()
+            },
+            getClipNaturalDurationUs = { k ->
+                resolveClipNaturalDurationUs(snapshotHolder.current.project.clips.getOrNull(k), resolvedViewModel, k)
+            },
+            onWakeFrameDriver = { frameDriver.wake() },
+            isMainTrackMuted = isMainTrackMuted,
+            onToggleTrackMute = { resolvedViewModel?.toggleTrackMute() },
+            onToast = { resolvedViewModel?.showToast(it) },
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+private fun resolveClipNaturalDurationUs(
+    clip: com.flowcut.app.core.model.Clip?,
+    resolvedViewModel: EditorViewModel?,
+    k: Int
+): Long {
+    return resolvedViewModel?.getClipNaturalDurationUs(k)
+        ?: run {
+            clip?.let { c ->
+                try {
+                    val file = java.io.File(c.path)
+                    if (file.exists()) {
+                        val retriever = android.media.MediaMetadataRetriever()
+                        retriever.setDataSource(file.absolutePath)
+                        val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        retriever.release()
+                        durStr?.toLongOrNull()?.let { msToUs(it) } ?: msToUs(c.durationMs)
+                    } else msToUs(c.durationMs)
+                } catch (_: Exception) {
+                    msToUs(c.durationMs)
+                }
+            } ?: 0L
+        }
+}
+
+private fun Modifier.editorTouchInterceptor(
+    isActivelyScrolling: () -> Boolean,
+    isPlaying: () -> Boolean,
+    timelineBounds: () -> androidx.compose.ui.geometry.Rect,
+    playPauseBounds: () -> androidx.compose.ui.geometry.Rect,
+    onStopScroll: () -> Unit,
+    onPausePlayback: () -> Unit
+): Modifier = this.pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
+        if (isActivelyScrolling()) {
+            if (!timelineBounds().contains(down.position)) {
+                onStopScroll()
+                down.consume()
+                do {
+                    val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                    event.changes.forEach { it.consume() }
+                } while (event.changes.any { it.pressed })
+            }
+        } else if (isPlaying()) {
+            if (!playPauseBounds().contains(down.position)) {
+                onPausePlayback()
+            }
+        }
     }
 }
 
