@@ -645,6 +645,7 @@ class PreviewRenderer(
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
                 hasPendingSurfaceFrameA.set(true)
+                isWaitingForFrame = false
                 onRenderRequested?.invoke()
                 glSurfaceView?.requestRender()
             }, stCallbackHandler)
@@ -653,6 +654,7 @@ class PreviewRenderer(
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
                 hasPendingSurfaceFrameB.set(true)
+                isWaitingForFrame = false
                 onRenderRequested?.invoke()
                 glSurfaceView?.requestRender()
             }, stCallbackHandler)
@@ -686,6 +688,52 @@ class PreviewRenderer(
         GLES30.glViewport(0, 0, width, height)
         requestRender()
         onRenderRequested?.invoke()
+    }
+
+    private var lastPausedTargetUs: Long = -1L
+    private var pausedCatchUpAttempts: Int = 0
+
+    private fun checkIsCatchingUp(frame: ResolvedFrame, isTransition: Boolean): Boolean {
+        return if (playhead.mode == PlayMode.PAUSED) {
+            if (frame.tUs != lastPausedTargetUs) {
+                lastPausedTargetUs = frame.tUs
+                pausedCatchUpAttempts = 0
+            }
+            pausedCatchUpAttempts++
+            if (pausedCatchUpAttempts > 3) {
+                frameSourceA?.isAccuratePausedFrameLatched = true
+                frameSourceB?.isAccuratePausedFrameLatched = true
+                false
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                if (isTransition) {
+                    (frameSourceA != null && !frameSourceA!!.isAccuratePausedFrameLatched) ||
+                        (frameSourceB != null && !frameSourceB!!.isAccuratePausedFrameLatched)
+                } else {
+                    activeFs != null && !activeFs.isAccuratePausedFrameLatched
+                }
+            }
+        } else {
+            lastPausedTargetUs = -1L
+            pausedCatchUpAttempts = 0
+            val hasValidFrameNear = if (isTransition) {
+                (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
+                        (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
+            }
+            if (hasValidFrameNear) {
+                false
+            } else if (isTransition) {
+                !isFirstFrameLatched ||
+                    (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+            } else {
+                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+            }
+        }
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -773,6 +821,7 @@ class PreviewRenderer(
                                 stB.updateTexImage()
                                 stB.getTransformMatrix(rawMatB)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -797,6 +846,7 @@ class PreviewRenderer(
                                 stA.updateTexImage()
                                 stA.getTransformMatrix(rawMatA)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -833,6 +883,7 @@ class PreviewRenderer(
                                 stA.updateTexImage()
                                 stA.getTransformMatrix(rawMatA)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -857,6 +908,7 @@ class PreviewRenderer(
                                 stB.updateTexImage()
                                 stB.getTransformMatrix(rawMatB)
                                 isFirstFrameLatched = true
+                                isWaitingForFrame = false
                             } catch (_: Exception) {}
                         }
 
@@ -1009,35 +1061,7 @@ class PreviewRenderer(
                     renderOverlays(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
-            val isCatchingUp = if (playhead.mode == PlayMode.PAUSED) {
-                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                if (isTransition) {
-                    (frameSourceA != null && !frameSourceA!!.isAccuratePausedFrameLatched) ||
-                        (frameSourceB != null && !frameSourceB!!.isAccuratePausedFrameLatched)
-                } else {
-                    activeFs != null && !activeFs.isAccuratePausedFrameLatched
-                }
-            } else {
-                val hasValidFrameNear = if (isTransition) {
-                    (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
-                            (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
-                } else {
-                    val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                    activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
-                }
-                if (hasValidFrameNear) {
-                    false
-                } else if (isTransition) {
-                    !isFirstFrameLatched ||
-                        (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
-                        (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek)) ||
-                        isWaitingForFrame
-                } else {
-                    val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                    !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek)) ||
-                        isWaitingForFrame
-                }
-            }
+            val isCatchingUp = checkIsCatchingUp(frame, isTransition)
 
             if (isCatchingUp) {
                 isWaitingForFrame = true
@@ -1168,11 +1192,6 @@ class PreviewRenderer(
                     }
                     else -> {
                         try {
-                            val currentPts = fsA.lastDecodedPtsUs
-                            val targetPts = frame.clipASourceUs
-                            if (!isScrubbing && currentPts != -1L && (targetPts - currentPts > 150_000L || currentPts - targetPts > 100_000L || !fsA.isAccuratePausedFrameLatched)) {
-                                fsA.seekTo(targetPts, fastKeyframeOnly = false)
-                            }
                             fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
                         } catch (_: Exception) { false }
                     }
@@ -1184,6 +1203,7 @@ class PreviewRenderer(
                     stA.updateTexImage()
                     stA.getTransformMatrix(rawMatA)
                     isFirstFrameLatched = true
+                    isWaitingForFrame = false
                 } catch (_: Exception) {}
             }
             val transformA = getClipTransform(clipA.id)
@@ -1347,35 +1367,7 @@ class PreviewRenderer(
             renderOverlays(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
-            val isCatchingUp = if (playhead.mode == PlayMode.PAUSED) {
-                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                if (isTransition) {
-                    (frameSourceA != null && !frameSourceA!!.isAccuratePausedFrameLatched) ||
-                        (frameSourceB != null && !frameSourceB!!.isAccuratePausedFrameLatched)
-                } else {
-                    activeFs != null && !activeFs.isAccuratePausedFrameLatched
-                }
-            } else {
-                val hasValidFrameNear = if (isTransition) {
-                    (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
-                            (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
-                } else {
-                    val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                    activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
-                }
-                if (hasValidFrameNear) {
-                    false
-                } else if (isTransition) {
-                    !isFirstFrameLatched ||
-                        (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
-                        (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek)) ||
-                        isWaitingForFrame
-                } else {
-                    val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                    !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek)) ||
-                        isWaitingForFrame
-                }
-            }
+            val isCatchingUp = checkIsCatchingUp(frame, isTransition)
 
             if (isCatchingUp) {
                 isWaitingForFrame = true
@@ -1434,11 +1426,6 @@ class PreviewRenderer(
                     }
                     else -> {
                         try {
-                            val currentPts = fsB.lastDecodedPtsUs
-                            val targetPts = frame.clipASourceUs
-                            if (!isScrubbing && currentPts != -1L && (targetPts - currentPts > 150_000L || currentPts - targetPts > 100_000L || !fsB.isAccuratePausedFrameLatched)) {
-                                fsB.seekTo(targetPts, fastKeyframeOnly = false)
-                            }
                             fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
                         } catch (_: Exception) { false }
                     }
@@ -1450,6 +1437,7 @@ class PreviewRenderer(
                     stB.updateTexImage()
                     stB.getTransformMatrix(rawMatB)
                     isFirstFrameLatched = true
+                    isWaitingForFrame = false
                 } catch (_: Exception) {}
             }
             val transformB = getClipTransform(clipA.id)
@@ -1613,35 +1601,7 @@ class PreviewRenderer(
             renderOverlays(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
-            val isCatchingUp = if (playhead.mode == PlayMode.PAUSED) {
-                val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                if (isTransition) {
-                    (frameSourceA != null && !frameSourceA!!.isAccuratePausedFrameLatched) ||
-                        (frameSourceB != null && !frameSourceB!!.isAccuratePausedFrameLatched)
-                } else {
-                    activeFs != null && !activeFs.isAccuratePausedFrameLatched
-                }
-            } else {
-                val hasValidFrameNear = if (isTransition) {
-                    (frameSourceA?.hasValidFrameNear(frame.clipASourceUs) == true) &&
-                            (frameSourceB?.hasValidFrameNear(frame.clipBSourceUs) == true)
-                } else {
-                    val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                    activeFs?.hasValidFrameNear(frame.clipASourceUs) == true
-                }
-                if (hasValidFrameNear) {
-                    false
-                } else if (isTransition) {
-                    !isFirstFrameLatched ||
-                        (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
-                        (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek)) ||
-                        isWaitingForFrame
-                } else {
-                    val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                    !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek)) ||
-                        isWaitingForFrame
-                }
-            }
+            val isCatchingUp = checkIsCatchingUp(frame, isTransition)
 
             if (isCatchingUp) {
                 isWaitingForFrame = true

@@ -1003,10 +1003,15 @@ fun EditorScreen(
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var isWaitingForFrameState by remember { mutableStateOf(previewRenderer.isWaitingForFrame) }
     var showPreviewLoader by remember { mutableStateOf(false) }
+    var lastSafetyDismissWallMs by remember { mutableLongStateOf(0L) }
 
     DisposableEffect(previewRenderer) {
         previewRenderer.onWaitingForFrameChanged = { waiting ->
             mainHandler.post {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (waiting && (now - lastSafetyDismissWallMs < 500L)) {
+                    return@post
+                }
                 isWaitingForFrameState = waiting
             }
         }
@@ -1018,7 +1023,11 @@ fun EditorScreen(
     val isImporting = vmUiState?.isImporting == true
     val isProcessingEdit = vmUiState?.isProcessingEdit == true
     val isProcessing = vmUiState?.isProcessing == true || isImporting || isProcessingEdit
-    val isWaitingForFrame = isWaitingForFrameState || previewRenderer.isWaitingForFrame
+    val isWaitingForFrame = if (android.os.SystemClock.uptimeMillis() - lastSafetyDismissWallMs < 500L) {
+        false
+    } else {
+        isWaitingForFrameState || previewRenderer.isWaitingForFrame
+    }
     val isBusy = isWaitingForFrame || isProcessing
 
     LaunchedEffect(isBusy) {
@@ -1035,8 +1044,9 @@ fun EditorScreen(
             previewRenderer.glSurfaceView?.requestRender()
         }
 
-        // Hard safety timeout: auto-dismiss after 2000ms so touches can NEVER stay blocked forever
-        delay(2000L)
+        // Hard safety timeout: auto-dismiss after 500ms (max total 600ms) so touches can NEVER stay blocked forever
+        delay(500L)
+        lastSafetyDismissWallMs = android.os.SystemClock.uptimeMillis()
         showPreviewLoader = false
         isWaitingForFrameState = false
         previewRenderer.isWaitingForFrame = false

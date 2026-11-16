@@ -80,7 +80,7 @@ class FrameSource(
         if (isNearEos && (outputEos || (currentPtsUs != -1L && currentPtsUs >= durationUs - 85_000L))) {
             return true
         }
-        if (isAccuratePausedFrameLatched && currentPtsUs != -1L && currentPtsUs >= targetUs - 25_000L && currentPtsUs <= targetUs + 45_000L) {
+        if (currentPtsUs != -1L && currentPtsUs >= targetUs - 25_000L && currentPtsUs <= targetUs + 45_000L) {
             return true
         }
         return false
@@ -430,16 +430,16 @@ class FrameSource(
         val clipDurationUs = effectiveMediaDurationUs
         val isNearClipEnd = clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L
         if (isPrepared && currentPtsUs != -1L) {
-            val canSkip = if (!fastKeyframeOnly && !isAccuratePausedFrameLatched) {
-                false
-            } else {
-                kotlin.math.abs(localUs - currentPtsUs) <= 45_000L ||
-                    (isNearClipEnd && currentPtsUs >= clipDurationUs - 85_000L)
-            }
-            if (canSkip) {
+            val inTargetWindow = currentPtsUs >= localUs - 25_000L && currentPtsUs <= localUs + 45_000L
+            val nearEnd = isNearClipEnd && currentPtsUs >= clipDurationUs - 85_000L
+            if (inTargetWindow || nearEnd) {
                 isCatchingUpFromSeek = false
                 isAccuratePausedFrameLatched = true
                 prewarmStage = 3
+                return true
+            }
+            if (fastKeyframeOnly && kotlin.math.abs(localUs - currentPtsUs) <= 45_000L) {
+                isCatchingUpFromSeek = false
                 return false
             }
         }
@@ -545,17 +545,16 @@ class FrameSource(
                     break
                 }
             }
-            if (rendered || outputEos || (inputEos && !rendered) || attempts >= maxAttempts || (clipDurationUs > 0L && currentPtsUs >= clipDurationUs - 85_000L) || (currentPtsUs >= lastSeekTargetUs - 50_000L)) {
-                isCatchingUpFromSeek = false
-                if (outputEos || (clipDurationUs > 0L && currentPtsUs >= clipDurationUs - 85_000L)) {
-                    isAccuratePausedFrameLatched = true
-                    prewarmStage = 3
-                    lastRenderedLocalUs = localUs
-                }
+            isCatchingUpFromSeek = false
+            isAccuratePausedFrameLatched = true
+            prewarmStage = 3
+            if (lastRenderedLocalUs == -1L) {
+                lastRenderedLocalUs = localUs
             }
             return rendered
         } catch (_: Exception) {
             isCatchingUpFromSeek = false
+            isAccuratePausedFrameLatched = true
             return false
         }
     }
