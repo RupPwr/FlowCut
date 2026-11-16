@@ -401,6 +401,12 @@ fun EditorScreen(
                 // 3. Skip redundant renders when paused, but never drop renders while waiting for a frame
                 val currentDirtyVersion = stateDirtyCounter.get()
                 val isDirty = currentDirtyVersion != lastRenderDirtyVersion
+                val isPausedJump = (mode == PlayMode.PAUSED || mode == PlayMode.SCRUBBING) &&
+                        lastRequestedTimeUs != -1L &&
+                        kotlin.math.abs(tUs - lastRequestedTimeUs) > 80_000L
+                if (isPausedJump) {
+                    previewRenderer.isWaitingForFrame = true
+                }
                 val shouldRender = (mode != PlayMode.PAUSED) ||
                         (tUs != lastRequestedTimeUs) ||
                         (mode != lastRequestedMode) ||
@@ -979,13 +985,6 @@ fun EditorScreen(
         previewRenderer.onWaitingForFrameChanged = { waiting ->
             mainHandler.post {
                 isWaitingForFrameState = waiting
-                if (!waiting) {
-                    val busy = (resolvedViewModel?.uiState?.value?.isImporting == true) ||
-                               (resolvedViewModel?.uiState?.value?.isProcessingEdit == true)
-                    if (!busy) {
-                        showPreviewLoader = false
-                    }
-                }
             }
         }
         onDispose {
@@ -995,37 +994,30 @@ fun EditorScreen(
 
     val isImporting = vmUiState?.isImporting == true
     val isProcessingEdit = vmUiState?.isProcessingEdit == true
-    val isBusy = isWaitingForFrameState || previewRenderer.isWaitingForFrame || isImporting || isProcessingEdit
+    val isProcessing = vmUiState?.isProcessing == true || isImporting || isProcessingEdit
+    val isWaitingForFrame = isWaitingForFrameState || previewRenderer.isWaitingForFrame
+    val isBusy = isWaitingForFrame || isProcessing
 
-    LaunchedEffect(isBusy, showPreviewLoader) {
-        if (isBusy || showPreviewLoader) {
-            var elapsedMs = 0L
-            while (isActive) {
-                val currentImporting = resolvedViewModel?.uiState?.value?.isImporting == true
-                val currentProcessing = resolvedViewModel?.uiState?.value?.isProcessingEdit == true
-                val currentWaiting = previewRenderer.isWaitingForFrame || isWaitingForFrameState
-                val currentlyBusy = currentWaiting || currentImporting || currentProcessing
-
-                if (!currentlyBusy) {
-                    showPreviewLoader = false
-                    isWaitingForFrameState = false
-                    break
-                }
-
-                if (elapsedMs >= 60L && !showPreviewLoader) {
-                    showPreviewLoader = true
-                }
-
-                if (previewRenderer.isWaitingForFrame) {
-                    previewRenderer.glSurfaceView?.requestRender()
-                }
-
-                delay(16L)
-                elapsedMs += 16L
-            }
-        } else {
+    LaunchedEffect(isBusy) {
+        if (!isBusy) {
             showPreviewLoader = false
+            return@LaunchedEffect
         }
+
+        // Grace threshold: only show loader if operation takes >= 100ms (prevents flicker on fast frames)
+        delay(100L)
+        showPreviewLoader = true
+
+        if (previewRenderer.isWaitingForFrame) {
+            previewRenderer.glSurfaceView?.requestRender()
+        }
+
+        // Hard safety timeout: auto-dismiss after 2000ms so touches can NEVER stay blocked forever
+        delay(2000L)
+        showPreviewLoader = false
+        isWaitingForFrameState = false
+        previewRenderer.isWaitingForFrame = false
+        resolvedViewModel?.setProcessingEdit(false)
     }
 
     LaunchedEffect(currentFocus) {
@@ -5473,9 +5465,14 @@ private fun TransportControlsRow(
                 }
             },
             onSeekScrub = { ms ->
+                val prevUs = playbackController.playhead.timeUs
+                val targetUs = msToUs(ms)
+                if (playbackController.playhead.mode == PlayMode.PAUSED && kotlin.math.abs(targetUs - prevUs) > 80_000L) {
+                    previewRenderer.isWaitingForFrame = true
+                }
                 onSeekScrub(ms)
                 if (USE_NEW_CORE) {
-                    playbackController.seekTo(msToUs(ms))
+                    playbackController.seekTo(targetUs)
                     frameDriver.wake()
                 }
             }

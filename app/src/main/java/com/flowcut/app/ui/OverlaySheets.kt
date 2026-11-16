@@ -42,11 +42,16 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.zIndex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.launch
 import com.flowcut.app.model.Clip
 import com.flowcut.app.core.time.TimeMap
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -5931,9 +5936,7 @@ fun ClipSortSheet(
 ) {
     BackHandler { onDismiss() }
 
-    val workingClips = remember(clips) {
-        androidx.compose.runtime.mutableStateListOf<Clip>().apply { addAll(clips) }
-    }
+    var workingClips by remember(clips) { mutableStateOf(clips.toList()) }
     var activeClipId by remember {
         mutableStateOf(selectedClipIndex?.let { clips.getOrNull(it)?.id } ?: clips.firstOrNull()?.id)
     }
@@ -5944,32 +5947,39 @@ fun ClipSortSheet(
     val spacingDp = 8.dp
     val slotWidthPx = with(density) { (cardSizeDp + spacingDp).toPx() }
 
-    var draggingIndex by remember { mutableIntStateOf(-1) }
-    var dragAccumulatedPx by remember { mutableFloatStateOf(0f) }
+    var draggingClipId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
 
     val thumbnailCache = remember { androidx.compose.runtime.mutableStateMapOf<String, ImageBitmap>() }
+    val thumbnailSemaphore = remember { Semaphore(2) }
 
-    LaunchedEffect(workingClips.toList()) {
+    LaunchedEffect(clips) {
         withContext(Dispatchers.IO) {
-            for (clip in workingClips) {
-                if (thumbnailCache.containsKey(clip.id) || clip.path.isEmpty()) continue
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(clip.path)
-                    val map = clipTimeMaps[clip.id]
-                    val inUs = map?.inUs ?: 0L
-                    val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                        retriever.getScaledFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 180, 180)
-                            ?: retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    } else {
-                        retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            for (clip in clips) {
+                val timeMap = clipTimeMaps[clip.id]
+                val inUs = timeMap?.inUs ?: 0L
+                val cacheKey = "${clip.path}_$inUs"
+                if (thumbnailCache.containsKey(cacheKey) || clip.path.isEmpty()) continue
+                launch {
+                    thumbnailSemaphore.withPermit {
+                        if (thumbnailCache.containsKey(cacheKey)) return@withPermit
+                        val retriever = MediaMetadataRetriever()
+                        try {
+                            retriever.setDataSource(clip.path)
+                            val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                                retriever.getScaledFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 180, 180)
+                                    ?: retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            } else {
+                                retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            }
+                            if (bmp != null) {
+                                thumbnailCache[cacheKey] = bmp.asImageBitmap()
+                            }
+                        } catch (_: Throwable) {
+                        } finally {
+                            try { retriever.release() } catch (_: Throwable) {}
+                        }
                     }
-                    if (bmp != null) {
-                        thumbnailCache[clip.id] = bmp.asImageBitmap()
-                    }
-                } catch (_: Throwable) {
-                } finally {
-                    try { retriever.release() } catch (_: Throwable) {}
                 }
             }
         }
@@ -6005,11 +6015,12 @@ fun ClipSortSheet(
             LazyRow(
                 modifier = Modifier.fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(spacingDp)
+                horizontalArrangement = Arrangement.spacedBy(spacingDp),
+                userScrollEnabled = draggingClipId == null
             ) {
-                itemsIndexed(workingClips, key = { _, clip -> clip.id }) { index, clip ->
+                itemsIndexed(workingClips, key = { _, clip -> clip.id }) { _, clip ->
                     val isSelected = clip.id == activeClipId
-                    val isDraggingThis = index == draggingIndex
+                    val isDraggingThis = clip.id == draggingClipId
                     val timeMap = clipTimeMaps[clip.id]
                     val speed = if (timeMap != null && timeMap.speedDen != 0) {
                         timeMap.speedNum.toFloat() / timeMap.speedDen.toFloat()
@@ -6020,16 +6031,18 @@ fun ClipSortSheet(
                         timeMap.timelineDurationUs() / 1000L
                     } else clip.durationMs
                     val durationText = formatSortDuration(durationMs)
-                    val thumbnail = thumbnailCache[clip.id]
+                    val inUs = timeMap?.inUs ?: 0L
+                    val thumbnail = thumbnailCache["${clip.path}_$inUs"]
 
                     Box(
                         modifier = Modifier
                             .size(cardSizeDp)
-                            .offset {
+                            .zIndex(if (isDraggingThis) 10f else 1f)
+                            .graphicsLayer {
                                 if (isDraggingThis) {
-                                    IntOffset(dragAccumulatedPx.roundToInt(), 0)
-                                } else {
-                                    IntOffset.Zero
+                                    translationX = dragOffsetX
+                                    scaleX = 1.06f
+                                    scaleY = 1.06f
                                 }
                             }
                             .clip(RoundedCornerShape(8.dp))
@@ -6040,36 +6053,46 @@ fun ClipSortSheet(
                                 shape = RoundedCornerShape(8.dp)
                             )
                             .clickable {
-                                activeClipId = clip.id
+                                if (draggingClipId == null) {
+                                    activeClipId = clip.id
+                                }
                             }
-                            .pointerInput(clip.id, workingClips.size) {
+                            .pointerInput(clip.id) {
                                 detectHorizontalDragGestures(
                                     onDragStart = {
-                                        draggingIndex = index
-                                        dragAccumulatedPx = 0f
+                                        draggingClipId = clip.id
+                                        dragOffsetX = 0f
                                         activeClipId = clip.id
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                     },
                                     onDragEnd = {
-                                        draggingIndex = -1
-                                        dragAccumulatedPx = 0f
+                                        draggingClipId = null
+                                        dragOffsetX = 0f
                                     },
                                     onDragCancel = {
-                                        draggingIndex = -1
-                                        dragAccumulatedPx = 0f
+                                        draggingClipId = null
+                                        dragOffsetX = 0f
                                     },
                                     onHorizontalDrag = { change, dragAmount ->
                                         change.consume()
-                                        dragAccumulatedPx += dragAmount
-                                        val shiftSlots = (dragAccumulatedPx / slotWidthPx).roundToInt()
-                                        if (shiftSlots != 0) {
-                                            val currentPos = draggingIndex
-                                            val targetPos = (currentPos + shiftSlots).coerceIn(0, workingClips.size - 1)
-                                            if (targetPos != currentPos) {
-                                                val moved = workingClips.removeAt(currentPos)
-                                                workingClips.add(targetPos, moved)
-                                                dragAccumulatedPx -= (targetPos - currentPos) * slotWidthPx
-                                                draggingIndex = targetPos
+                                        dragOffsetX += dragAmount
+                                        val currentIdx = workingClips.indexOfFirst { it.id == clip.id }
+                                        if (currentIdx != -1) {
+                                            if (dragOffsetX > slotWidthPx * 0.5f && currentIdx < workingClips.size - 1) {
+                                                val toIdx = currentIdx + 1
+                                                val updated = workingClips.toMutableList().apply {
+                                                    add(toIdx, removeAt(currentIdx))
+                                                }
+                                                workingClips = updated
+                                                dragOffsetX -= slotWidthPx
+                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            } else if (dragOffsetX < -slotWidthPx * 0.5f && currentIdx > 0) {
+                                                val toIdx = currentIdx - 1
+                                                val updated = workingClips.toMutableList().apply {
+                                                    add(toIdx, removeAt(currentIdx))
+                                                }
+                                                workingClips = updated
+                                                dragOffsetX += slotWidthPx
                                                 hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                             }
                                         }
@@ -6177,7 +6200,7 @@ fun ClipSortSheet(
 
                 IconButton(
                     onClick = {
-                        onConfirm(workingClips.toList())
+                        onConfirm(workingClips)
                         onDismiss()
                     },
                     modifier = Modifier

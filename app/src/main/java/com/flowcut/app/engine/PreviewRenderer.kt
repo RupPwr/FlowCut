@@ -635,6 +635,7 @@ class PreviewRenderer(
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
                 hasPendingSurfaceFrameA.set(true)
+                isWaitingForFrame = false
                 onRenderRequested?.invoke()
                 glSurfaceView?.requestRender()
             }, stCallbackHandler)
@@ -643,6 +644,7 @@ class PreviewRenderer(
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
                 hasPendingSurfaceFrameB.set(true)
+                isWaitingForFrame = false
                 onRenderRequested?.invoke()
                 glSurfaceView?.requestRender()
             }, stCallbackHandler)
@@ -1006,10 +1008,12 @@ class PreviewRenderer(
             } else if (isTransition) {
                 !isFirstFrameLatched ||
                     (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
-                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek)) ||
+                    isWaitingForFrame
             } else {
                 val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek)) ||
+                    isWaitingForFrame
             }
 
             if (isCatchingUp) {
@@ -1333,10 +1337,12 @@ class PreviewRenderer(
             } else if (isTransition) {
                 !isFirstFrameLatched ||
                     (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
-                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek)) ||
+                    isWaitingForFrame
             } else {
                 val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek)) ||
+                    isWaitingForFrame
             }
 
             if (isCatchingUp) {
@@ -1588,10 +1594,12 @@ class PreviewRenderer(
             } else if (isTransition) {
                 !isFirstFrameLatched ||
                     (frameSourceA != null && (frameSourceA!!.prewarmStage < 3 || frameSourceA!!.isCatchingUpFromSeek)) ||
-                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek))
+                    (frameSourceB != null && (frameSourceB!!.prewarmStage < 3 || frameSourceB!!.isCatchingUpFromSeek)) ||
+                    isWaitingForFrame
             } else {
                 val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
-                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek))
+                !isFirstFrameLatched || (activeFs != null && (activeFs.prewarmStage < 3 || activeFs.isCatchingUpFromSeek)) ||
+                    isWaitingForFrame
             }
 
             if (isCatchingUp) {
