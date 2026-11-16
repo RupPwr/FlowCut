@@ -35,14 +35,20 @@ import androidx.compose.material.icons.filled.Remove
 import android.os.Build
 import android.media.MediaMetadataRetriever
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -5949,6 +5955,71 @@ fun ClipSortSheet(
 
     var draggingClipId by remember { mutableStateOf<String?>(null) }
     var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    val listState = rememberLazyListState()
+    var viewportWidthPx by remember { mutableFloatStateOf(0f) }
+    var lazyRowBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    var dragCardCenterScreenX by remember { mutableFloatStateOf(0f) }
+
+    fun performSlotSwap(targetId: String) {
+        var currentIdx = workingClips.indexOfFirst { it.id == targetId }
+        while (currentIdx != -1 && dragOffsetX > slotWidthPx * 0.5f && currentIdx < workingClips.size - 1) {
+            val toIdx = currentIdx + 1
+            val updated = workingClips.toMutableList().apply {
+                add(toIdx, removeAt(currentIdx))
+            }
+            workingClips = updated
+            dragOffsetX -= slotWidthPx
+            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            currentIdx = toIdx
+        }
+        while (currentIdx != -1 && dragOffsetX < -slotWidthPx * 0.5f && currentIdx > 0) {
+            val toIdx = currentIdx - 1
+            val updated = workingClips.toMutableList().apply {
+                add(toIdx, removeAt(currentIdx))
+            }
+            workingClips = updated
+            dragOffsetX += slotWidthPx
+            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            currentIdx = toIdx
+        }
+    }
+
+    LaunchedEffect(draggingClipId) {
+        val clipId = draggingClipId ?: return@LaunchedEffect
+        val edgeZonePx = with(density) { 56.dp.toPx() }
+        while (isActive && draggingClipId != null) {
+            val effectiveViewportWidth = if (viewportWidthPx > 0f) viewportWidthPx else lazyRowBoundsInRoot.width
+            val cardCenterInViewport = if (lazyRowBoundsInRoot.left > 0f) {
+                dragCardCenterScreenX - lazyRowBoundsInRoot.left
+            } else {
+                dragCardCenterScreenX
+            }
+
+            val shouldScrollForward = cardCenterInViewport > (effectiveViewportWidth - edgeZonePx) && listState.canScrollForward
+            val shouldScrollBackward = cardCenterInViewport < edgeZonePx && cardCenterInViewport > 0f && listState.canScrollBackward
+
+            if (shouldScrollForward) {
+                val overflow = (cardCenterInViewport - (effectiveViewportWidth - edgeZonePx)).coerceAtLeast(0f)
+                val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
+                val scrollSpeedPx = 6f + 12f * ratio
+                val scrolled = listState.scrollBy(scrollSpeedPx)
+                if (scrolled != 0f) {
+                    dragOffsetX += scrolled
+                    performSlotSwap(clipId)
+                }
+            } else if (shouldScrollBackward) {
+                val overflow = (edgeZonePx - cardCenterInViewport).coerceAtLeast(0f)
+                val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
+                val scrollSpeedPx = 6f + 12f * ratio
+                val scrolled = listState.scrollBy(-scrollSpeedPx)
+                if (scrolled != 0f) {
+                    dragOffsetX += scrolled
+                    performSlotSwap(clipId)
+                }
+            }
+            delay(16L)
+        }
+    }
 
     val thumbnailCache = remember { androidx.compose.runtime.mutableStateMapOf<String, ImageBitmap>() }
     val thumbnailSemaphore = remember { Semaphore(2) }
@@ -6013,7 +6084,13 @@ fun ClipSortSheet(
         ) {
             // Horizontal Thumbnail Cards
             LazyRow(
-                modifier = Modifier.fillMaxWidth(),
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { coords ->
+                        viewportWidthPx = coords.size.width.toFloat()
+                        lazyRowBoundsInRoot = coords.boundsInRoot()
+                    },
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(spacingDp),
                 userScrollEnabled = draggingClipId == null
@@ -6034,6 +6111,8 @@ fun ClipSortSheet(
                     val inUs = timeMap?.inUs ?: 0L
                     val thumbnail = thumbnailCache["${clip.path}_$inUs"]
 
+                    var cardBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+
                     Box(
                         modifier = Modifier
                             .size(cardSizeDp)
@@ -6041,9 +6120,12 @@ fun ClipSortSheet(
                             .graphicsLayer {
                                 if (isDraggingThis) {
                                     translationX = dragOffsetX
-                                    scaleX = 1.06f
-                                    scaleY = 1.06f
+                                    scaleX = 1.08f
+                                    scaleY = 1.08f
                                 }
+                            }
+                            .onGloballyPositioned { coords ->
+                                cardBoundsInRoot = coords.boundsInRoot()
                             }
                             .clip(RoundedCornerShape(8.dp))
                             .background(DARK_CARD_BG)
@@ -6058,44 +6140,29 @@ fun ClipSortSheet(
                                 }
                             }
                             .pointerInput(clip.id) {
-                                detectHorizontalDragGestures(
-                                    onDragStart = {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = { offset ->
                                         draggingClipId = clip.id
                                         dragOffsetX = 0f
+                                        dragCardCenterScreenX = cardBoundsInRoot.center.x
                                         activeClipId = clip.id
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                     },
                                     onDragEnd = {
                                         draggingClipId = null
                                         dragOffsetX = 0f
+                                        dragCardCenterScreenX = 0f
                                     },
                                     onDragCancel = {
                                         draggingClipId = null
                                         dragOffsetX = 0f
+                                        dragCardCenterScreenX = 0f
                                     },
-                                    onHorizontalDrag = { change, dragAmount ->
+                                    onDrag = { change, dragAmount ->
                                         change.consume()
-                                        dragOffsetX += dragAmount
-                                        val currentIdx = workingClips.indexOfFirst { it.id == clip.id }
-                                        if (currentIdx != -1) {
-                                            if (dragOffsetX > slotWidthPx * 0.5f && currentIdx < workingClips.size - 1) {
-                                                val toIdx = currentIdx + 1
-                                                val updated = workingClips.toMutableList().apply {
-                                                    add(toIdx, removeAt(currentIdx))
-                                                }
-                                                workingClips = updated
-                                                dragOffsetX -= slotWidthPx
-                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            } else if (dragOffsetX < -slotWidthPx * 0.5f && currentIdx > 0) {
-                                                val toIdx = currentIdx - 1
-                                                val updated = workingClips.toMutableList().apply {
-                                                    add(toIdx, removeAt(currentIdx))
-                                                }
-                                                workingClips = updated
-                                                dragOffsetX += slotWidthPx
-                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            }
-                                        }
+                                        dragOffsetX += dragAmount.x
+                                        dragCardCenterScreenX += dragAmount.x
+                                        performSlotSwap(clip.id)
                                     }
                                 )
                             }
