@@ -5954,51 +5954,42 @@ fun ClipSortSheet(
     val hapticFeedback = LocalHapticFeedback.current
     val density = LocalDensity.current
     val cardSizeDp = 88.dp
-    val spacingDp = 8.dp
-    val slotWidthPx = with(density) { (cardSizeDp + spacingDp).toPx() }
-    val cardSizePx = with(density) { cardSizeDp.toPx() }
-    val cardHalfWidthPx = cardSizePx / 2f
+    val spacingDp = 10.dp
+    val cardWidthPx = with(density) { cardSizeDp.toPx() }
+    val cardSizePx = cardWidthPx
+    val spacingPx = with(density) { spacingDp.toPx() }
+    val stridePx = cardWidthPx + spacingPx
+    val startPaddingPx = with(density) { 16.dp.toPx() }
+    val cardHalfWidthPx = cardWidthPx / 2f
 
     var draggingClipId by remember { mutableStateOf<String?>(null) }
     var fingerXInStrip by remember { mutableFloatStateOf(0f) }
     val listState = rememberLazyListState()
     var stripWidthPx by remember { mutableFloatStateOf(0f) }
-    var lastSwapTimeMs by remember { mutableLongStateOf(0L) }
 
     fun performSlotSwap(targetId: String) {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastSwapTimeMs < 110L) return
         val currentIdx = workingClips.indexOfFirst { it.id == targetId }
         if (currentIdx == -1) return
 
-        val visibleItems = listState.layoutInfo.visibleItemsInfo
-        if (visibleItems.isEmpty()) return
+        val totalScrollPx = listState.firstVisibleItemIndex * stridePx + listState.firstVisibleItemScrollOffset
+        val absoluteFingerX = (totalScrollPx + fingerXInStrip - startPaddingPx).coerceAtLeast(0f)
+        val targetIndex = (absoluteFingerX / stridePx).toInt().coerceIn(0, workingClips.lastIndex)
 
-        val deadzonePx = slotWidthPx * 0.25f
-
-        // Compute which slot center inside visibleItemsInfo is closest to fingerXInStrip
-        val closestItem = visibleItems.minByOrNull { item ->
-            val center = item.offset + item.size / 2f
-            kotlin.math.abs(fingerXInStrip - center)
-        } ?: return
-
-        val targetIndex = closestItem.index
-        if (targetIndex == currentIdx) return
-
-        val targetCenter = closestItem.offset + closestItem.size / 2f
-        val canSwap = if (targetIndex > currentIdx) {
-            fingerXInStrip >= targetCenter - deadzonePx
-        } else {
-            fingerXInStrip <= targetCenter + deadzonePx
-        }
-
-        if (canSwap && targetIndex in workingClips.indices) {
-            val updated = workingClips.toMutableList().apply {
-                add(targetIndex, removeAt(currentIdx))
+        if (targetIndex != currentIdx) {
+            val canSwap = if (targetIndex > currentIdx) {
+                absoluteFingerX > (targetIndex * stridePx) + (stridePx * 0.25f)
+            } else {
+                absoluteFingerX < ((targetIndex + 1) * stridePx) - (stridePx * 0.25f)
             }
-            workingClips = updated
-            lastSwapTimeMs = now
-            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+
+            if (canSwap) {
+                val updated = workingClips.toMutableList().apply {
+                    val item = removeAt(currentIdx)
+                    add(targetIndex, item)
+                }
+                workingClips = updated
+                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
         }
     }
 
@@ -6012,15 +6003,18 @@ fun ClipSortSheet(
             if (shouldScrollForward && listState.canScrollForward) {
                 val overflow = (fingerXInStrip - (stripWidthPx - edgeZonePx)).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
-                val deltaPx = 8f + 8f * ratio
-                listState.scrollBy(deltaPx)
+                val scrollStepPx = 8f + 8f * ratio
+                listState.scrollBy(scrollStepPx)
+                performSlotSwap(clipId)
             } else if (shouldScrollBackward && listState.canScrollBackward) {
                 val overflow = (edgeZonePx - fingerXInStrip).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
-                val deltaPx = -(8f + 8f * ratio)
-                listState.scrollBy(deltaPx)
+                val scrollStepPx = 8f + 8f * ratio
+                listState.scrollBy(-scrollStepPx)
+                performSlotSwap(clipId)
+            } else {
+                performSlotSwap(clipId)
             }
-            performSlotSwap(clipId)
             delay(16L)
         }
     }
@@ -6125,15 +6119,10 @@ fun ClipSortSheet(
 
                             if (timeoutResult == null) {
                                 // Long-press timeout elapsed while within touchSlop: ACTIVATE DRAG LOCK!
-                                val visibleItems = listState.layoutInfo.visibleItemsInfo
-                                val hitItem = visibleItems.minByOrNull { item ->
-                                    val center = item.offset + item.size / 2f
-                                    kotlin.math.abs(downX - center)
-                                }
-                                val maxDist = (cardSizePx / 2f) + with(density) { spacingDp.toPx() }
-                                val hitClip = if (hitItem != null && kotlin.math.abs(downX - (hitItem.offset + hitItem.size / 2f)) <= maxDist) {
-                                    workingClips.firstOrNull { it.id == hitItem.key } ?: workingClips.getOrNull(hitItem.index)
-                                } else null
+                                val totalScrollPx = listState.firstVisibleItemIndex * stridePx + listState.firstVisibleItemScrollOffset
+                                val absoluteDownX = (totalScrollPx + downX - startPaddingPx).coerceAtLeast(0f)
+                                val hitIndex = (absoluteDownX / stridePx).toInt().coerceIn(0, workingClips.lastIndex)
+                                val hitClip = workingClips.getOrNull(hitIndex)
 
                                 if (hitClip != null) {
                                     hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
