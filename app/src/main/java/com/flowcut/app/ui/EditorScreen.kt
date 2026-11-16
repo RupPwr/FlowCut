@@ -2364,6 +2364,7 @@ fun EditorScreen(
                 canSplitAudio = canSplitAudio,
                 isTextOverlaySelected = isTextOverlay,
                 isTextToolbarActive = isTextToolbarActive,
+                hasTextOverlay = resolvedViewModel?.hasTextOverlay() == true,
                 isFilterOverlaySelected = isFilterOverlay,
                 isEffectOverlaySelected = isEffectOverlay,
                 isStickerSelected = isStickerItem,
@@ -2718,7 +2719,12 @@ fun EditorScreen(
                     Toast.makeText(context, "Coming soon", Toast.LENGTH_SHORT).show()
                 },
                 onTextClick = {
-                    isTextToolbarActive = true
+                    val hasText = resolvedViewModel?.hasTextOverlay() == true
+                    if (!hasText) {
+                        handleOpenText()
+                    } else {
+                        isTextToolbarActive = true
+                    }
                 },
                 onAddTextClick = handleOpenText,
                 onStickerClick = handleOpenSticker,

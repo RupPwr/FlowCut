@@ -108,6 +108,7 @@ fun BottomToolbar(
     canSplitAudio: Boolean = true,
     isTextOverlaySelected: Boolean = false,
     isTextToolbarActive: Boolean = false,
+    hasTextOverlay: Boolean = false,
     isFilterOverlaySelected: Boolean = false,
     isEffectOverlaySelected: Boolean = false,
     isMosaicSelected: Boolean = false,
@@ -341,8 +342,10 @@ fun BottomToolbar(
                     }
                     ToolbarMode.S0_MAIN -> {
                         MainToolbarContent(
+                            hasTextOverlay = hasTextOverlay,
                             onTrimClick = onTrimClick,
                             onTextClick = onTextClick,
+                            onAddTextClick = onAddTextClick,
                             onStickerClick = onStickerClick,
                             onMosaicClick = onMosaicClick,
                             onOverlayClick = onOverlayClick,
@@ -3087,8 +3090,10 @@ private fun SelectedOverlayToolbar(
 
 @Composable
 private fun MainToolbarContent(
+    hasTextOverlay: Boolean = false,
     onTrimClick: () -> Unit,
     onTextClick: () -> Unit,
+    onAddTextClick: () -> Unit = onTextClick,
     onStickerClick: () -> Unit,
     onMosaicClick: () -> Unit,
     onOverlayClick: () -> Unit,
@@ -3134,11 +3139,17 @@ private fun MainToolbarContent(
                     )
                 }
 
-                // 2. Text (Active: opens TextEditorSheet)
+                // 2. Text (Active: opens TextEditorSheet directly if no text, or Text sub-toolbar)
                 Column(
                     modifier = Modifier
                         .widthIn(min = 52.dp)
-                        .clickable { onTextClick() }
+                        .clickable {
+                            if (!hasTextOverlay) {
+                                onAddTextClick()
+                            } else {
+                                onTextClick()
+                            }
+                        }
                         .padding(horizontal = 2.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center

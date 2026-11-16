@@ -1002,6 +1002,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return if (addLayerItem(item)) _layerItems.lastOrNull() else null
     }
 
+    fun hasTextOverlay(): Boolean {
+        return _layerItems.any { it.type == LayerType.TEXT }
+    }
+
     fun addTextOverlay(
         text: String = "",
         textColorArgb: Int = 0xFFFFFFFF.toInt(),
