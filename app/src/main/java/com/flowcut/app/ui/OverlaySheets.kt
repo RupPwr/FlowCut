@@ -33,7 +33,9 @@ import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import android.os.Build
+import android.os.SystemClock
 import android.media.MediaMetadataRetriever
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.scrollBy
@@ -5962,8 +5964,11 @@ fun ClipSortSheet(
     var lazyRowBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     var lazyRowLeftInRootPx by remember { mutableFloatStateOf(0f) }
     var dragCardCenterScreenX by remember { mutableFloatStateOf(0f) }
+    var lastSwapTimeMs by remember { mutableLongStateOf(0L) }
 
     fun performSlotSwap(targetId: String) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastSwapTimeMs < 140L) return
         val currentIdx = workingClips.indexOfFirst { it.id == targetId }
         if (currentIdx == -1) return
         val currentSlotItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetId }
@@ -5974,7 +5979,7 @@ fun ClipSortSheet(
             desiredLeftInRootPx
         }
         val displacement = desiredLeftInRootPx - currentSlotLeftInRootPx
-        val swapThresholdPx = slotWidthPx * 0.55f
+        val swapThresholdPx = slotWidthPx * 0.52f
 
         if (displacement > swapThresholdPx && currentIdx < workingClips.size - 1) {
             val toIdx = currentIdx + 1
@@ -5982,6 +5987,7 @@ fun ClipSortSheet(
                 add(toIdx, removeAt(currentIdx))
             }
             workingClips = updated
+            lastSwapTimeMs = now
             hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         } else if (displacement < -swapThresholdPx && currentIdx > 0) {
             val toIdx = currentIdx - 1
@@ -5989,14 +5995,16 @@ fun ClipSortSheet(
                 add(toIdx, removeAt(currentIdx))
             }
             workingClips = updated
+            lastSwapTimeMs = now
             hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         }
     }
 
     LaunchedEffect(draggingClipId) {
         val clipId = draggingClipId ?: return@LaunchedEffect
-        val edgeZonePx = with(density) { 56.dp.toPx() }
+        val edgeZonePx = with(density) { 48.dp.toPx() }
         while (isActive && draggingClipId != null) {
+            withFrameNanos { }
             val effectiveViewportWidth = if (viewportWidthPx > 0f) viewportWidthPx else lazyRowBoundsInRoot.width
             val effectiveLeft = if (lazyRowLeftInRootPx > 0f) lazyRowLeftInRootPx else lazyRowBoundsInRoot.left
             val cardCenterInViewport = if (effectiveLeft > 0f) {
@@ -6011,7 +6019,7 @@ fun ClipSortSheet(
             if (shouldScrollForward) {
                 val overflow = (cardCenterInViewport - (effectiveViewportWidth - edgeZonePx)).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
-                val scrollSpeedPx = 6f + 12f * ratio
+                val scrollSpeedPx = 4f + 6f * ratio
                 val scrolled = listState.scrollBy(scrollSpeedPx)
                 if (scrolled != 0f) {
                     performSlotSwap(clipId)
@@ -6019,13 +6027,12 @@ fun ClipSortSheet(
             } else if (shouldScrollBackward) {
                 val overflow = (edgeZonePx - cardCenterInViewport).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
-                val scrollSpeedPx = 6f + 12f * ratio
+                val scrollSpeedPx = 4f + 6f * ratio
                 val scrolled = listState.scrollBy(-scrollSpeedPx)
                 if (scrolled != 0f) {
                     performSlotSwap(clipId)
                 }
             }
-            delay(16L)
         }
     }
 
@@ -6091,160 +6098,257 @@ fun ClipSortSheet(
                 .padding(top = 18.dp, bottom = 12.dp)
         ) {
             // Horizontal Thumbnail Cards
-            LazyRow(
-                state = listState,
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { coords ->
                         viewportWidthPx = coords.size.width.toFloat()
                         lazyRowBoundsInRoot = coords.boundsInRoot()
                         lazyRowLeftInRootPx = coords.boundsInRoot().left
-                    },
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(spacingDp),
-                userScrollEnabled = draggingClipId == null
+                    }
             ) {
-                itemsIndexed(workingClips, key = { _, clip -> clip.id }) { _, clip ->
-                    val isSelected = clip.id == activeClipId
-                    val isDraggingThis = clip.id == draggingClipId
-                    val timeMap = clipTimeMaps[clip.id]
-                    val speed = if (timeMap != null && timeMap.speedDen != 0) {
-                        timeMap.speedNum.toFloat() / timeMap.speedDen.toFloat()
-                    } else 1.0f
-                    val speedText = "${(speed * 100).roundToInt()}%"
+                LazyRow(
+                    state = listState,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(spacingDp),
+                    userScrollEnabled = draggingClipId == null
+                ) {
+                    itemsIndexed(workingClips, key = { _, clip -> clip.id }) { _, clip ->
+                        val isSelected = clip.id == activeClipId
+                        val isDraggingThis = clip.id == draggingClipId
+                        val timeMap = clipTimeMaps[clip.id]
+                        val speed = if (timeMap != null && timeMap.speedDen != 0) {
+                            timeMap.speedNum.toFloat() / timeMap.speedDen.toFloat()
+                        } else 1.0f
+                        val speedText = "${(speed * 100).roundToInt()}%"
 
-                    val durationMs = if (timeMap != null && timeMap.outUs > timeMap.inUs) {
-                        timeMap.timelineDurationUs() / 1000L
-                    } else clip.durationMs
-                    val durationText = formatSortDuration(durationMs)
-                    val inUs = timeMap?.inUs ?: 0L
-                    val thumbnail = thumbnailCache["${clip.path}_$inUs"]
+                        val durationMs = if (timeMap != null && timeMap.outUs > timeMap.inUs) {
+                            timeMap.timelineDurationUs() / 1000L
+                        } else clip.durationMs
+                        val durationText = formatSortDuration(durationMs)
+                        val inUs = timeMap?.inUs ?: 0L
+                        val thumbnail = thumbnailCache["${clip.path}_$inUs"]
 
-                    var cardBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+                        var cardBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
 
-                    Box(
-                        modifier = Modifier
-                            .size(cardSizeDp)
-                            .zIndex(if (isDraggingThis) 10f else 1f)
-                            .onGloballyPositioned { coords ->
-                                cardBoundsInRoot = coords.boundsInRoot()
-                            }
-                            .pointerInput(clip.id) {
-                                detectDragGesturesAfterLongPress(
-                                    onDragStart = { offset ->
-                                        val startItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
-                                        val itemLeftInRoot = if (startItem != null) {
-                                            lazyRowLeftInRootPx + startItem.offset
-                                        } else {
-                                            cardBoundsInRoot.left
+                        Box(
+                            modifier = Modifier
+                                .size(cardSizeDp)
+                                .graphicsLayer {
+                                    if (isDraggingThis) {
+                                        alpha = 0.25f
+                                    }
+                                }
+                                .onGloballyPositioned { coords ->
+                                    cardBoundsInRoot = coords.boundsInRoot()
+                                }
+                                .pointerInput(clip.id) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { offset ->
+                                            val startItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
+                                            val itemLeftInRoot = if (startItem != null) {
+                                                lazyRowLeftInRootPx + startItem.offset
+                                            } else {
+                                                cardBoundsInRoot.left
+                                            }
+                                            draggingClipId = clip.id
+                                            grabOffsetInsideCardPx = offset.x
+                                            dragPointerRootX = itemLeftInRoot + offset.x
+                                            dragCardCenterScreenX = itemLeftInRoot + (cardSizePx / 2f)
+                                            activeClipId = clip.id
+                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        },
+                                        onDragEnd = {
+                                            draggingClipId = null
+                                            dragPointerRootX = 0f
+                                            grabOffsetInsideCardPx = 0f
+                                            dragCardCenterScreenX = 0f
+                                        },
+                                        onDragCancel = {
+                                            draggingClipId = null
+                                            dragPointerRootX = 0f
+                                            grabOffsetInsideCardPx = 0f
+                                            dragCardCenterScreenX = 0f
+                                        },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            val currentItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
+                                            val itemLeftInRoot = if (currentItem != null) {
+                                                lazyRowLeftInRootPx + currentItem.offset
+                                            } else {
+                                                dragPointerRootX - grabOffsetInsideCardPx
+                                            }
+                                            dragPointerRootX = itemLeftInRoot + change.position.x
+                                            dragCardCenterScreenX = dragPointerRootX - grabOffsetInsideCardPx + (cardSizePx / 2f)
+                                            performSlotSwap(clip.id)
                                         }
-                                        draggingClipId = clip.id
-                                        grabOffsetInsideCardPx = offset.x
-                                        dragPointerRootX = itemLeftInRoot + offset.x
-                                        dragCardCenterScreenX = itemLeftInRoot + (cardSizePx / 2f)
-                                        activeClipId = clip.id
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
-                                    onDragEnd = {
-                                        draggingClipId = null
-                                        dragPointerRootX = 0f
-                                        grabOffsetInsideCardPx = 0f
-                                        dragCardCenterScreenX = 0f
-                                    },
-                                    onDragCancel = {
-                                        draggingClipId = null
-                                        dragPointerRootX = 0f
-                                        grabOffsetInsideCardPx = 0f
-                                        dragCardCenterScreenX = 0f
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        dragPointerRootX += dragAmount.x
-                                        dragCardCenterScreenX += dragAmount.x
-                                        performSlotSwap(clip.id)
-                                    }
+                                    )
+                                }
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(DARK_CARD_BG)
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                    shape = RoundedCornerShape(8.dp)
                                 )
-                            }
-                            .graphicsLayer {
-                                if (isDraggingThis) {
-                                    val desiredLeftInRootPx = dragPointerRootX - grabOffsetInsideCardPx
-                                    val currentSlotItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
-                                    val currentSlotLeftInRootPx = if (currentSlotItem != null) {
-                                        lazyRowLeftInRootPx + currentSlotItem.offset
-                                    } else {
-                                        desiredLeftInRootPx
+                                .clickable {
+                                    if (draggingClipId == null) {
+                                        activeClipId = clip.id
                                     }
-                                    translationX = desiredLeftInRootPx - currentSlotLeftInRootPx
-                                    scaleX = 1.06f
-                                    scaleY = 1.06f
+                                }
+                        ) {
+                            if (thumbnail != null) {
+                                Image(
+                                    bitmap = thumbnail,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(DARK_CARD_BG),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CropSquare,
+                                        contentDescription = null,
+                                        tint = Color.White.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(24.dp)
+                                    )
                                 }
                             }
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(DARK_CARD_BG)
-                            .border(
-                                width = if (isSelected) 2.dp else 1.dp,
-                                color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
-                                shape = RoundedCornerShape(8.dp)
-                            )
-                            .clickable {
-                                if (draggingClipId == null) {
-                                    activeClipId = clip.id
-                                }
-                            }
-                    ) {
-                        if (thumbnail != null) {
-                            Image(
-                                bitmap = thumbnail,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
+
+                            // Speed % overlay (Top-Left badge)
                             Box(
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(DARK_CARD_BG),
-                                contentAlignment = Alignment.Center
+                                    .align(Alignment.TopStart)
+                                    .padding(4.dp)
+                                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.CropSquare,
-                                    contentDescription = null,
-                                    tint = Color.White.copy(alpha = 0.2f),
-                                    modifier = Modifier.size(24.dp)
+                                Text(
+                                    text = speedText,
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            // Duration overlay (Bottom-Right badge)
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(4.dp)
+                                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = durationText,
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
+                    }
+                }
 
-                        // Speed % overlay (Top-Left badge)
+                // Floating Overlay Drag Card outside LazyRow
+                if (draggingClipId != null) {
+                    val activeClip = workingClips.firstOrNull { it.id == draggingClipId }
+                    if (activeClip != null) {
+                        val activeTimeMap = clipTimeMaps[activeClip.id]
+                        val activeSpeed = if (activeTimeMap != null && activeTimeMap.speedDen != 0) {
+                            activeTimeMap.speedNum.toFloat() / activeTimeMap.speedDen.toFloat()
+                        } else 1.0f
+                        val activeSpeedText = "${(activeSpeed * 100).roundToInt()}%"
+                        val activeDurationMs = if (activeTimeMap != null && activeTimeMap.outUs > activeTimeMap.inUs) {
+                            activeTimeMap.timelineDurationUs() / 1000L
+                        } else activeClip.durationMs
+                        val activeDurationText = formatSortDuration(activeDurationMs)
+                        val inUs = activeTimeMap?.inUs ?: 0L
+                        val activeThumbnail = thumbnailCache["${activeClip.path}_$inUs"]
+
+                        val maxOverlayX = (viewportWidthPx - cardSizePx).coerceAtLeast(0f)
+                        val overlayTranslationX = (dragPointerRootX - grabOffsetInsideCardPx - lazyRowLeftInRootPx).coerceIn(0f, maxOverlayX)
+
                         Box(
                             modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(4.dp)
-                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .size(cardSizeDp)
+                                .graphicsLayer {
+                                    translationX = overlayTranslationX
+                                    scaleX = 1.06f
+                                    scaleY = 1.06f
+                                    shadowElevation = with(density) { 8.dp.toPx() }
+                                    clip = true
+                                    shape = RoundedCornerShape(8.dp)
+                                }
+                                .zIndex(100f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(DARK_CARD_BG)
+                                .border(
+                                    width = 2.dp,
+                                    color = PINK_RED_ACCENT,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
                         ) {
-                            Text(
-                                text = speedText,
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                            if (activeThumbnail != null) {
+                                Image(
+                                    bitmap = activeThumbnail,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(DARK_CARD_BG),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CropSquare,
+                                        contentDescription = null,
+                                        tint = Color.White.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
 
-                        // Duration overlay (Bottom-Right badge)
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(4.dp)
-                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = durationText,
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            // Speed % overlay (Top-Left badge)
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(4.dp)
+                                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = activeSpeedText,
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            // Duration overlay (Bottom-Right badge)
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(4.dp)
+                                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = activeDurationText,
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
