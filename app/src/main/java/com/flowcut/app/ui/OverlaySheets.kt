@@ -37,8 +37,10 @@ import android.os.SystemClock
 import android.media.MediaMetadataRetriever
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.offset
@@ -5972,7 +5974,7 @@ fun ClipSortSheet(
         val visibleItems = listState.layoutInfo.visibleItemsInfo
         if (visibleItems.isEmpty()) return
 
-        val deadzonePx = slotWidthPx * 0.2f
+        val deadzonePx = slotWidthPx * 0.25f
 
         // Compute which slot center inside visibleItemsInfo is closest to fingerXInStrip
         val closestItem = visibleItems.minByOrNull { item ->
@@ -6101,6 +6103,63 @@ fun ClipSortSheet(
                     .onGloballyPositioned { coords ->
                         stripWidthPx = coords.size.width.toFloat()
                     }
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val downX = down.position.x
+                            val pointerId = down.id
+
+                            val timeoutResult = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Main)
+                                    val change = event.changes.firstOrNull { it.id == pointerId }
+                                    if (change == null || !change.pressed) {
+                                        return@withTimeoutOrNull false
+                                    }
+                                    val dx = kotlin.math.abs(change.position.x - downX)
+                                    if (dx > viewConfiguration.touchSlop) {
+                                        return@withTimeoutOrNull false
+                                    }
+                                }
+                            }
+
+                            if (timeoutResult == null) {
+                                // Long-press timeout elapsed while within touchSlop: ACTIVATE DRAG LOCK!
+                                val visibleItems = listState.layoutInfo.visibleItemsInfo
+                                val hitItem = visibleItems.minByOrNull { item ->
+                                    val center = item.offset + item.size / 2f
+                                    kotlin.math.abs(downX - center)
+                                }
+                                val maxDist = (cardSizePx / 2f) + with(density) { spacingDp.toPx() }
+                                val hitClip = if (hitItem != null && kotlin.math.abs(downX - (hitItem.offset + hitItem.size / 2f)) <= maxDist) {
+                                    workingClips.firstOrNull { it.id == hitItem.key } ?: workingClips.getOrNull(hitItem.index)
+                                } else null
+
+                                if (hitClip != null) {
+                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    activeClipId = hitClip.id
+                                    draggingClipId = hitClip.id
+                                    val maxBound = (stripWidthPx - cardHalfWidthPx).coerceAtLeast(cardHalfWidthPx)
+                                    fingerXInStrip = downX.coerceIn(cardHalfWidthPx, maxBound)
+
+                                    try {
+                                        while (draggingClipId != null) {
+                                            val event = awaitPointerEvent(PointerEventPass.Main)
+                                            val change = event.changes.firstOrNull { it.id == pointerId }
+                                            if (change == null || !change.pressed) {
+                                                break
+                                            }
+                                            change.consume()
+                                            fingerXInStrip = change.position.x.coerceIn(cardHalfWidthPx, maxBound)
+                                            performSlotSwap(hitClip.id)
+                                        }
+                                    } finally {
+                                        draggingClipId = null
+                                    }
+                                }
+                            }
+                        }
+                    }
             ) {
                 LazyRow(
                     state = listState,
@@ -6132,33 +6191,6 @@ fun ClipSortSheet(
                                     if (isDraggingThis) {
                                         alpha = 0.25f
                                     }
-                                }
-                                .pointerInput(clip.id) {
-                                    detectDragGesturesAfterLongPress(
-                                        onDragStart = { offset ->
-                                            val startItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
-                                            fingerXInStrip = if (startItem != null) {
-                                                startItem.offset + startItem.size / 2f
-                                            } else {
-                                                cardHalfWidthPx
-                                            }.coerceIn(cardHalfWidthPx, (stripWidthPx - cardHalfWidthPx).coerceAtLeast(cardHalfWidthPx))
-                                            draggingClipId = clip.id
-                                            activeClipId = clip.id
-                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        },
-                                        onDragEnd = {
-                                            draggingClipId = null
-                                        },
-                                        onDragCancel = {
-                                            draggingClipId = null
-                                        },
-                                        onDrag = { change, dragAmount ->
-                                            change.consume()
-                                            val maxBound = (stripWidthPx - cardHalfWidthPx).coerceAtLeast(cardHalfWidthPx)
-                                            fingerXInStrip = (fingerXInStrip + dragAmount.x).coerceIn(cardHalfWidthPx, maxBound)
-                                            performSlotSwap(clip.id)
-                                        }
-                                    )
                                 }
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(DARK_CARD_BG)
