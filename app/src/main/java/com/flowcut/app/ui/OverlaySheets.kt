@@ -33,9 +33,22 @@ import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import android.os.Build
+import android.media.MediaMetadataRetriever
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.IntOffset
+import com.flowcut.app.model.Clip
+import com.flowcut.app.core.time.TimeMap
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
@@ -5895,6 +5908,301 @@ fun ExportScreen(
                 }
             )
         }
+    }
+}
+
+/**
+ * Phase 11: ClipSortSheet ("Drag to swap" / "Sort" Bottom Sheet)
+ * Matches image_419f5e.jpg:
+ * - Dark bottom sheet container with horizontal row of square rounded clip thumbnail cards
+ * - Loaded via cached MediaMetadataRetriever thumbnails on Dispatchers.IO
+ * - Active/selected clip card highlighted with a 2.dp pink/red border (Color(0xFFFF2D55))
+ * - Speed % overlay ("${(speed * 100).roundToInt()}%", e.g. 100%) and formatted duration (mm:ss if >= 1 min or :ss if < 1 min, e.g. 14:59, 1:05, :21)
+ * - Smooth horizontal Drag & Drop ("Drag to swap") gesture with haptic feedback
+ * - Centered "Drag to swap" subtitle label, "Sort" title, and crisp white checkmark (✓) confirm button on bottom-right
+ */
+@Composable
+fun ClipSortSheet(
+    clips: List<Clip>,
+    selectedClipIndex: Int?,
+    clipTimeMaps: Map<String, TimeMap>,
+    onConfirm: (List<Clip>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    BackHandler { onDismiss() }
+
+    val workingClips = remember(clips) {
+        androidx.compose.runtime.mutableStateListOf<Clip>().apply { addAll(clips) }
+    }
+    var activeClipId by remember {
+        mutableStateOf(selectedClipIndex?.let { clips.getOrNull(it)?.id } ?: clips.firstOrNull()?.id)
+    }
+
+    val hapticFeedback = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val cardSizeDp = 88.dp
+    val spacingDp = 8.dp
+    val slotWidthPx = with(density) { (cardSizeDp + spacingDp).toPx() }
+
+    var draggingIndex by remember { mutableIntStateOf(-1) }
+    var dragAccumulatedPx by remember { mutableFloatStateOf(0f) }
+
+    val thumbnailCache = remember { androidx.compose.runtime.mutableStateMapOf<String, ImageBitmap>() }
+
+    LaunchedEffect(workingClips.toList()) {
+        withContext(Dispatchers.IO) {
+            for (clip in workingClips) {
+                if (thumbnailCache.containsKey(clip.id) || clip.path.isEmpty()) continue
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(clip.path)
+                    val map = clipTimeMaps[clip.id]
+                    val inUs = map?.inUs ?: 0L
+                    val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        retriever.getScaledFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 180, 180)
+                            ?: retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    } else {
+                        retriever.getFrameAtTime(inUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    }
+                    if (bmp != null) {
+                        thumbnailCache[clip.id] = bmp.asImageBitmap()
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    try { retriever.release() } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onDismiss()
+            }
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    color = DARK_SHEET_BG,
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                )
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { /* Consume clicks inside sheet */ }
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(top = 18.dp, bottom = 12.dp)
+        ) {
+            // Horizontal Thumbnail Cards
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(spacingDp)
+            ) {
+                itemsIndexed(workingClips, key = { _, clip -> clip.id }) { index, clip ->
+                    val isSelected = clip.id == activeClipId
+                    val isDraggingThis = index == draggingIndex
+                    val timeMap = clipTimeMaps[clip.id]
+                    val speed = if (timeMap != null && timeMap.speedDen != 0) {
+                        timeMap.speedNum.toFloat() / timeMap.speedDen.toFloat()
+                    } else 1.0f
+                    val speedText = "${(speed * 100).roundToInt()}%"
+
+                    val durationMs = if (timeMap != null && timeMap.outUs > timeMap.inUs) {
+                        timeMap.timelineDurationUs() / 1000L
+                    } else clip.durationMs
+                    val durationText = formatSortDuration(durationMs)
+                    val thumbnail = thumbnailCache[clip.id]
+
+                    Box(
+                        modifier = Modifier
+                            .size(cardSizeDp)
+                            .offset {
+                                if (isDraggingThis) {
+                                    IntOffset(dragAccumulatedPx.roundToInt(), 0)
+                                } else {
+                                    IntOffset.Zero
+                                }
+                            }
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DARK_CARD_BG)
+                            .border(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) PINK_RED_ACCENT else DARK_SURFACE_BORDER,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable {
+                                activeClipId = clip.id
+                            }
+                            .pointerInput(clip.id, workingClips.size) {
+                                detectHorizontalDragGestures(
+                                    onDragStart = {
+                                        draggingIndex = index
+                                        dragAccumulatedPx = 0f
+                                        activeClipId = clip.id
+                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                    onDragEnd = {
+                                        draggingIndex = -1
+                                        dragAccumulatedPx = 0f
+                                    },
+                                    onDragCancel = {
+                                        draggingIndex = -1
+                                        dragAccumulatedPx = 0f
+                                    },
+                                    onHorizontalDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragAccumulatedPx += dragAmount
+                                        val shiftSlots = (dragAccumulatedPx / slotWidthPx).roundToInt()
+                                        if (shiftSlots != 0) {
+                                            val currentPos = draggingIndex
+                                            val targetPos = (currentPos + shiftSlots).coerceIn(0, workingClips.size - 1)
+                                            if (targetPos != currentPos) {
+                                                val moved = workingClips.removeAt(currentPos)
+                                                workingClips.add(targetPos, moved)
+                                                dragAccumulatedPx -= (targetPos - currentPos) * slotWidthPx
+                                                draggingIndex = targetPos
+                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                    ) {
+                        if (thumbnail != null) {
+                            Image(
+                                bitmap = thumbnail,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(DARK_CARD_BG),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CropSquare,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.2f),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+
+                        // Speed % overlay (Top-Left badge)
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(4.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = speedText,
+                                color = Color.White,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Duration overlay (Bottom-Right badge)
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(4.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(3.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = durationText,
+                                color = Color.White,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Subtitle: "Drag to swap"
+            Text(
+                text = "Drag to swap",
+                color = Color.White.copy(alpha = 0.5f),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Bottom Navigation Row: Close (Left), "Sort" (Center), Checkmark (Right)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cancel",
+                        tint = Color.White
+                    )
+                }
+
+                Text(
+                    text = "Sort",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                IconButton(
+                    onClick = {
+                        onConfirm(workingClips.toList())
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Confirm",
+                        tint = Color.White
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatSortDuration(durationMs: Long): String {
+    val totalSec = (durationMs / 1000).coerceAtLeast(0)
+    val mins = totalSec / 60
+    val secs = totalSec % 60
+    return if (mins > 0) {
+        String.format(Locale.US, "%d:%02d", mins, secs)
+    } else {
+        String.format(Locale.US, ":%02d", secs)
     }
 }
 

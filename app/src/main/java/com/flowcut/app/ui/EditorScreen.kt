@@ -644,6 +644,7 @@ fun EditorScreen(
     var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var isBackgroundSheetVisible by remember { mutableStateOf(false) }
     var isOpacitySheetVisible by remember { mutableStateOf(false) }
+    var showClipSortSheet by remember { mutableStateOf(false) }
     var isTextSheetVisible by remember { mutableStateOf(false) }
     var isTextToolbarActive by remember { mutableStateOf(false) }
     var trimTargetClipIndex by remember { mutableIntStateOf(-1) }
@@ -2245,7 +2246,13 @@ fun EditorScreen(
                             customCoverBitmap = customCoverBitmap,
                             onSelect = { sel ->
                                 when (sel) {
-                                    is TimelineSelection.ClipSelected -> onSelectClip(sel.index)
+                                    is TimelineSelection.ClipSelected -> {
+                                        if (selectedClipIndex == sel.index) {
+                                            showClipSortSheet = true
+                                        } else {
+                                            onSelectClip(sel.index)
+                                        }
+                                    }
                                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
                                     is TimelineSelection.TransitionClicked -> onSelectJunction(sel.junctionIndex)
                                     is TimelineSelection.OverlaySelected -> {
@@ -2289,7 +2296,8 @@ fun EditorScreen(
                                         }
                                     }
                                     is TimelineSelection.ClipSelected -> {
-                                        onDeleteClip(sel.index)
+                                        onSelectClip(sel.index)
+                                        showClipSortSheet = true
                                     }
                                     else -> {}
                                 }
@@ -3413,41 +3421,18 @@ fun EditorScreen(
             )
         }
 
-        if (isAudioFadeSheetVisible && currentAudioItem != null) {
-            AudioFadeSheet(
-                item = currentAudioItem,
-                onUpdateFade = { inUs, outUs ->
-                    resolvedViewModel?.updateAudioFade(currentAudioItem.id, inUs, outUs)
-                    previewRenderer.requestRender()
-                    frameDriver.wake()
-                },
-                onDismiss = { isAudioFadeSheetVisible = false }
-            )
-        }
-
-        if (isAudioVolumeSheetVisible && currentAudioItem != null) {
-            AudioVolumeSheet(
-                item = currentAudioItem,
-                onUpdateVolume = { vol ->
-                    resolvedViewModel?.updateAudioVolume(currentAudioItem.id, vol)
-                    previewRenderer.requestRender()
-                    frameDriver.wake()
-                },
-                onDismiss = { isAudioVolumeSheetVisible = false }
-            )
-        }
-
-        if (isAudioSpeedSheetVisible && currentAudioItem != null) {
-            AudioSpeedSheet(
-                item = currentAudioItem,
-                onUpdateSpeed = { spd ->
-                    resolvedViewModel?.updateAudioSpeed(currentAudioItem.id, spd)
-                    previewRenderer.requestRender()
-                    frameDriver.wake()
-                },
-                onDismiss = { isAudioSpeedSheetVisible = false }
-            )
-        }
+        AudioAdjustmentSheetsHost(
+            isFadeVisible = isAudioFadeSheetVisible,
+            isVolumeVisible = isAudioVolumeSheetVisible,
+            isSpeedVisible = isAudioSpeedSheetVisible,
+            currentAudioItem = currentAudioItem,
+            resolvedViewModel = resolvedViewModel,
+            previewRenderer = previewRenderer,
+            frameDriver = frameDriver,
+            onDismissFade = { isAudioFadeSheetVisible = false },
+            onDismissVolume = { isAudioVolumeSheetVisible = false },
+            onDismissSpeed = { isAudioSpeedSheetVisible = false }
+        )
 
         if (showCoverDialog) {
             CoverSelectionDialogHost(
@@ -3458,7 +3443,97 @@ fun EditorScreen(
                 onDismiss = { showCoverDialog = false }
             )
         }
+
+        ClipSortSheetHost(
+            isVisible = showClipSortSheet,
+            clips = timeline.project.clips,
+            selectedClipIndex = selectedClipIndex,
+            resolvedViewModel = resolvedViewModel,
+            snapshotHolder = snapshotHolder,
+            frameDriver = frameDriver,
+            previewRenderer = previewRenderer,
+            onDismiss = { showClipSortSheet = false }
+        )
     }
+}
+
+@Composable
+private fun AudioAdjustmentSheetsHost(
+    isFadeVisible: Boolean,
+    isVolumeVisible: Boolean,
+    isSpeedVisible: Boolean,
+    currentAudioItem: com.flowcut.app.engine.OverlayItem?,
+    resolvedViewModel: EditorViewModel?,
+    previewRenderer: PreviewRenderer,
+    frameDriver: com.flowcut.app.engine.FrameDriver,
+    onDismissFade: () -> Unit,
+    onDismissVolume: () -> Unit,
+    onDismissSpeed: () -> Unit
+) {
+    if (currentAudioItem == null) return
+    if (isFadeVisible) {
+        AudioFadeSheet(
+            item = currentAudioItem,
+            onUpdateFade = { inUs, outUs ->
+                resolvedViewModel?.updateAudioFade(currentAudioItem.id, inUs, outUs)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onDismiss = onDismissFade
+        )
+    }
+    if (isVolumeVisible) {
+        AudioVolumeSheet(
+            item = currentAudioItem,
+            onUpdateVolume = { vol ->
+                resolvedViewModel?.updateAudioVolume(currentAudioItem.id, vol)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onDismiss = onDismissVolume
+        )
+    }
+    if (isSpeedVisible) {
+        AudioSpeedSheet(
+            item = currentAudioItem,
+            onUpdateSpeed = { spd ->
+                resolvedViewModel?.updateAudioSpeed(currentAudioItem.id, spd)
+                previewRenderer.requestRender()
+                frameDriver.wake()
+            },
+            onDismiss = onDismissSpeed
+        )
+    }
+}
+
+@Composable
+private fun ClipSortSheetHost(
+    isVisible: Boolean,
+    clips: List<com.flowcut.app.model.Clip>,
+    selectedClipIndex: Int?,
+    resolvedViewModel: EditorViewModel?,
+    snapshotHolder: com.flowcut.app.core.timeline.SnapshotHolder,
+    frameDriver: com.flowcut.app.engine.FrameDriver,
+    previewRenderer: PreviewRenderer,
+    onDismiss: () -> Unit
+) {
+    if (!isVisible || clips.isEmpty()) return
+    ClipSortSheet(
+        clips = clips,
+        selectedClipIndex = selectedClipIndex,
+        clipTimeMaps = resolvedViewModel?.clipTimeMaps ?: emptyMap(),
+        onConfirm = { reorderedClips ->
+            resolvedViewModel?.reorderClips(reorderedClips)
+            if (USE_NEW_CORE) {
+                resolvedViewModel?.let { vm ->
+                    snapshotHolder.current = vm.getSnapshot()
+                }
+            }
+            frameDriver.wake()
+            previewRenderer.requestRender()
+        },
+        onDismiss = onDismiss
+    )
 }
 
 @Composable
