@@ -5952,35 +5952,44 @@ fun ClipSortSheet(
     val cardSizeDp = 88.dp
     val spacingDp = 8.dp
     val slotWidthPx = with(density) { (cardSizeDp + spacingDp).toPx() }
+    val cardSizePx = with(density) { cardSizeDp.toPx() }
 
     var draggingClipId by remember { mutableStateOf<String?>(null) }
-    var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    var dragPointerRootX by remember { mutableFloatStateOf(0f) }
+    var grabOffsetInsideCardPx by remember { mutableFloatStateOf(0f) }
     val listState = rememberLazyListState()
     var viewportWidthPx by remember { mutableFloatStateOf(0f) }
     var lazyRowBoundsInRoot by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    var lazyRowLeftInRootPx by remember { mutableFloatStateOf(0f) }
     var dragCardCenterScreenX by remember { mutableFloatStateOf(0f) }
 
     fun performSlotSwap(targetId: String) {
-        var currentIdx = workingClips.indexOfFirst { it.id == targetId }
-        while (currentIdx != -1 && dragOffsetX > slotWidthPx * 0.5f && currentIdx < workingClips.size - 1) {
+        val currentIdx = workingClips.indexOfFirst { it.id == targetId }
+        if (currentIdx == -1) return
+        val currentSlotItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetId }
+        val desiredLeftInRootPx = dragPointerRootX - grabOffsetInsideCardPx
+        val currentSlotLeftInRootPx = if (currentSlotItem != null) {
+            lazyRowLeftInRootPx + currentSlotItem.offset
+        } else {
+            desiredLeftInRootPx
+        }
+        val displacement = desiredLeftInRootPx - currentSlotLeftInRootPx
+        val swapThresholdPx = slotWidthPx * 0.55f
+
+        if (displacement > swapThresholdPx && currentIdx < workingClips.size - 1) {
             val toIdx = currentIdx + 1
             val updated = workingClips.toMutableList().apply {
                 add(toIdx, removeAt(currentIdx))
             }
             workingClips = updated
-            dragOffsetX -= slotWidthPx
             hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            currentIdx = toIdx
-        }
-        while (currentIdx != -1 && dragOffsetX < -slotWidthPx * 0.5f && currentIdx > 0) {
+        } else if (displacement < -swapThresholdPx && currentIdx > 0) {
             val toIdx = currentIdx - 1
             val updated = workingClips.toMutableList().apply {
                 add(toIdx, removeAt(currentIdx))
             }
             workingClips = updated
-            dragOffsetX += slotWidthPx
             hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            currentIdx = toIdx
         }
     }
 
@@ -5989,8 +5998,9 @@ fun ClipSortSheet(
         val edgeZonePx = with(density) { 56.dp.toPx() }
         while (isActive && draggingClipId != null) {
             val effectiveViewportWidth = if (viewportWidthPx > 0f) viewportWidthPx else lazyRowBoundsInRoot.width
-            val cardCenterInViewport = if (lazyRowBoundsInRoot.left > 0f) {
-                dragCardCenterScreenX - lazyRowBoundsInRoot.left
+            val effectiveLeft = if (lazyRowLeftInRootPx > 0f) lazyRowLeftInRootPx else lazyRowBoundsInRoot.left
+            val cardCenterInViewport = if (effectiveLeft > 0f) {
+                dragCardCenterScreenX - effectiveLeft
             } else {
                 dragCardCenterScreenX
             }
@@ -6004,7 +6014,6 @@ fun ClipSortSheet(
                 val scrollSpeedPx = 6f + 12f * ratio
                 val scrolled = listState.scrollBy(scrollSpeedPx)
                 if (scrolled != 0f) {
-                    dragOffsetX += scrolled
                     performSlotSwap(clipId)
                 }
             } else if (shouldScrollBackward) {
@@ -6013,7 +6022,6 @@ fun ClipSortSheet(
                 val scrollSpeedPx = 6f + 12f * ratio
                 val scrolled = listState.scrollBy(-scrollSpeedPx)
                 if (scrolled != 0f) {
-                    dragOffsetX += scrolled
                     performSlotSwap(clipId)
                 }
             }
@@ -6090,6 +6098,7 @@ fun ClipSortSheet(
                     .onGloballyPositioned { coords ->
                         viewportWidthPx = coords.size.width.toFloat()
                         lazyRowBoundsInRoot = coords.boundsInRoot()
+                        lazyRowLeftInRootPx = coords.boundsInRoot().left
                     },
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(spacingDp),
@@ -6117,15 +6126,58 @@ fun ClipSortSheet(
                         modifier = Modifier
                             .size(cardSizeDp)
                             .zIndex(if (isDraggingThis) 10f else 1f)
-                            .graphicsLayer {
-                                if (isDraggingThis) {
-                                    translationX = dragOffsetX
-                                    scaleX = 1.08f
-                                    scaleY = 1.08f
-                                }
-                            }
                             .onGloballyPositioned { coords ->
                                 cardBoundsInRoot = coords.boundsInRoot()
+                            }
+                            .pointerInput(clip.id) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = { offset ->
+                                        val startItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
+                                        val itemLeftInRoot = if (startItem != null) {
+                                            lazyRowLeftInRootPx + startItem.offset
+                                        } else {
+                                            cardBoundsInRoot.left
+                                        }
+                                        draggingClipId = clip.id
+                                        grabOffsetInsideCardPx = offset.x
+                                        dragPointerRootX = itemLeftInRoot + offset.x
+                                        dragCardCenterScreenX = itemLeftInRoot + (cardSizePx / 2f)
+                                        activeClipId = clip.id
+                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                    onDragEnd = {
+                                        draggingClipId = null
+                                        dragPointerRootX = 0f
+                                        grabOffsetInsideCardPx = 0f
+                                        dragCardCenterScreenX = 0f
+                                    },
+                                    onDragCancel = {
+                                        draggingClipId = null
+                                        dragPointerRootX = 0f
+                                        grabOffsetInsideCardPx = 0f
+                                        dragCardCenterScreenX = 0f
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragPointerRootX += dragAmount.x
+                                        dragCardCenterScreenX += dragAmount.x
+                                        performSlotSwap(clip.id)
+                                    }
+                                )
+                            }
+                            .graphicsLayer {
+                                if (isDraggingThis) {
+                                    val desiredLeftInRootPx = dragPointerRootX - grabOffsetInsideCardPx
+                                    val currentSlotItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
+                                    val currentSlotLeftInRootPx = if (currentSlotItem != null) {
+                                        lazyRowLeftInRootPx + currentSlotItem.offset
+                                    } else {
+                                        desiredLeftInRootPx
+                                    }
+                                    translationX = desiredLeftInRootPx - currentSlotLeftInRootPx
+                                    scaleX = 1.06f
+                                    scaleY = 1.06f
+                                }
                             }
                             .clip(RoundedCornerShape(8.dp))
                             .background(DARK_CARD_BG)
@@ -6138,33 +6190,6 @@ fun ClipSortSheet(
                                 if (draggingClipId == null) {
                                     activeClipId = clip.id
                                 }
-                            }
-                            .pointerInput(clip.id) {
-                                detectDragGesturesAfterLongPress(
-                                    onDragStart = { offset ->
-                                        draggingClipId = clip.id
-                                        dragOffsetX = 0f
-                                        dragCardCenterScreenX = cardBoundsInRoot.center.x
-                                        activeClipId = clip.id
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
-                                    onDragEnd = {
-                                        draggingClipId = null
-                                        dragOffsetX = 0f
-                                        dragCardCenterScreenX = 0f
-                                    },
-                                    onDragCancel = {
-                                        draggingClipId = null
-                                        dragOffsetX = 0f
-                                        dragCardCenterScreenX = 0f
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        dragOffsetX += dragAmount.x
-                                        dragCardCenterScreenX += dragAmount.x
-                                        performSlotSwap(clip.id)
-                                    }
-                                )
                             }
                     ) {
                         if (thumbnail != null) {
