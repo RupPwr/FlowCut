@@ -236,7 +236,8 @@ class AudioEngine(
                 false
             }
 
-            if (hasTs && audioTimestamp.framePosition > 0L) {
+            // Fix 2A: Require audioTimestamp.nanoTime >= startWallNanos to filter stale pre-pause/seek timestamps
+            if (hasTs && audioTimestamp.framePosition > 0L && audioTimestamp.nanoTime >= startWallNanos) {
                 if (sessionBaseFramePos < 0L) {
                     sessionBaseFramePos = audioTimestamp.framePosition
                 }
@@ -246,7 +247,9 @@ class AudioEngine(
                     val elapsedNanosSinceTs = (frameTimeNanos - audioTimestamp.nanoTime)
                         .coerceIn(-50_000_000L, 50_000_000L)
                     val currentHardwareFrames = playedFrames + (elapsedNanosSinceTs * SAMPLE_RATE / NANOS_PER_SECOND)
-                    val hardwareTimeUs = startMediaUs + (currentHardwareFrames * US_PER_SECOND / SAMPLE_RATE)
+                    val rawHardwareTimeUs = startMediaUs + (currentHardwareFrames * US_PER_SECOND / SAMPLE_RATE)
+                    // Fix 2B: Clamp forward hardware clock jumps so the playback clock advances strictly at 1.0x real-time
+                    val hardwareTimeUs = minOf(rawHardwareTimeUs, vsyncExpectedTimeUs + 50_000L)
 
                     // Fix 2: If AudioTrack momentarily waits or underruns at a cut boundary,
                     // keep advancing smoothly at vsync rate rather than freezing the playhead!

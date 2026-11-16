@@ -1141,6 +1141,11 @@ class PreviewRenderer(
                     }
                     else -> {
                         try {
+                            val currentPts = fsA.lastDecodedPtsUs
+                            val targetPts = frame.clipASourceUs
+                            if (!isScrubbing && currentPts != -1L && (targetPts - currentPts > 150_000L || currentPts - targetPts > 100_000L)) {
+                                fsA.seekTo(targetPts, fastKeyframeOnly = false)
+                            }
                             fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
                         } catch (_: Exception) { false }
                     }
@@ -1391,6 +1396,11 @@ class PreviewRenderer(
                     }
                     else -> {
                         try {
+                            val currentPts = fsB.lastDecodedPtsUs
+                            val targetPts = frame.clipASourceUs
+                            if (!isScrubbing && currentPts != -1L && (targetPts - currentPts > 150_000L || currentPts - targetPts > 100_000L)) {
+                                fsB.seekTo(targetPts, fastKeyframeOnly = false)
+                            }
                             fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
                         } catch (_: Exception) { false }
                     }

@@ -603,11 +603,12 @@ class FrameSource(
             }
 
             val isInitial = currentPtsUs == -1L
-            // Backward jump > 100ms (avoids redundant seek/flush on monotonic forward playback across split boundaries)
-            val isBackwardJump = currentPtsUs != -1L && currentPtsUs > localUs + 100_000L
+            // Bidirectional jump check: avoid redundant seek/flush on continuous playback (0 <= localUs - currentPtsUs <= 150ms),
+            // but trigger accurate seek on backward jumps (>100ms) or forward discontinuities (>150ms).
+            val isJump = currentPtsUs != -1L && (currentPtsUs > localUs + 100_000L || localUs > currentPtsUs + 150_000L)
 
             // Decode whenever localUs >= currentPtsUs + 8_000L (8ms threshold instead of 25ms) so 30fps and 60fps clips never skip a frame during a fast transition
-            if (!isInitial && !isBackwardJump && currentPtsUs != -1L && localUs < currentPtsUs + 8_000L) {
+            if (!isInitial && !isJump && currentPtsUs != -1L && localUs < currentPtsUs + 8_000L) {
                 lastRenderedLocalUs = localUs
                 isAccuratePausedFrameLatched = true
                 return false
@@ -618,7 +619,7 @@ class FrameSource(
                 isCatchingUpFromSeek = false
             }
 
-            if (isInitial || isBackwardJump) {
+            if (isInitial || isJump) {
                 lastForwardKeyframeHopUs = -1L
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)
                 if (didRender) {
@@ -674,7 +675,7 @@ class FrameSource(
                 }
             }
 
-            // 2. Dequeue output buffers: always release with render = true so SurfaceTexture is never starved!
+            // 2. Dequeue output buffers with silent pre-roll: never render intermediate catch-up frames!
             val isFastForward = deltaUs >= 40_000L
             val maxDrains = if (isFastForward) 6 else 3
             var drainedCount = 0
@@ -695,15 +696,18 @@ class FrameSource(
                     outputEos = true
                 }
 
-                // SurfaceTexture latches the latest released buffer on updateTexImage()
-                dec.releaseOutputBuffer(outIndex, true)
-                currentPtsUs = pts
-                renderedAny = true
-                drainedCount++
-
                 val atClipEnd = outputEos ||
                     (clipDurationUs > 0L && pts >= clipDurationUs - 85_000L) ||
                     (clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L)
+
+                // Fix 1A: Never render intermediate catch-up frames (pts < localUs - 20_000L) onto SurfaceTexture!
+                val shouldRender = pts >= localUs - 20_000L || atClipEnd
+                dec.releaseOutputBuffer(outIndex, shouldRender)
+                currentPtsUs = pts
+                if (shouldRender) {
+                    renderedAny = true
+                }
+                drainedCount++
 
                 if (atClipEnd) {
                     isCatchingUpFromSeek = false
@@ -731,7 +735,10 @@ class FrameSource(
 
             if (renderedAny) {
                 lastRenderedLocalUs = localUs
-                isAccuratePausedFrameLatched = true
+                // Fix 1C: Only latch accurate paused frame when actually reached target window
+                if (currentPtsUs >= localUs - 25_000L || outputEos || (clipDurationUs > 0L && currentPtsUs >= clipDurationUs - 85_000L)) {
+                    isAccuratePausedFrameLatched = true
+                }
                 if (currentPtsUs >= lastSeekTargetUs - 50_000L || outputEos || (clipDurationUs > 0L && currentPtsUs >= clipDurationUs - 85_000L)) {
                     isCatchingUpFromSeek = false
                 }
