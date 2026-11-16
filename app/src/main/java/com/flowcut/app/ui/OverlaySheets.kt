@@ -5965,34 +5965,40 @@ fun ClipSortSheet(
     var lazyRowLeftInRootPx by remember { mutableFloatStateOf(0f) }
     var dragCardCenterScreenX by remember { mutableFloatStateOf(0f) }
     var lastSwapTimeMs by remember { mutableLongStateOf(0L) }
+    var lastKnownSlotLeftInRoot by remember { mutableFloatStateOf(0f) }
 
     fun performSlotSwap(targetId: String) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastSwapTimeMs < 140L) return
+        if (now - lastSwapTimeMs < 120L) return
         val currentIdx = workingClips.indexOfFirst { it.id == targetId }
         if (currentIdx == -1) return
-        val currentSlotItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetId }
-        val desiredLeftInRootPx = dragPointerRootX - grabOffsetInsideCardPx
-        val currentSlotLeftInRootPx = if (currentSlotItem != null) {
-            lazyRowLeftInRootPx + currentSlotItem.offset
-        } else {
-            desiredLeftInRootPx
-        }
-        val displacement = desiredLeftInRootPx - currentSlotLeftInRootPx
-        val swapThresholdPx = slotWidthPx * 0.52f
 
-        if (displacement > swapThresholdPx && currentIdx < workingClips.size - 1) {
-            val toIdx = currentIdx + 1
-            val updated = workingClips.toMutableList().apply {
-                add(toIdx, removeAt(currentIdx))
+        val floatingCardLeftInRoot = dragPointerRootX - grabOffsetInsideCardPx
+        val floatingCardCenterRootX = floatingCardLeftInRoot + (cardSizePx / 2f)
+        val deadzonePx = with(density) { 12.dp.toPx() }
+        val visibleItems = listState.layoutInfo.visibleItemsInfo
+        if (visibleItems.isEmpty()) return
+
+        val hoveredItem = visibleItems.firstOrNull { item ->
+            val itemLeft = lazyRowLeftInRootPx + item.offset
+            val itemRight = itemLeft + item.size
+            floatingCardCenterRootX >= (itemLeft + deadzonePx) && floatingCardCenterRootX <= (itemRight - deadzonePx)
+        }
+
+        val targetIndex = when {
+            hoveredItem != null -> hoveredItem.index
+            floatingCardCenterRootX > (lazyRowLeftInRootPx + visibleItems.last().offset + visibleItems.last().size - deadzonePx) && !listState.canScrollForward -> {
+                visibleItems.last().index
             }
-            workingClips = updated
-            lastSwapTimeMs = now
-            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-        } else if (displacement < -swapThresholdPx && currentIdx > 0) {
-            val toIdx = currentIdx - 1
+            floatingCardCenterRootX < (lazyRowLeftInRootPx + visibleItems.first().offset + deadzonePx) && !listState.canScrollBackward -> {
+                visibleItems.first().index
+            }
+            else -> null
+        }
+
+        if (targetIndex != null && targetIndex != currentIdx && targetIndex in workingClips.indices) {
             val updated = workingClips.toMutableList().apply {
-                add(toIdx, removeAt(currentIdx))
+                add(targetIndex, removeAt(currentIdx))
             }
             workingClips = updated
             lastSwapTimeMs = now
@@ -6016,7 +6022,7 @@ fun ClipSortSheet(
             val shouldScrollForward = cardCenterInViewport > (effectiveViewportWidth - edgeZonePx) && listState.canScrollForward
             val shouldScrollBackward = cardCenterInViewport < edgeZonePx && cardCenterInViewport > 0f && listState.canScrollBackward
 
-            if (shouldScrollForward) {
+            if (shouldScrollForward && listState.canScrollForward) {
                 val overflow = (cardCenterInViewport - (effectiveViewportWidth - edgeZonePx)).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
                 val scrollSpeedPx = 4f + 6f * ratio
@@ -6024,7 +6030,7 @@ fun ClipSortSheet(
                 if (scrolled != 0f) {
                     performSlotSwap(clipId)
                 }
-            } else if (shouldScrollBackward) {
+            } else if (shouldScrollBackward && listState.canScrollBackward) {
                 val overflow = (edgeZonePx - cardCenterInViewport).coerceAtLeast(0f)
                 val ratio = if (edgeZonePx > 0f) (overflow / edgeZonePx).coerceIn(0f, 1f) else 1f
                 val scrollSpeedPx = 4f + 6f * ratio
@@ -6032,6 +6038,8 @@ fun ClipSortSheet(
                 if (scrolled != 0f) {
                     performSlotSwap(clipId)
                 }
+            } else {
+                performSlotSwap(clipId)
             }
         }
     }
@@ -6152,6 +6160,7 @@ fun ClipSortSheet(
                                             } else {
                                                 cardBoundsInRoot.left
                                             }
+                                            lastKnownSlotLeftInRoot = itemLeftInRoot
                                             draggingClipId = clip.id
                                             grabOffsetInsideCardPx = offset.x
                                             dragPointerRootX = itemLeftInRoot + offset.x
@@ -6164,20 +6173,24 @@ fun ClipSortSheet(
                                             dragPointerRootX = 0f
                                             grabOffsetInsideCardPx = 0f
                                             dragCardCenterScreenX = 0f
+                                            lastKnownSlotLeftInRoot = 0f
                                         },
                                         onDragCancel = {
                                             draggingClipId = null
                                             dragPointerRootX = 0f
                                             grabOffsetInsideCardPx = 0f
                                             dragCardCenterScreenX = 0f
+                                            lastKnownSlotLeftInRoot = 0f
                                         },
                                         onDrag = { change, _ ->
                                             change.consume()
                                             val currentItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == clip.id }
                                             val itemLeftInRoot = if (currentItem != null) {
-                                                lazyRowLeftInRootPx + currentItem.offset
+                                                val left = lazyRowLeftInRootPx + currentItem.offset
+                                                lastKnownSlotLeftInRoot = left
+                                                left
                                             } else {
-                                                dragPointerRootX - grabOffsetInsideCardPx
+                                                if (lastKnownSlotLeftInRoot > 0f) lastKnownSlotLeftInRoot else (dragPointerRootX - grabOffsetInsideCardPx)
                                             }
                                             dragPointerRootX = itemLeftInRoot + change.position.x
                                             dragCardCenterScreenX = dragPointerRootX - grabOffsetInsideCardPx + (cardSizePx / 2f)
