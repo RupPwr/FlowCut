@@ -398,6 +398,10 @@ fun EditorScreen(
                 // 2. ViewModel state: throttle to whole seconds, or emit when scrubbing/flinging completes.
                 // Prevents full-screen Compose recomposition storms at 60-120fps during drag!
                 val stoppedMoving = (lastReportedMode == PlayMode.SCRUBBING || lastReportedMode == PlayMode.FLINGING) && mode == PlayMode.PAUSED
+                if (stoppedMoving) {
+                    previewRenderer.isWaitingForFrame = true
+                    previewRenderer.requestAccurateSeek()
+                }
                 if (curSec != lastReportedSec || stoppedMoving) {
                     lastReportedSec = curSec
                     onPlayheadUpdateState.value.invoke(tMs)
@@ -440,6 +444,8 @@ fun EditorScreen(
     val stopTimelineScrollNow = {
         playbackController.pause()
         isTimelineScrolling = false
+        previewRenderer.isWaitingForFrame = true
+        previewRenderer.requestAccurateSeek()
         frameDriver.wake()
     }
     val currentStopTimelineScrollNow by rememberUpdatedState(stopTimelineScrollNow)

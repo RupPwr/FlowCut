@@ -39,7 +39,8 @@ class FrameSource(
     private var lastSeekTargetUs: Long = -1L
     private var lastKeyframePtsUs: Long = -1L
     private var lastRenderedLocalUs: Long = -1L
-    private var isAccuratePausedFrameLatched: Boolean = false
+    var isAccuratePausedFrameLatched: Boolean = false
+        internal set
     private var catchUpStartMs: Long = 0L
     private var _isCatchingUpFromSeek: Boolean = false
     private var mediaDurationUs: Long = -1L
@@ -79,10 +80,7 @@ class FrameSource(
         if (isNearEos && (outputEos || (currentPtsUs != -1L && currentPtsUs >= durationUs - 85_000L))) {
             return true
         }
-        if (currentPtsUs != -1L && kotlin.math.abs(targetUs - currentPtsUs) <= 60_000L) {
-            return true
-        }
-        if (isAccuratePausedFrameLatched && lastRenderedLocalUs != -1L && kotlin.math.abs(targetUs - lastRenderedLocalUs) <= 60_000L) {
+        if (isAccuratePausedFrameLatched && currentPtsUs != -1L && currentPtsUs >= targetUs - 25_000L && currentPtsUs <= targetUs + 45_000L) {
             return true
         }
         return false
@@ -432,8 +430,13 @@ class FrameSource(
         val clipDurationUs = effectiveMediaDurationUs
         val isNearClipEnd = clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L
         if (isPrepared && currentPtsUs != -1L) {
-            if (kotlin.math.abs(localUs - currentPtsUs) <= 45_000L ||
-                (isNearClipEnd && currentPtsUs >= clipDurationUs - 85_000L)) {
+            val canSkip = if (!fastKeyframeOnly && !isAccuratePausedFrameLatched) {
+                false
+            } else {
+                kotlin.math.abs(localUs - currentPtsUs) <= 45_000L ||
+                    (isNearClipEnd && currentPtsUs >= clipDurationUs - 85_000L)
+            }
+            if (canSkip) {
                 isCatchingUpFromSeek = false
                 isAccuratePausedFrameLatched = true
                 prewarmStage = 3
@@ -473,7 +476,7 @@ class FrameSource(
             val timeoutUs = 1_000L
             var rendered = false
             var attempts = 0
-            val maxAttempts = if (isExport) 120 else (if (fastKeyframeOnly) 10 else 12)
+            val maxAttempts = if (isExport) 120 else (if (fastKeyframeOnly) 10 else 60)
 
             while (!rendered && attempts < maxAttempts && !outputEos) {
                 attempts++
@@ -517,8 +520,8 @@ class FrameSource(
                         }
                         notifyFirstFrame()
                     } else {
-                        // Exact Silent Preroll: silently discard all frames before localUs - 20_000L
-                        if (pts >= localUs - 20_000L || atClipEnd) {
+                        // Exact Silent Preroll: silently discard all frames before localUs - 25_000L
+                        if (pts >= localUs - 25_000L || atClipEnd) {
                             dec.releaseOutputBuffer(outIndex, true)
                             currentPtsUs = pts
                             lastKeyframePtsUs = pts
@@ -609,9 +612,10 @@ class FrameSource(
 
             // Decode whenever localUs >= currentPtsUs + 8_000L (8ms threshold instead of 25ms) so 30fps and 60fps clips never skip a frame during a fast transition
             if (!isInitial && !isJump && currentPtsUs != -1L && localUs < currentPtsUs + 8_000L) {
-                lastRenderedLocalUs = localUs
-                isAccuratePausedFrameLatched = true
-                return false
+                if (isAccuratePausedFrameLatched) {
+                    lastRenderedLocalUs = localUs
+                    return false
+                }
             }
 
             // Check if catch-up from seek is complete
@@ -619,7 +623,7 @@ class FrameSource(
                 isCatchingUpFromSeek = false
             }
 
-            if (isInitial || isJump) {
+            if (isInitial || isJump || (!isScrubbing && !isAccuratePausedFrameLatched)) {
                 lastForwardKeyframeHopUs = -1L
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)
                 if (didRender) {
