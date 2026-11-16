@@ -1458,7 +1458,8 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
         if (effectiveOpacity <= 0.001f) return
 
-        if (isOverlayOffScreen(transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom)) {
+        val isText = textTextureIds.contains(texId)
+        if (isOverlayOffScreen(transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom, isText = isText)) {
             return
         }
 
@@ -1491,7 +1492,7 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         GLES30.glUniform1f(uAdjustContrastLoc, adjustContrast)
         GLES30.glUniform1f(uAdjustSaturationLoc, adjustSaturation)
 
-        computeOverlayMvp(overlayMvp, transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom)
+        computeOverlayMvp(overlayMvp, transform, texWidth, texHeight, displayWidth, displayHeight, cropLeft, cropTop, cropRight, cropBottom, isText = isText)
         GLES30.glUniformMatrix4fv(uOverlayMatLoc, 1, false, overlayMvp, 0)
 
         GLES30.glBindVertexArray(vaoId)
@@ -1738,7 +1739,8 @@ class TransitionRenderer(private val cacheDir: File? = null) {
             cropTop: Float = 0.0f,
             cropRight: Float = 1.0f,
             cropBottom: Float = 1.0f,
-            canvasAspect: Float = Companion.canvasAspect
+            canvasAspect: Float = Companion.canvasAspect,
+            isText: Boolean = false
         ): Boolean {
             val aScreen = if (displayHeight > 0) displayWidth.toFloat() / displayHeight.toFloat() else if (canvasAspect > 0f) canvasAspect else (9.0f / 16.0f)
             val tw = if (texWidth > 0) texWidth.toFloat() else 1f
@@ -1747,13 +1749,19 @@ class TransitionRenderer(private val cacheDir: File? = null) {
             val cropH = (cropBottom - cropTop).coerceIn(0.01f, 1.0f)
             val aTex = ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
 
-            var hw = 0.6f
-            var hh = hw / aTex
-            if (hh * aScreen > 0.6f) {
-                val factor = 0.6f / (hh * aScreen)
-                hw *= factor
-                hh *= factor
+            val hw = if (isText && texWidth > 0) {
+                val baseRef = if (displayHeight > 0) minOf(displayWidth, displayHeight).toFloat() else 1080f
+                (tw / baseRef).coerceIn(0.05f, 2.5f)
+            } else {
+                var h = 0.6f
+                var v = h / aTex
+                if (v * aScreen > 0.6f) {
+                    val factor = 0.6f / (v * aScreen)
+                    h *= factor
+                }
+                h
             }
+            val hh = hw / aTex
 
             val scale = transform.scale.coerceIn(0.01f, 10.0f)
             val diag = kotlin.math.sqrt(hw * hw + hh * hh) * scale
@@ -1771,6 +1779,16 @@ class TransitionRenderer(private val cacheDir: File? = null) {
             return right < -1.0f || left > 1.0f || top < -1.0f || bottom > 1.0f
         }
 
+        val textTextureIds: MutableSet<Int> = java.util.Collections.synchronizedSet(HashSet<Int>())
+
+        fun registerTextTexture(texId: Int) {
+            if (texId > 0) textTextureIds.add(texId)
+        }
+
+        fun unregisterTextTexture(texId: Int) {
+            if (texId > 0) textTextureIds.remove(texId)
+        }
+
         fun computeOverlayMvp(
             outMvp: FloatArray,
             transform: ClipTransform,
@@ -1782,7 +1800,8 @@ class TransitionRenderer(private val cacheDir: File? = null) {
             cropTop: Float = 0.0f,
             cropRight: Float = 1.0f,
             cropBottom: Float = 1.0f,
-            canvasAspect: Float = Companion.canvasAspect
+            canvasAspect: Float = Companion.canvasAspect,
+            isText: Boolean = false
         ) {
             val aScreen = if (displayHeight > 0) displayWidth.toFloat() / displayHeight.toFloat() else if (canvasAspect > 0f) canvasAspect else (9.0f / 16.0f)
             val tw = if (texWidth > 0) texWidth.toFloat() else 1f
@@ -1791,13 +1810,19 @@ class TransitionRenderer(private val cacheDir: File? = null) {
             val cropH = (cropBottom - cropTop).coerceIn(0.01f, 1.0f)
             val aTex = ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
 
-            var hw = 0.6f
-            var hh = hw / aTex
-            if (hh * aScreen > 0.6f) {
-                val factor = 0.6f / (hh * aScreen)
-                hw *= factor
-                hh *= factor
+            val hw = if (isText && texWidth > 0) {
+                val baseRef = if (displayHeight > 0) minOf(displayWidth, displayHeight).toFloat() else 1080f
+                (tw / baseRef).coerceIn(0.05f, 2.5f)
+            } else {
+                var h = 0.6f
+                var v = h / aTex
+                if (v * aScreen > 0.6f) {
+                    val factor = 0.6f / (v * aScreen)
+                    h *= factor
+                }
+                h
             }
+            val hh = hw / aTex
 
             val scale = transform.scale.coerceIn(0.01f, 10.0f)
 

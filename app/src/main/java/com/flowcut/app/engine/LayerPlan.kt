@@ -88,7 +88,9 @@ data class OverlayItem(
     // Phase 9: Mosaic / Privacy Blur Layer
     val mosaicStyle: Int = 0, // 0 = Pixelate Grid, 1 = Frost/Box Blur, 2 = Halftone/Dot Matrix, 3 = Solid Blackout Censor Bar
     val mosaicIntensity: Float = 0.5f, // 0.1f..1.0f controlling pixel block size / blur radius
-    val mosaicFeather: Float = 0.05f // 0.0f..0.3f soft edge blending
+    val mosaicFeather: Float = 0.05f, // 0.0f..0.3f soft edge blending
+    // Text Wrapping Constraint: 0.0f = auto / single-line, > 0.0f = normalized wrap width ratio (0.15f..1.4f)
+    val wrapWidth: Float = 0.0f
 ) {
     companion object {
         const val MIN_DURATION_US: Long = 200_000L

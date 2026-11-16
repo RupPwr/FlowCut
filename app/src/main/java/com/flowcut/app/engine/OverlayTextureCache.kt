@@ -96,6 +96,7 @@ class OverlayTextureCache(
         h = 31 * h + if (item.isItalic) 1 else 0
         h = 31 * h + if (item.isUnderline) 1 else 0
         h = 31 * h + if (item.isUppercase) 1 else 0
+        h = 31 * h + item.wrapWidth.toBits()
         h = 31 * h + (bakeScale.coerceIn(1.0f, 2.5f) * 100).toInt()
         return h
     }
@@ -158,6 +159,12 @@ class OverlayTextureCache(
         entry.height = h
         entry.lastUsedNs = System.nanoTime()
 
+        if (item.type == LayerType.TEXT) {
+            TransitionRenderer.registerTextTexture(targetTexId)
+        } else {
+            TransitionRenderer.unregisterTextTexture(targetTexId)
+        }
+
         pruneToBudget(setOf(item.id))
         return entry
     }
@@ -194,6 +201,7 @@ class OverlayTextureCache(
             if (total <= maxByteBudget) break
             if (entry.texId > 0) {
                 deleteIds[0] = entry.texId
+                TransitionRenderer.unregisterTextTexture(entry.texId)
                 GLES20.glDeleteTextures(1, deleteIds, 0)
                 entry.texId = 0
             }
@@ -259,10 +267,15 @@ class OverlayTextureCache(
 
         val lineSpacingMultiplier = item.lineSpacing.coerceIn(0.55f, 2.80f)
 
-        // Measure text using full desired width so wide character spacing never clips
+        // Measure text using full desired width or wrapWidth so multi-line text wraps cleanly
         val desiredWidth = ceil(StaticLayout.getDesiredWidth(rawText, textPaint)).toInt().coerceAtLeast(1)
         val maxTextW = (1920 * effScale).toInt().coerceIn(1920, 4096)
-        val textW = desiredWidth.coerceIn(1, maxTextW)
+        val textW = if (item.wrapWidth > 0.0f) {
+            val targetWrapPx = (item.wrapWidth * 1080f * effScale).roundToInt()
+            targetWrapPx.coerceIn((96 * effScale).toInt(), maxTextW)
+        } else {
+            desiredWidth.coerceIn(1, maxTextW)
+        }
 
         val layout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, textPaint, textW)
             .setAlignment(alignment)
