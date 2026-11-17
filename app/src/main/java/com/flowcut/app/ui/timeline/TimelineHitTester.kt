@@ -270,10 +270,12 @@ object TimelineHitTester {
         val isPip = item.type == LayerType.IMAGE || item.type == LayerType.VIDEO
         val effectiveHandleWidthPx = (if (isPip) 10f else handleWidthDp) * density
 
-        val leftHitMin = leftX - effectiveHandleWidthPx - (16f * density)
-        val leftHitMax = leftX + (12f * density)
-        val rightHitMin = rightX - (12f * density)
-        val rightHitMax = rightX + effectiveHandleWidthPx + (16f * density)
+        val outerSlopPx = 10f * density
+        val innerSlopPx = minOf(4f * density, (rightX - leftX) / 3f).coerceAtLeast(0f)
+        val leftHitMin = leftX - effectiveHandleWidthPx - outerSlopPx
+        val leftHitMax = leftX + innerSlopPx
+        val rightHitMin = rightX - innerSlopPx
+        val rightHitMax = rightX + effectiveHandleWidthPx + outerSlopPx
 
         val hitLeft = tapX in leftHitMin..leftHitMax
         val hitRight = tapX in rightHitMin..rightHitMax

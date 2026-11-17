@@ -542,6 +542,8 @@ fun TimelineCanvas(
     val pinTPath = remember { Path() }
 
     val rowBBarPath = remember { Path() }
+    val rowBLeftHandlePath = remember { Path() }
+    val rowBRightHandlePath = remember { Path() }
     val rowBLeftChevronPath = remember { Path() }
     val rowBRightChevronPath = remember { Path() }
     val rowBBadgePath = remember { Path() }
@@ -1782,7 +1784,7 @@ fun TimelineCanvas(
                 val endX = zoomState.timeUsToX(selItem.endUs, offsetPx, halfWidthInt, pxPerUs)
                 val barW = endX - startX
 
-                if (barW > 0f && endX >= -50f && startX <= size.width + 50f) {
+                if (barW > 0f && (endX + handleWidthPx) >= -50f && (startX - handleWidthPx) <= size.width + 50f) {
                     val alpha = currentPush.coerceIn(0f, 1f)
                     val barH = 24f * density * currentPush
                     val barTop = rowBTop + (rowBBarHeightPx - barH) / 2f
@@ -1799,70 +1801,89 @@ fun TimelineCanvas(
                     }
                     val fillColor = if (alpha < 1f) rawFillColor.copy(alpha = rawFillColor.alpha * alpha) else rawFillColor
                     val currentWhite = if (alpha < 1f) whiteColor.copy(alpha = alpha) else whiteColor
+                    val dividerColor = if (alpha < 1f) Color(0xCCFFFFFF).copy(alpha = alpha) else Color(0xCCFFFFFF)
 
-                    // 1. Solid Orange or Teal bar across [startX, endX] (NO white border around entire bar)
+                    // 1. Solid Orange or Layer-colored main body strictly spanning exact duration [startX, endX] (flat inner edges)
                     buildClipCornerPath(
                         path = rowBBarPath,
                         left = startX,
                         top = barTop,
                         right = endX,
                         bottom = barBottom,
-                        roundLeft = true,
-                        roundRight = true,
-                        radius = barR
+                        roundLeft = false,
+                        roundRight = false,
+                        radius = 0f
                     )
                     drawPath(path = rowBBarPath, color = fillColor)
 
-                    // 2. Rounded < (left) and > (right) handle caps (12.dp wide) separated by 1.dp vertical white divider line
-                    val handleCapW = 12f * density
-                    val showHandleCaps = barW >= handleCapW * 2f
+                    // 2. Left Handle (<) attached outside the left edge: [startX - handleWidthPx, startX]
+                    buildClipCornerPath(
+                        path = rowBLeftHandlePath,
+                        left = startX - handleWidthPx,
+                        top = barTop,
+                        right = startX,
+                        bottom = barBottom,
+                        roundLeft = true,
+                        roundRight = false,
+                        radius = barR
+                    )
+                    drawPath(path = rowBLeftHandlePath, color = fillColor)
 
-                    if (showHandleCaps) {
-                        // Left divider line at startX + handleCapW
-                        val leftDivX = startX + handleCapW
-                        drawLine(
-                            color = Color(0xCCFFFFFF),
-                            start = Offset(leftDivX, barTop),
-                            end = Offset(leftDivX, barBottom),
-                            strokeWidth = 1f * density
-                        )
+                    // 3. Right Handle (>) attached outside the right edge: [endX, endX + handleWidthPx]
+                    buildClipCornerPath(
+                        path = rowBRightHandlePath,
+                        left = endX,
+                        top = barTop,
+                        right = endX + handleWidthPx,
+                        bottom = barBottom,
+                        roundLeft = false,
+                        roundRight = true,
+                        radius = barR
+                    )
+                    drawPath(path = rowBRightHandlePath, color = fillColor)
 
-                        // Right divider line at endX - handleCapW
-                        val rightDivX = endX - handleCapW
-                        drawLine(
-                            color = Color(0xCCFFFFFF),
-                            start = Offset(rightDivX, barTop),
-                            end = Offset(rightDivX, barBottom),
-                            strokeWidth = 1f * density
-                        )
+                    // Crisp vertical inner edge | at startX forming < |
+                    drawLine(
+                        color = dividerColor,
+                        start = Offset(startX, barTop),
+                        end = Offset(startX, barBottom),
+                        strokeWidth = 1f * density
+                    )
 
-                        // Crisp white < chevron centered inside left handle cap
-                        val leftCenterX = startX + handleCapW / 2f
-                        val barCenterY = barTop + barH / 2f
-                        val chevHalfW = 2.2f * density
-                        val chevHalfH = 4.2f * density
-                        rowBLeftChevronPath.reset()
-                        rowBLeftChevronPath.moveTo(leftCenterX + chevHalfW, barCenterY - chevHalfH)
-                        rowBLeftChevronPath.lineTo(leftCenterX - chevHalfW, barCenterY)
-                        rowBLeftChevronPath.lineTo(leftCenterX + chevHalfW, barCenterY + chevHalfH)
-                        drawPath(path = rowBLeftChevronPath, color = whiteColor, style = rowBChevronStroke)
+                    // Crisp vertical inner edge | at endX forming | >
+                    drawLine(
+                        color = dividerColor,
+                        start = Offset(endX, barTop),
+                        end = Offset(endX, barBottom),
+                        strokeWidth = 1f * density
+                    )
 
-                        // Crisp white > chevron centered inside right handle cap
-                        val rightCenterX = endX - handleCapW / 2f
-                        rowBRightChevronPath.reset()
-                        rowBRightChevronPath.moveTo(rightCenterX - chevHalfW, barCenterY - chevHalfH)
-                        rowBRightChevronPath.lineTo(rightCenterX + chevHalfW, barCenterY)
-                        rowBRightChevronPath.lineTo(rightCenterX - chevHalfW, barCenterY + chevHalfH)
-                        drawPath(path = rowBRightChevronPath, color = whiteColor, style = rowBChevronStroke)
-                    }
+                    // Crisp white < chevron centered inside left handle tab
+                    val leftCenterX = startX - (handleWidthPx / 2f)
+                    val barCenterY = barTop + barH / 2f
+                    val chevHalfW = 2.2f * density
+                    val chevHalfH = 4.2f * density
+                    rowBLeftChevronPath.reset()
+                    rowBLeftChevronPath.moveTo(leftCenterX + chevHalfW, barCenterY - chevHalfH)
+                    rowBLeftChevronPath.lineTo(leftCenterX - chevHalfW, barCenterY)
+                    rowBLeftChevronPath.lineTo(leftCenterX + chevHalfW, barCenterY + chevHalfH)
+                    drawPath(path = rowBLeftChevronPath, color = currentWhite, style = rowBChevronStroke)
 
-                    // 3. Compact dark-brown/charcoal rounded pill (Color(0xCC3E2723), 3.dp radius) at top-right (endX - badgeWidth - 4.dp)
+                    // Crisp white > chevron centered inside right handle tab
+                    val rightCenterX = endX + (handleWidthPx / 2f)
+                    rowBRightChevronPath.reset()
+                    rowBRightChevronPath.moveTo(rightCenterX - chevHalfW, barCenterY - chevHalfH)
+                    rowBRightChevronPath.lineTo(rightCenterX + chevHalfW, barCenterY)
+                    rowBRightChevronPath.lineTo(rightCenterX - chevHalfW, barCenterY + chevHalfH)
+                    drawPath(path = rowBRightChevronPath, color = currentWhite, style = rowBChevronStroke)
+
+                    // 4. Compact dark-brown/charcoal rounded pill (Color(0xCC3E2723), 3.dp radius) at top-right (endX - badgeWidth - 4.dp)
                     val durStr = durationBadgeCache.get(selItem.durationUs)
                     val badgeW = 38f * density
                     val badgeH = 13f * density
                     val badgeLeft = endX - badgeW - (4f * density)
                     val badgeTop = barTop + (2f * density)
-                    if (badgeLeft > startX + (if (showHandleCaps) handleCapW + (8f * density) else (12f * density))) {
+                    if (badgeLeft > startX + (12f * density)) {
                         drawRoundRect(
                             color = rowBBadgeColor,
                             topLeft = Offset(badgeLeft, badgeTop),
@@ -1878,7 +1899,7 @@ fun TimelineCanvas(
                         )
                     }
 
-                    // 4. Text snippet at bottom-left (startX + 6.dp) in clean 10.sp white text
+                    // 5. Text snippet at bottom-left (startX + 6.dp) in clean 10.sp white text
                     val previewSnippet = when (selItem.type) {
                         LayerType.FILTER -> filterPresetName(selItem.filterPresetId)
                         LayerType.EFFECT -> effectPresetName(selItem.effectPresetId)
@@ -1887,7 +1908,7 @@ fun TimelineCanvas(
                         LayerType.STICKER -> if (selItem.text.isNotBlank()) selItem.text else "Sticker"
                         else -> ""
                     }
-                    val snippetX = if (showHandleCaps && barW >= 44f * density) startX + handleCapW + (4f * density) else startX + (6f * density)
+                    val snippetX = startX + (6f * density)
                     drawTextSafe(
                         textMeasurer = textMeasurer,
                         text = previewSnippet,
