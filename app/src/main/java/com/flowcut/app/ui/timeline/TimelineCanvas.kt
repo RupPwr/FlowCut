@@ -1627,7 +1627,8 @@ fun TimelineCanvas(
             }
 
             // Pin Marker: 22.dp wide x (26.dp body + 5.dp tip) = 31.dp shield/pentagon
-            if (startX in -50f..size.width + 50f) {
+            if (TimelineHitTester.isOverlayPinVisible(startX, endX, 0f, size.width)) {
+                val pinAnchorX = TimelineHitTester.calculateStickyPinX(startX, endX, 0f, size.width, density)
                 val elevationY = if (isSelectedPin) -2f * density else 0f
                 val pinTopY = rowATop + (2f * density) + elevationY
 
@@ -1641,13 +1642,17 @@ fun TimelineCanvas(
                         other.type != LayerType.FILTER && other.type != LayerType.EFFECT &&
                         other.type != LayerType.MOSAIC) continue
                     val otherStartX = zoomState.timeUsToX(other.startUs, offsetPx, halfWidthInt, pxPerUs)
-                    if (abs(startX - otherStartX) <= stackDistPx) {
-                        clusterSize++
-                        val otherIsSelected = (other.id == selectedOverlayId)
-                        if (otherIsSelected) {
-                            isFrontmost = false
-                        } else if (!isSelectedPin && otherIdx < idx) {
-                            isFrontmost = false
+                    val otherEndX = zoomState.timeUsToX(other.endUs, offsetPx, halfWidthInt, pxPerUs)
+                    if (TimelineHitTester.isOverlayPinVisible(otherStartX, otherEndX, 0f, size.width)) {
+                        val otherPinAnchorX = TimelineHitTester.calculateStickyPinX(otherStartX, otherEndX, 0f, size.width, density)
+                        if (abs(pinAnchorX - otherPinAnchorX) <= stackDistPx) {
+                            clusterSize++
+                            val otherIsSelected = (other.id == selectedOverlayId)
+                            if (otherIsSelected) {
+                                isFrontmost = false
+                            } else if (!isSelectedPin && otherIdx < idx) {
+                                isFrontmost = false
+                            }
                         }
                     }
                 }
@@ -1665,7 +1670,7 @@ fun TimelineCanvas(
                     val capTop = pinTopY - (k * stepUpPx)
                     buildStackedCapPath(
                         path = stackedCapPath,
-                        anchorX = startX,
+                        anchorX = pinAnchorX,
                         top = capTop,
                         height = capHeightPx,
                         width = pinWidthPx,
@@ -1677,7 +1682,7 @@ fun TimelineCanvas(
 
                 buildPinPath(
                     path = pinPath,
-                    anchorX = startX,
+                    anchorX = pinAnchorX,
                     top = pinTopY,
                     width = pinWidthPx,
                     bodyHeight = pinBodyHeightPx,
@@ -1696,47 +1701,47 @@ fun TimelineCanvas(
                     val tStemBottom = pinCenterY + (4.5f * density)
                     val tHalfBar = 4.5f * density
                     pinTPath.reset()
-                    pinTPath.moveTo(startX - tHalfBar, tTop)
-                    pinTPath.lineTo(startX + tHalfBar, tTop)
-                    pinTPath.moveTo(startX, tTop)
-                    pinTPath.lineTo(startX, tStemBottom)
+                    pinTPath.moveTo(pinAnchorX - tHalfBar, tTop)
+                    pinTPath.lineTo(pinAnchorX + tHalfBar, tTop)
+                    pinTPath.moveTo(pinAnchorX, tTop)
+                    pinTPath.lineTo(pinAnchorX, tStemBottom)
                     drawPath(path = pinTPath, color = whiteColor, style = pinIconStroke)
                 } else if (item.type == LayerType.FILTER) {
                     val fTop = pinCenterY - (4.5f * density)
                     val fStemBottom = pinCenterY + (4.5f * density)
-                    val fStemX = startX - (3f * density)
+                    val fStemX = pinAnchorX - (3f * density)
                     pinTPath.reset()
                     pinTPath.moveTo(fStemX, fTop)
                     pinTPath.lineTo(fStemX, fStemBottom)
                     pinTPath.moveTo(fStemX, fTop)
-                    pinTPath.lineTo(startX + (3.5f * density), fTop)
+                    pinTPath.lineTo(pinAnchorX + (3.5f * density), fTop)
                     pinTPath.moveTo(fStemX, pinCenterY)
-                    pinTPath.lineTo(startX + (2f * density), pinCenterY)
+                    pinTPath.lineTo(pinAnchorX + (2f * density), pinCenterY)
                     drawPath(path = pinTPath, color = whiteColor, style = pinIconStroke)
                 } else if (item.type == LayerType.EFFECT) {
                     val eTop = pinCenterY - (4.5f * density)
                     val eStemBottom = pinCenterY + (4.5f * density)
-                    val eStemX = startX - (3f * density)
+                    val eStemX = pinAnchorX - (3f * density)
                     pinTPath.reset()
                     pinTPath.moveTo(eStemX, eTop)
                     pinTPath.lineTo(eStemX, eStemBottom)
                     pinTPath.moveTo(eStemX, eTop)
-                    pinTPath.lineTo(startX + (3.5f * density), eTop)
+                    pinTPath.lineTo(pinAnchorX + (3.5f * density), eTop)
                     pinTPath.moveTo(eStemX, pinCenterY)
-                    pinTPath.lineTo(startX + (2f * density), pinCenterY)
+                    pinTPath.lineTo(pinAnchorX + (2f * density), pinCenterY)
                     pinTPath.moveTo(eStemX, eStemBottom)
-                    pinTPath.lineTo(startX + (3.5f * density), eStemBottom)
+                    pinTPath.lineTo(pinAnchorX + (3.5f * density), eStemBottom)
                     drawPath(path = pinTPath, color = whiteColor, style = pinIconStroke)
                 } else if (item.type == LayerType.MOSAIC) {
                     val mTop = pinCenterY - (4.5f * density)
                     val mBottom = pinCenterY + (4.5f * density)
-                    val mLeft = startX - (4f * density)
-                    val mRight = startX + (4f * density)
+                    val mLeft = pinAnchorX - (4f * density)
+                    val mRight = pinAnchorX + (4f * density)
                     val mMidY = pinCenterY + (0.8f * density)
                     pinTPath.reset()
                     pinTPath.moveTo(mLeft, mBottom)
                     pinTPath.lineTo(mLeft, mTop)
-                    pinTPath.lineTo(startX, mMidY)
+                    pinTPath.lineTo(pinAnchorX, mMidY)
                     pinTPath.lineTo(mRight, mTop)
                     pinTPath.lineTo(mRight, mBottom)
                     drawPath(path = pinTPath, color = whiteColor, style = pinMosaicStroke)
@@ -1744,18 +1749,18 @@ fun TimelineCanvas(
                     if (item.mediaPath.isNotEmpty()) {
                         drawRect(
                             color = whiteColor,
-                            topLeft = Offset(startX - (4.5f * density), pinCenterY - (4f * density)),
+                            topLeft = Offset(pinAnchorX - (4.5f * density), pinCenterY - (4f * density)),
                             size = Size(9f * density, 8f * density),
                             style = Stroke(width = 1.4f * density)
                         )
                     } else {
                         val eyeY = pinCenterY - (2.5f * density)
-                        drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(startX - (3.2f * density), eyeY))
-                        drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(startX + (3.2f * density), eyeY))
+                        drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(pinAnchorX - (3.2f * density), eyeY))
+                        drawCircle(color = whiteColor, radius = 1.1f * density, center = Offset(pinAnchorX + (3.2f * density), eyeY))
 
                         pinSmilePath.reset()
-                        pinSmilePath.moveTo(startX - (4f * density), pinCenterY + (1.5f * density))
-                        pinSmilePath.quadraticTo(startX, pinCenterY + (4f * density), startX + (4f * density), pinCenterY + (1.5f * density))
+                        pinSmilePath.moveTo(pinAnchorX - (4f * density), pinCenterY + (1.5f * density))
+                        pinSmilePath.quadraticTo(pinAnchorX, pinCenterY + (4f * density), pinAnchorX + (4f * density), pinCenterY + (1.5f * density))
                         drawPath(path = pinSmilePath, color = whiteColor, style = Stroke(width = 1.4f * density, cap = StrokeCap.Round))
                     }
                 }
@@ -1767,8 +1772,8 @@ fun TimelineCanvas(
                     // Vertical white connector tick drops from pin tip down to rowBTop (60.dp)
                     val pinTipY = pinTopY + pinBodyHeightPx + pinTipHeightPx
                     connectorTickPath.reset()
-                    connectorTickPath.moveTo(startX, pinTipY)
-                    connectorTickPath.lineTo(startX, rowBTop)
+                    connectorTickPath.moveTo(pinAnchorX, pinTipY)
+                    connectorTickPath.lineTo(pinAnchorX, rowBTop)
                     drawPath(path = connectorTickPath, color = whiteColor, style = connectorTickStroke)
                 }
             }

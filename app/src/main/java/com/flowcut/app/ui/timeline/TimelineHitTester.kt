@@ -141,6 +141,7 @@ object TimelineHitTester {
     const val PIN_HEIGHT_CLOSED_DP = 31f
     const val PIN_HEIGHT_OPEN_DP = 31f
     const val PIN_HEIGHT_DP = 31f
+    const val PIN_STICKY_HALF_W_DP = 16f
     const val TRIM_HANDLE_WIDTH_DP = 15f
     const val TRIM_HANDLE_HEIGHT_DP = 26f
     const val TRIM_HANDLE_TOUCH_TARGET_DP = 28f
@@ -374,6 +375,34 @@ object TimelineHitTester {
     }
 
     /**
+     * Determines whether an overlay pin is visible within the timeline viewport.
+     */
+    fun isOverlayPinVisible(startX: Float, endX: Float, visibleLeftX: Float, visibleRightX: Float): Boolean =
+        endX > visibleLeftX && startX < visibleRightX
+
+    /**
+     * Calculates the horizontal center X for a sticky overlay pin.
+     * Keeps the pin clamped within the visible timeline viewport AND within the layer's own duration span.
+     */
+    fun calculateStickyPinX(
+        startX: Float,
+        endX: Float,
+        visibleLeftX: Float,
+        visibleRightX: Float,
+        density: Float,
+        pinHalfWDp: Float = PIN_STICKY_HALF_W_DP
+    ): Float {
+        val pinHalfW = pinHalfWDp * density
+        val safeMaxLeft = (visibleRightX - pinHalfW).coerceAtLeast(visibleLeftX + pinHalfW)
+        if (endX - startX < pinHalfW * 2f) {
+            return ((startX + endX) / 2f).coerceIn(visibleLeftX + pinHalfW, safeMaxLeft)
+        }
+        val minPinX = (visibleLeftX + pinHalfW).coerceAtMost(endX - pinHalfW)
+        val maxPinX = safeMaxLeft.coerceAtLeast(startX + pinHalfW)
+        return startX.coerceIn(minPinX, maxPinX)
+    }
+
+    /**
      * Hit-tests Row A (Pins Row): Pin markers (24.dp x 26.dp) and duration underlines.
      * When 2 or more pins overlap each other by >= 70% (abs(xi - xj) <= 0.30f * pinWidthPx),
      * returns TimelineSelection.OverlappingPinsClicked with the cluster items so the conflict picker opens!
@@ -403,13 +432,20 @@ object TimelineHitTester {
         }
         if (rowAPins.isEmpty()) return null
 
+        val visibleLeftX = 0f
+        val visibleRightX = halfWidthPx * 2f
+
         // 1. Direct pin marker hits near tapX
         val directHits = mutableListOf<OverlayItem>()
         for (idx in rowAPins.indices) {
             val item = rowAPins[idx]
             val startX = zoomState.timeUsToX(item.startUs, playheadUs, halfWidthPx, density)
-            if (abs(tapX - startX) <= pinTouchRadiusPx) {
-                directHits.add(item)
+            val endX = zoomState.timeUsToX(item.endUs, playheadUs, halfWidthPx, density)
+            if (isOverlayPinVisible(startX, endX, visibleLeftX, visibleRightX)) {
+                val pinAnchorX = calculateStickyPinX(startX, endX, visibleLeftX, visibleRightX, density)
+                if (abs(tapX - pinAnchorX) <= pinTouchRadiusPx) {
+                    directHits.add(item)
+                }
             }
         }
 
@@ -421,14 +457,20 @@ object TimelineHitTester {
                 expanded = false
                 for (candidate in rowAPins) {
                     if (candidate !in cluster) {
-                        val candX = zoomState.timeUsToX(candidate.startUs, playheadUs, halfWidthPx, density)
-                        val inConflict = cluster.any { member ->
-                            val memberX = zoomState.timeUsToX(member.startUs, playheadUs, halfWidthPx, density)
-                            abs(candX - memberX) <= conflictDistancePx
-                        }
-                        if (inConflict) {
-                            cluster.add(candidate)
-                            expanded = true
+                        val candStartX = zoomState.timeUsToX(candidate.startUs, playheadUs, halfWidthPx, density)
+                        val candEndX = zoomState.timeUsToX(candidate.endUs, playheadUs, halfWidthPx, density)
+                        if (isOverlayPinVisible(candStartX, candEndX, visibleLeftX, visibleRightX)) {
+                            val candStickyX = calculateStickyPinX(candStartX, candEndX, visibleLeftX, visibleRightX, density)
+                            val inConflict = cluster.any { member ->
+                                val memStartX = zoomState.timeUsToX(member.startUs, playheadUs, halfWidthPx, density)
+                                val memEndX = zoomState.timeUsToX(member.endUs, playheadUs, halfWidthPx, density)
+                                val memStickyX = calculateStickyPinX(memStartX, memEndX, visibleLeftX, visibleRightX, density)
+                                abs(candStickyX - memStickyX) <= conflictDistancePx
+                            }
+                            if (inConflict) {
+                                cluster.add(candidate)
+                                expanded = true
+                            }
                         }
                     }
                 }
