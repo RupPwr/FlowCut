@@ -154,61 +154,6 @@ import com.flowcut.app.ui.timeline.TimelineFocusState
 import com.flowcut.app.ui.timeline.TimelineSelection
 import com.flowcut.app.ui.timeline.TimelineZoomState
 
-private fun measureTextOverlayQuad(
-    overlay: com.flowcut.app.engine.OverlayItem,
-    previewW: Float,
-    scale: Float,
-    overrideWrapWidth: Float? = null
-): Pair<Float, Float> {
-    val displayText = if (overlay.text.isBlank()) "Your Text" else overlay.text
-    val rawText = if (overlay.isUppercase) displayText.uppercase() else displayText
-    val typeface = when (overlay.fontName.lowercase()) {
-        "permanentmarker", "marker", "casual" -> android.graphics.Typeface.create("casual", android.graphics.Typeface.NORMAL)
-        "bebas", "condensed" -> android.graphics.Typeface.create("sans-serif-condensed", if (overlay.isBold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-        "aileron" -> android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL)
-        "roboto-thin", "thin" -> android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL)
-        "serif-bold", "serif" -> android.graphics.Typeface.create(android.graphics.Typeface.SERIF, if (overlay.isBold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-        "monospace", "mono" -> android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.NORMAL)
-        else -> android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-    }
-    val textPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        color = overlay.textColorArgb
-        textSize = 68f
-        this.typeface = typeface
-        letterSpacing = overlay.letterSpacing.coerceIn(-0.08f, 1.40f)
-        isUnderlineText = overlay.isUnderline
-        isFakeBoldText = overlay.isBold
-    }
-    val alignment = when (overlay.textAlign) {
-        0 -> android.text.Layout.Alignment.ALIGN_NORMAL
-        2 -> android.text.Layout.Alignment.ALIGN_OPPOSITE
-        else -> android.text.Layout.Alignment.ALIGN_CENTER
-    }
-    val lineSpacingMultiplier = overlay.lineSpacing.coerceIn(0.55f, 2.80f)
-    val maxTextW = 1920
-    val effectiveWrap = overrideWrapWidth ?: overlay.wrapWidth
-    val desiredWidth = kotlin.math.ceil(android.text.StaticLayout.getDesiredWidth(rawText, textPaint)).toInt().coerceAtLeast(1)
-    val textW = if (effectiveWrap > 0.0f) {
-        (effectiveWrap * 1080f).roundToInt().coerceIn(96, maxTextW)
-    } else {
-        desiredWidth.coerceIn(1, maxTextW)
-    }
-    val layout = android.text.StaticLayout.Builder.obtain(rawText, 0, rawText.length, textPaint, textW)
-        .setAlignment(alignment)
-        .setLineSpacing(0f, lineSpacingMultiplier)
-        .setIncludePad(true)
-        .build()
-    val hasLabel = overlay.labelAlpha > 0.01f || overlay.bgStyle in 1..2
-    val strokeOffset = ((overlay.borderAlpha.coerceIn(0f, 1f) * 20f).toInt() + 16)
-    val padX = if (hasLabel) 64f else (40f + strokeOffset).toFloat()
-    val padY = if (hasLabel) 44f else (28f + strokeOffset).toFloat()
-    val bmpW = textW + padX * 2f
-    val bmpH = layout.height.toFloat() + padY * 2f
-    val rawQuadW = (bmpW / 1080f) * scale * previewW
-    val rawQuadH = (bmpH / 1080f) * scale * previewW
-    return Pair(rawQuadW, rawQuadH)
-}
-
 private fun hitTestPreviewOverlays(
     tapPos: Offset,
     outerW: Float,
@@ -244,37 +189,38 @@ private fun hitTestPreviewOverlays(
     ).reversed()
 
     for (item in activeItems) {
-        val (rawQuadW, rawQuadH) = if (item.type == com.flowcut.app.engine.LayerType.TEXT) {
-            measureTextOverlayQuad(item, previewW, item.transform.scale.coerceIn(0.01f, 10.0f))
-        } else {
-            val aTex: Float = when (item.type) {
-                com.flowcut.app.engine.LayerType.STICKER -> 1.0f
-                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
-                    val tw = if (item.intrinsicWidth > 0) item.intrinsicWidth.toFloat() else 1f
-                    val th = if (item.intrinsicHeight > 0) item.intrinsicHeight.toFloat() else 1f
-                    val cropW = (item.cropRight - item.cropLeft).coerceIn(0.01f, 1.0f)
-                    val cropH = (item.cropBottom - item.cropTop).coerceIn(0.01f, 1.0f)
-                    ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
-                }
-                else -> 1.0f
+        val displayText = if (item.text.isBlank()) "Your Text" else item.text
+        val aTex: Float = when (item.type) {
+            com.flowcut.app.engine.LayerType.STICKER -> 1.0f
+            com.flowcut.app.engine.LayerType.TEXT -> {
+                val lines = displayText.split("\n")
+                val maxLen = lines.maxOfOrNull { it.length } ?: 6
+                val lineCount = lines.size.coerceAtLeast(1)
+                (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
             }
-            val aScreen = canvasAspect
-            var hwInit = 0.6f
-            var hhInit = hwInit / aTex
-            if (hhInit * aScreen > 0.6f) {
-                val factor = 0.6f / (hhInit * aScreen)
-                hwInit *= factor
-                hhInit *= factor
+            com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
+                val tw = if (item.intrinsicWidth > 0) item.intrinsicWidth.toFloat() else 1f
+                val th = if (item.intrinsicHeight > 0) item.intrinsicHeight.toFloat() else 1f
+                val cropW = (item.cropRight - item.cropLeft).coerceIn(0.01f, 1.0f)
+                val cropH = (item.cropBottom - item.cropTop).coerceIn(0.01f, 1.0f)
+                ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
             }
-            Pair(
-                hwInit * item.transform.scale.coerceIn(0.01f, 10.0f) * previewW,
-                hhInit * item.transform.scale.coerceIn(0.01f, 10.0f) * previewW
-            )
+            else -> 1.0f
         }
+        val aScreen = canvasAspect
+        var hwInit = 0.6f
+        var hhInit = hwInit / aTex
+        if (hhInit * aScreen > 0.6f) {
+            val factor = 0.6f / (hhInit * aScreen)
+            hwInit *= factor
+            hhInit *= factor
+        }
+        val rawQuadW = hwInit * item.transform.scale.coerceIn(0.01f, 10.0f) * previewW
+        val rawQuadH = hhInit * item.transform.scale.coerceIn(0.01f, 10.0f) * previewW
         val isMedia = item.type == com.flowcut.app.engine.LayerType.IMAGE || item.type == com.flowcut.app.engine.LayerType.VIDEO
-        val padPx = if (isMedia || item.type == com.flowcut.app.engine.LayerType.TEXT) 0f else 24f
-        val boxW = if (isMedia || item.type == com.flowcut.app.engine.LayerType.TEXT) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(120f)
-        val boxH = if (isMedia || item.type == com.flowcut.app.engine.LayerType.TEXT) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(80f)
+        val padPx = if (isMedia) 0f else 24f
+        val boxW = if (isMedia) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(120f)
+        val boxH = if (isMedia) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(80f)
 
         val cx_outer = previewLeft + previewW / 2f + item.transform.panX * previewW
         val cy_outer = previewH / 2f - item.transform.panY * previewH
@@ -739,7 +685,6 @@ fun EditorScreen(
     var isTextAnimationSheetVisible by remember { mutableStateOf(false) }
     var isTextAdjustSheetVisible by remember { mutableStateOf(false) }
     var activeTextOverlayId by remember { mutableStateOf<String?>(null) }
-    var liveTextWrapWidth by remember { mutableStateOf<Float?>(null) }
     var overlappingConflictItemIds by remember { mutableStateOf<List<String>?>(null) }
     var customFontPaths by remember { mutableStateOf<List<String>>(emptyList()) }
     var isAudioSoundsSheetVisible by remember { mutableStateOf(false) }
@@ -1490,46 +1435,41 @@ fun EditorScreen(
 
                                             // Calculate aspect-correct overlay dimensions and center in outer gesture coordinates
                                             val displayText = if (curOverlay.text.isBlank()) "Your Text" else curOverlay.text
-                                            val (rawQuadW, rawQuadH) = if (curOverlay.type == com.flowcut.app.engine.LayerType.TEXT) {
-                                                measureTextOverlayQuad(curOverlay, previewW, initialTransform.scale.coerceIn(0.01f, 10.0f))
-                                            } else {
-                                                val aTex: Float = when (curOverlay.type) {
-                                                    com.flowcut.app.engine.LayerType.STICKER -> 1.0f
-                                                    com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
-                                                        val tw = if (curOverlay.intrinsicWidth > 0) curOverlay.intrinsicWidth.toFloat() else 1f
-                                                        val th = if (curOverlay.intrinsicHeight > 0) curOverlay.intrinsicHeight.toFloat() else 1f
-                                                        val cropW = (curOverlay.cropRight - curOverlay.cropLeft).coerceIn(0.01f, 1.0f)
-                                                        val cropH = (curOverlay.cropBottom - curOverlay.cropTop).coerceIn(0.01f, 1.0f)
-                                                        ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
-                                                    }
-                                                    else -> 1.0f
+                                            val aTex: Float = when (curOverlay.type) {
+                                                com.flowcut.app.engine.LayerType.STICKER -> 1.0f
+                                                com.flowcut.app.engine.LayerType.TEXT -> {
+                                                    val lines = displayText.split("\n")
+                                                    val maxLen = lines.maxOfOrNull { it.length } ?: 6
+                                                    val lineCount = lines.size.coerceAtLeast(1)
+                                                    (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
                                                 }
-                                                val aScreen = curAspect
-                                                var hwInit = 0.6f
-                                                var hhInit = hwInit / aTex
-                                                if (hhInit * aScreen > 0.6f) {
-                                                    val factor = 0.6f / (hhInit * aScreen)
-                                                    hwInit *= factor
-                                                    hhInit *= factor
+                                                com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
+                                                    val tw = if (curOverlay.intrinsicWidth > 0) curOverlay.intrinsicWidth.toFloat() else 1f
+                                                    val th = if (curOverlay.intrinsicHeight > 0) curOverlay.intrinsicHeight.toFloat() else 1f
+                                                    val cropW = (curOverlay.cropRight - curOverlay.cropLeft).coerceIn(0.01f, 1.0f)
+                                                    val cropH = (curOverlay.cropBottom - curOverlay.cropTop).coerceIn(0.01f, 1.0f)
+                                                    ((tw * cropW) / (th * cropH)).coerceIn(0.01f, 100f)
                                                 }
-                                                Pair(
-                                                    hwInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW,
-                                                    hhInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
-                                                )
-                                            }
-                                            val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
-                                            val padPx = if (isMedia || activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) 0f else 12.dp.toPx()
-                                            val minWPx = 48.dp.toPx()
-                                            val minHPx = 36.dp.toPx()
-                                            val initBoxW = if (isMedia || activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
-                                            val initBoxH = if (isMedia || activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
-                                            val handleBoxW = initBoxW.coerceAtLeast(48.dp.toPx())
-                                            val handleBoxH = initBoxH.coerceAtLeast(48.dp.toPx())
-                                            var rawWrapWidth = if (curOverlay.wrapWidth > 0f) curOverlay.wrapWidth else {
-                                                (rawQuadW / (previewW * initialTransform.scale.coerceIn(0.01f, 10.0f))).coerceIn(0.15f, 1.4f)
+                                                else -> 1.0f
                                             }
                                             val aScreen = curAspect
-                                            val aTex = if (rawQuadH > 0f) rawQuadW / rawQuadH else 1.0f
+                                            var hwInit = 0.6f
+                                            var hhInit = hwInit / aTex
+                                            if (hhInit * aScreen > 0.6f) {
+                                                val factor = 0.6f / (hhInit * aScreen)
+                                                hwInit *= factor
+                                                hhInit *= factor
+                                            }
+                                            val rawQuadW = hwInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
+                                            val rawQuadH = hhInit * initialTransform.scale.coerceIn(0.01f, 10.0f) * previewW
+                                            val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
+                                            val padPx = if (isMedia) 0f else 12.dp.toPx()
+                                            val minWPx = 96.dp.toPx()
+                                            val minHPx = 64.dp.toPx()
+                                            val initBoxW = if (isMedia) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
+                                            val initBoxH = if (isMedia) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val handleBoxW = initBoxW.coerceAtLeast(48.dp.toPx())
+                                            val handleBoxH = initBoxH.coerceAtLeast(48.dp.toPx())
                                             val cx_outer = previewLeft + previewW / 2f + initialTransform.panX * previewW
                                             val cy_outer = previewH / 2f - initialTransform.panY * previewH
 
@@ -1614,42 +1554,19 @@ fun EditorScreen(
                                                                 rawRotationDeg += angleDelta
                                                             }
                                                         }
-                                                        5 -> { // RIGHT_MID_HANDLE: text box width wrapping or 1-finger uniform scaling
+                                                        5 -> { // RIGHT_MID_SCALE: 1-finger uniform scaling
                                                             if (totalMovedPx > 4f) {
                                                                 isDragOrTransform = true
                                                                 p.consume()
 
-                                                                if (activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) {
-                                                                    val rad = Math.toRadians(initialTransform.rotationDeg.toDouble())
-                                                                    val cosR = kotlin.math.cos(rad).toFloat()
-                                                                    val sinR = kotlin.math.sin(rad).toFloat()
-                                                                    val localDx = dx * cosR + dy * sinR
-                                                                    val scaleVal = initialTransform.scale.coerceIn(0.01f, 10.0f)
-                                                                    val dWrap = (2f * localDx) / (previewW * scaleVal)
-                                                                    rawWrapWidth = (rawWrapWidth + dWrap).coerceIn(0.15f, 1.4f)
-                                                                    liveTextWrapWidth = rawWrapWidth
-
-                                                                    val curPlan = com.flowcut.app.engine.PreviewRenderer.currentLayerPlan
-                                                                    if (curPlan.items.isNotEmpty()) {
-                                                                        val updatedItems = curPlan.items.map {
-                                                                            if (it.id == activeOverlayId) it.copy(wrapWidth = rawWrapWidth) else it
-                                                                        }
-                                                                        com.flowcut.app.engine.PreviewRenderer.setLayerPlan(
-                                                                            com.flowcut.app.engine.CompiledLayerPlan.compile(updatedItems)
-                                                                        )
-                                                                    }
-                                                                    previewRenderer.requestRender()
-                                                                    frameDriver.wake()
-                                                                } else {
-                                                                    val prevPos = p.previousPosition
-                                                                    val currPos = p.position
-                                                                    val centerOffset = Offset(cx_outer, cy_outer)
-                                                                    val prevDist = (prevPos - centerOffset).getDistance()
-                                                                    val currDist = (currPos - centerOffset).getDistance()
-                                                                    if (prevDist > 1f && currDist > 1f) {
-                                                                        val scaleRatio = currDist / prevDist
-                                                                        rawScale = (rawScale * scaleRatio).coerceIn(0.2f, 8.0f)
-                                                                    }
+                                                                val prevPos = p.previousPosition
+                                                                val currPos = p.position
+                                                                val centerOffset = Offset(cx_outer, cy_outer)
+                                                                val prevDist = (prevPos - centerOffset).getDistance()
+                                                                val currDist = (currPos - centerOffset).getDistance()
+                                                                if (prevDist > 1f && currDist > 1f) {
+                                                                    val scaleRatio = currDist / prevDist
+                                                                    rawScale = (rawScale * scaleRatio).coerceIn(0.2f, 8.0f)
                                                                 }
                                                             }
                                                         }
@@ -1837,12 +1754,7 @@ fun EditorScreen(
 
                                             // Gesture completed (all fingers up)
                                             if (isDragOrTransform) {
-                                                if (activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT && activeHandle == 5) {
-                                                    val updatedOverlay = activeOverlay.copy(wrapWidth = rawWrapWidth)
-                                                    curVm?.updateLayerItem(updatedOverlay)
-                                                    previewRenderer.requestRender()
-                                                    frameDriver.wake()
-                                                } else if (activeHandle == 0 || activeHandle == 4 || activeHandle == 5) {
+                                                if (activeHandle == 0 || activeHandle == 4 || activeHandle == 5) {
                                                     curVm?.commitOverlayTransform(activeOverlayId, currentTransform, currentPlayheadUs)
                                                     previewRenderer.requestRender()
                                                     frameDriver.wake()
@@ -1924,7 +1836,6 @@ fun EditorScreen(
                                                     }
                                                 }
                                             }
-                                            liveTextWrapWidth = null
                                         }
                                     }
                             ) {
@@ -1951,13 +1862,15 @@ fun EditorScreen(
                                         } else {
                                             selOverlay.transform
                                         }
-                                        val (rawQuadW, rawQuadH) = if (selOverlay.type == com.flowcut.app.engine.LayerType.TEXT) {
-                                            val wrapOverride = if (selOverlay.id == activeOverlayId) liveTextWrapWidth else null
-                                            measureTextOverlayQuad(selOverlay, size.width, effTransform.scale.coerceIn(0.01f, 10.0f), wrapOverride)
-                                        } else {
-                                            val displayText = if (selOverlay.text.isBlank()) "Your Text" else selOverlay.text
-                                            val aTex: Float = when (selOverlay.type) {
+                                        val displayText = if (selOverlay.text.isBlank()) "Your Text" else selOverlay.text
+                                        val aTex: Float = when (selOverlay.type) {
                                                 com.flowcut.app.engine.LayerType.STICKER -> 1.0f
+                                                com.flowcut.app.engine.LayerType.TEXT -> {
+                                                    val lines = displayText.split("\n")
+                                                    val maxLen = lines.maxOfOrNull { it.length } ?: 6
+                                                    val lineCount = lines.size.coerceAtLeast(1)
+                                                    (maxLen.toFloat() * 0.45f / lineCount.toFloat()).coerceIn(0.8f, 4.0f)
+                                                }
                                                 com.flowcut.app.engine.LayerType.IMAGE, com.flowcut.app.engine.LayerType.VIDEO -> {
                                                     val tw = if (activeOverlay.intrinsicWidth > 0) activeOverlay.intrinsicWidth.toFloat() else 1f
                                                     val th = if (activeOverlay.intrinsicHeight > 0) activeOverlay.intrinsicHeight.toFloat() else 1f
@@ -1978,17 +1891,17 @@ fun EditorScreen(
                                             }
 
                                             val scale = effTransform.scale.coerceIn(0.01f, 10.0f)
-                                            Pair(hw * scale * size.width, hh * scale * size.width)
-                                        }
-                                        val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
-                                        val padPx = if (isMedia || activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) 0f else 12.dp.toPx()
-                                        val minWPx = 48.dp.toPx()
-                                        val minHPx = 36.dp.toPx()
-                                        val boxW = if (isMedia || activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
-                                        val boxH = if (isMedia || activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
-                                        val handleSeparationMin = 48.dp.toPx()
-                                        val handleBoxW = boxW.coerceAtLeast(handleSeparationMin)
-                                        val handleBoxH = boxH.coerceAtLeast(handleSeparationMin)
+                                            val rawQuadW = hw * scale * size.width
+                                            val rawQuadH = hh * scale * size.width
+                                            val isMedia = activeOverlay.type == com.flowcut.app.engine.LayerType.IMAGE || activeOverlay.type == com.flowcut.app.engine.LayerType.VIDEO
+                                            val padPx = if (isMedia) 0f else 12.dp.toPx()
+                                            val minWPx = 96.dp.toPx()
+                                            val minHPx = 64.dp.toPx()
+                                            val boxW = if (isMedia) rawQuadW else (rawQuadW + 2f * padPx).coerceAtLeast(minWPx)
+                                            val boxH = if (isMedia) rawQuadH else (rawQuadH + 2f * padPx).coerceAtLeast(minHPx)
+                                            val handleSeparationMin = 48.dp.toPx()
+                                            val handleBoxW = boxW.coerceAtLeast(handleSeparationMin)
+                                            val handleBoxH = boxH.coerceAtLeast(handleSeparationMin)
 
                                             val cx = size.width / 2f + effTransform.panX * size.width
                                             val cy = size.height / 2f - effTransform.panY * size.height
@@ -3579,10 +3492,6 @@ private fun EditorTimelineCanvasHost(
                         if (currentT != null && currentT.type != TransitionType.NONE) {
                             onApplyTransition(currentT.type)
                         }
-                    }
-                    is TimelineSelection.ClipSelected -> {
-                        onSelectClip(sel.index)
-                        onOpenClipSortSheet()
                     }
                     else -> {}
                 }
