@@ -164,6 +164,8 @@ data class FreezeResult(
 )
 
 enum class OverlayEndAlignment {
+    CLIP_START,
+    VIDEO_START,
     CLIP_END,
     VIDEO_END
 }
@@ -2239,7 +2241,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         updateProject(_uiState.value.project, recordUndo = false)
     }
 
-    fun extendOverlayEndTime(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
+    fun alignOverlayEdge(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return false
         val item = _layerItems[idx]
@@ -2247,7 +2249,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (tl.n == 0) return false
 
         val totalDurationUs = msToUs(tl.totalMs)
-        val targetEndUs = when (alignment) {
+        val (targetStartUs, targetEndUs) = when (alignment) {
+            OverlayEndAlignment.CLIP_START -> {
+                val targetTimeUs = if (playheadUs in item.startUs..item.endUs) playheadUs else item.startUs
+                var clipIdx = (0 until tl.n).firstOrNull { i ->
+                    targetTimeUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
+                } ?: tl.lastStartAtOrBefore(usToMs(targetTimeUs)).coerceIn(0, maxOf(0, tl.n - 1))
+
+                var clipStartUs = msToUs(tl.startMs[clipIdx])
+                if (clipStartUs >= item.endUs && clipIdx > 0) {
+                    clipIdx--
+                    clipStartUs = msToUs(tl.startMs[clipIdx])
+                }
+                val newStart = maxOf(0L, clipStartUs).coerceAtMost(item.endUs - OverlayItem.MIN_DURATION_US)
+                Pair(newStart, item.endUs)
+            }
+            OverlayEndAlignment.VIDEO_START -> {
+                val newStart = 0L.coerceAtMost(item.endUs - OverlayItem.MIN_DURATION_US)
+                Pair(newStart, item.endUs)
+            }
             OverlayEndAlignment.CLIP_END -> {
                 val targetTimeUs = if (playheadUs in item.startUs..item.endUs) playheadUs else item.startUs
                 var clipIdx = (0 until tl.n).firstOrNull { i ->
@@ -2259,26 +2279,38 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     clipIdx++
                     clipEndUs = msToUs(tl.endMs[clipIdx])
                 }
-                minOf(clipEndUs, totalDurationUs).coerceAtLeast(item.startUs + OverlayItem.MIN_DURATION_US)
+                val newEnd = minOf(clipEndUs, totalDurationUs).coerceAtLeast(item.startUs + OverlayItem.MIN_DURATION_US)
+                Pair(item.startUs, newEnd)
             }
             OverlayEndAlignment.VIDEO_END -> {
-                maxOf(totalDurationUs, item.startUs + OverlayItem.MIN_DURATION_US)
+                val newEnd = maxOf(totalDurationUs, item.startUs + OverlayItem.MIN_DURATION_US)
+                Pair(item.startUs, newEnd)
             }
         }
 
-        val (_, clampedEndUs) = clampItemTrimBoundsOnRow(
+        val (clampedStartUs, clampedEndUs) = clampItemTrimBoundsOnRow(
             items = _layerItems,
             itemId = itemId,
-            candidateStartUs = item.startUs,
+            candidateStartUs = targetStartUs,
             candidateEndUs = targetEndUs,
             totalProjectDurationUs = totalDurationUs
         )
 
-        if (clampedEndUs == item.endUs) return false
+        if (clampedStartUs == item.startUs && clampedEndUs == item.endUs) return false
 
         pushUndoState()
         val topZ = getTopZIndex()
-        _layerItems[idx] = item.copy(endUs = clampedEndUs, zIndex = topZ)
+        val deltaStartUs = clampedStartUs - item.startUs
+        val newSourceInUs = if (item.type == LayerType.AUDIO || item.type == LayerType.VIDEO) {
+            (item.sourceInUs + (deltaStartUs.toDouble() * item.speed.toDouble()).toLong()).coerceAtLeast(0L)
+        } else item.sourceInUs
+
+        _layerItems[idx] = item.copy(
+            startUs = clampedStartUs,
+            endUs = clampedEndUs,
+            sourceInUs = newSourceInUs,
+            zIndex = topZ
+        )
         syncLayerPlan()
         _uiState.update {
             it.copy(
@@ -2289,6 +2321,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         updateProject(_uiState.value.project, recordUndo = false)
         return true
+    }
+
+    fun extendOverlayEndTime(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
+        return alignOverlayEdge(itemId, playheadUs, alignment)
     }
 
     fun liveOverlayMove(itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) {
