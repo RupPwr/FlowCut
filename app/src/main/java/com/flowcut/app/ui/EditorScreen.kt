@@ -3548,8 +3548,8 @@ private fun EditorTimelineCanvasHost(
             val targetId = trimMenuTargetOverlayId!!
             val anchor = trimMenuTapOffset!!
             val localDensity = LocalDensity.current
-            val menuW = 148.dp
-            val menuH = if (!trimMenuIsRightHandle) 128.dp else 88.dp
+            val menuW = 140.dp
+            val menuH = 88.dp
             val menuWPx = with(localDensity) { menuW.toPx() }
             val menuHPx = with(localDensity) { menuH.toPx() }
             val marginPx = with(localDensity) { 8.dp.toPx() }
@@ -3581,8 +3581,8 @@ private fun EditorTimelineCanvasHost(
                         modifier = Modifier.padding(vertical = 4.dp)
                     ) {
                         if (!trimMenuIsRightHandle) {
-                            // Left Handle (<): Clip Start, Clip End & Video Start
-                            // 1. Clip Start
+                            // Left Handle (<): Clip End & Video End (anchored to right edge)
+                            // 1. Clip End
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -3591,7 +3591,7 @@ private fun EditorTimelineCanvasHost(
                                         val success = resolvedViewModel?.alignOverlayEdge(
                                             itemId = targetId,
                                             playheadUs = playheadUs,
-                                            alignment = OverlayEndAlignment.CLIP_START
+                                            alignment = OverlayEndAlignment.LEFT_CLIP_END
                                         ) ?: false
                                         if (success) {
                                             if (USE_NEW_CORE) {
@@ -3610,52 +3610,6 @@ private fun EditorTimelineCanvasHost(
                             ) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Clip Start",
-                                    tint = Color(0xFFFF2D55),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = "Clip Start",
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 8.dp),
-                                thickness = 0.5.dp,
-                                color = Color(0xFF2E2E38)
-                            )
-
-                            // 2. Clip End
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val playheadUs = playbackController.playhead.timeUs
-                                        val success = resolvedViewModel?.alignOverlayEdge(
-                                            itemId = targetId,
-                                            playheadUs = playheadUs,
-                                            alignment = OverlayEndAlignment.LEFT_TO_CLIP_END
-                                        ) ?: false
-                                        if (success) {
-                                            if (USE_NEW_CORE) {
-                                                resolvedViewModel?.let { vm ->
-                                                    snapshotHolder.current = vm.getSnapshot()
-                                                }
-                                            }
-                                            previewRenderer.requestRender()
-                                            frameDriver.wake()
-                                        }
-                                        showOverlayTrimMenu = false
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                     contentDescription = "Clip End",
                                     tint = Color(0xFFFF2D55),
                                     modifier = Modifier.size(16.dp)
@@ -3674,7 +3628,7 @@ private fun EditorTimelineCanvasHost(
                                 color = Color(0xFF2E2E38)
                             )
 
-                            // 3. Video Start
+                            // 2. Video End
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -3683,7 +3637,7 @@ private fun EditorTimelineCanvasHost(
                                         val success = resolvedViewModel?.alignOverlayEdge(
                                             itemId = targetId,
                                             playheadUs = playheadUs,
-                                            alignment = OverlayEndAlignment.VIDEO_START
+                                            alignment = OverlayEndAlignment.LEFT_VIDEO_END
                                         ) ?: false
                                         if (success) {
                                             if (USE_NEW_CORE) {
@@ -3702,19 +3656,19 @@ private fun EditorTimelineCanvasHost(
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.FirstPage,
-                                    contentDescription = "Video Start",
+                                    contentDescription = "Video End",
                                     tint = Color(0xFFFF2D55),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = "Video Start",
+                                    text = "Video End",
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium
                                 )
                             }
                         } else {
-                            // Right Handle (>): Clip End & Video End
+                            // Right Handle (>): Clip End & Video End (anchored to left edge)
                             // 1. Clip End
                             Row(
                                 modifier = Modifier
@@ -3724,7 +3678,7 @@ private fun EditorTimelineCanvasHost(
                                         val success = resolvedViewModel?.alignOverlayEdge(
                                             itemId = targetId,
                                             playheadUs = playheadUs,
-                                            alignment = OverlayEndAlignment.CLIP_END
+                                            alignment = OverlayEndAlignment.RIGHT_CLIP_END
                                         ) ?: false
                                         if (success) {
                                             if (USE_NEW_CORE) {
@@ -3770,7 +3724,7 @@ private fun EditorTimelineCanvasHost(
                                         val success = resolvedViewModel?.alignOverlayEdge(
                                             itemId = targetId,
                                             playheadUs = playheadUs,
-                                            alignment = OverlayEndAlignment.VIDEO_END
+                                            alignment = OverlayEndAlignment.RIGHT_VIDEO_END
                                         ) ?: false
                                         if (success) {
                                             if (USE_NEW_CORE) {

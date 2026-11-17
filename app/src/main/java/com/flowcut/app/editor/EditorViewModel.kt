@@ -164,11 +164,10 @@ data class FreezeResult(
 )
 
 enum class OverlayEndAlignment {
-    CLIP_START,
-    LEFT_TO_CLIP_END,
-    VIDEO_START,
-    CLIP_END,
-    VIDEO_END
+    LEFT_CLIP_END,
+    LEFT_VIDEO_END,
+    RIGHT_CLIP_END,
+    RIGHT_VIDEO_END
 }
 
 val MAX_TIMELINE_DURATION_US: Long = msToUs(MAX_TOTAL_MS)
@@ -2250,53 +2249,37 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (tl.n == 0) return false
 
         val totalDurationUs = msToUs(tl.totalMs)
+
+        fun findClipIndexAtUs(posUs: Long): Int {
+            return (0 until tl.n).firstOrNull { i ->
+                posUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
+            } ?: tl.lastStartAtOrBefore(usToMs(posUs)).coerceIn(0, maxOf(0, tl.n - 1))
+        }
+
         val (targetStartUs, targetEndUs) = when (alignment) {
-            OverlayEndAlignment.CLIP_START -> {
-                val leftTargetTimeUs = item.startUs
-                var leftClipIdx = (0 until tl.n).firstOrNull { i ->
-                    leftTargetTimeUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
-                } ?: tl.lastStartAtOrBefore(usToMs(leftTargetTimeUs)).coerceIn(0, maxOf(0, tl.n - 1))
-
-                val currentClipStartUs = msToUs(tl.startMs[leftClipIdx])
-                val effectiveClipStartUs = if (kotlin.math.abs(item.startUs - currentClipStartUs) <= 15_000L && leftClipIdx > 0) {
-                    msToUs(tl.startMs[leftClipIdx - 1])
-                } else {
-                    currentClipStartUs
-                }
-                val newStart = maxOf(0L, effectiveClipStartUs).coerceAtMost(item.endUs - OverlayItem.MIN_DURATION_US)
-                Pair(newStart, item.endUs)
+            OverlayEndAlignment.RIGHT_CLIP_END -> {
+                val leftAnchorClipIdx = findClipIndexAtUs(item.startUs)
+                val targetEnd = msToUs(tl.endMs[leftAnchorClipIdx]).coerceIn(
+                    item.startUs + OverlayItem.MIN_DURATION_US,
+                    totalDurationUs
+                )
+                Pair(item.startUs, targetEnd)
             }
-            OverlayEndAlignment.LEFT_TO_CLIP_END -> {
-                val leftTargetTimeUs = item.startUs
-                val leftClipIdx = (0 until tl.n).firstOrNull { i ->
-                    leftTargetTimeUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
-                } ?: tl.lastStartAtOrBefore(usToMs(leftTargetTimeUs)).coerceIn(0, maxOf(0, tl.n - 1))
-
-                val clipEndUs = msToUs(tl.endMs[leftClipIdx])
-                val newStart = maxOf(0L, clipEndUs).coerceAtMost(item.endUs - OverlayItem.MIN_DURATION_US)
-                Pair(newStart, item.endUs)
+            OverlayEndAlignment.RIGHT_VIDEO_END -> {
+                val targetEnd = maxOf(totalDurationUs, item.startUs + OverlayItem.MIN_DURATION_US)
+                Pair(item.startUs, targetEnd)
             }
-            OverlayEndAlignment.VIDEO_START -> {
-                val newStart = 0L.coerceAtMost(item.endUs - OverlayItem.MIN_DURATION_US)
-                Pair(newStart, item.endUs)
+            OverlayEndAlignment.LEFT_CLIP_END -> {
+                val rightAnchorUs = (item.endUs - 1L).coerceAtLeast(item.startUs)
+                val rightAnchorClipIdx = findClipIndexAtUs(rightAnchorUs)
+                val targetStart = msToUs(tl.startMs[rightAnchorClipIdx]).coerceIn(
+                    0L,
+                    (item.endUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(0L)
+                )
+                Pair(targetStart, item.endUs)
             }
-            OverlayEndAlignment.CLIP_END -> {
-                val rightTargetTimeUs = (item.endUs - 10_000L).coerceAtLeast(item.startUs)
-                var rightClipIdx = (0 until tl.n).firstOrNull { i ->
-                    rightTargetTimeUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
-                } ?: tl.lastStartAtOrBefore(usToMs(rightTargetTimeUs)).coerceIn(0, maxOf(0, tl.n - 1))
-
-                val currentClipEndUs = msToUs(tl.endMs[rightClipIdx])
-                if (kotlin.math.abs(item.endUs - currentClipEndUs) <= 15_000L && rightClipIdx + 1 < tl.n) {
-                    rightClipIdx++
-                }
-                val targetClipEndUs = msToUs(tl.endMs[rightClipIdx])
-                val newEnd = minOf(targetClipEndUs, totalDurationUs).coerceAtLeast(item.startUs + OverlayItem.MIN_DURATION_US)
-                Pair(item.startUs, newEnd)
-            }
-            OverlayEndAlignment.VIDEO_END -> {
-                val newEnd = maxOf(totalDurationUs, item.startUs + OverlayItem.MIN_DURATION_US)
-                Pair(item.startUs, newEnd)
+            OverlayEndAlignment.LEFT_VIDEO_END -> {
+                Pair(0L, item.endUs)
             }
         }
 
