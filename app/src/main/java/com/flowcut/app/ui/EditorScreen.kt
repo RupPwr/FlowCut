@@ -3549,7 +3549,7 @@ private fun EditorTimelineCanvasHost(
             val anchor = trimMenuTapOffset!!
             val localDensity = LocalDensity.current
             val menuW = 148.dp
-            val menuH = 88.dp
+            val menuH = if (!trimMenuIsRightHandle) 128.dp else 88.dp
             val menuWPx = with(localDensity) { menuW.toPx() }
             val menuHPx = with(localDensity) { menuH.toPx() }
             val marginPx = with(localDensity) { 8.dp.toPx() }
@@ -3581,7 +3581,7 @@ private fun EditorTimelineCanvasHost(
                         modifier = Modifier.padding(vertical = 4.dp)
                     ) {
                         if (!trimMenuIsRightHandle) {
-                            // Left Handle (<): Clip Start & Video Start
+                            // Left Handle (<): Clip Start, Clip End & Video Start
                             // 1. Clip Start
                             Row(
                                 modifier = Modifier
@@ -3628,7 +3628,53 @@ private fun EditorTimelineCanvasHost(
                                 color = Color(0xFF2E2E38)
                             )
 
-                            // 2. Video Start
+                            // 2. Clip End
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val playheadUs = playbackController.playhead.timeUs
+                                        val success = resolvedViewModel?.alignOverlayEdge(
+                                            itemId = targetId,
+                                            playheadUs = playheadUs,
+                                            alignment = OverlayEndAlignment.LEFT_TO_CLIP_END
+                                        ) ?: false
+                                        if (success) {
+                                            if (USE_NEW_CORE) {
+                                                resolvedViewModel?.let { vm ->
+                                                    snapshotHolder.current = vm.getSnapshot()
+                                                }
+                                            }
+                                            previewRenderer.requestRender()
+                                            frameDriver.wake()
+                                        }
+                                        showOverlayTrimMenu = false
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "Clip End",
+                                    tint = Color(0xFFFF2D55),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Clip End",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 8.dp),
+                                thickness = 0.5.dp,
+                                color = Color(0xFF2E2E38)
+                            )
+
+                            // 3. Video Start
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
