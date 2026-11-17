@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -54,6 +55,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.LastPage
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -65,6 +68,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -139,6 +143,7 @@ import com.flowcut.app.core.time.msToUs
 import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.editor.OverlayEndAlignment
 import com.flowcut.app.engine.ClipBackground
 import com.flowcut.app.engine.ClipColorAdjust
 import com.flowcut.app.engine.FrameDriver
@@ -708,6 +713,9 @@ fun EditorScreen(
     var isOverlayAdjustSheetVisible by remember { mutableStateOf(false) }
     var isAutoCaptionsSheetVisible by remember { mutableStateOf(false) }
     var isAspectRatioSheetVisible by remember { mutableStateOf(false) }
+    var showPinLayeringMenu by remember { mutableStateOf(false) }
+    var pinLayeringTargetOverlayId by remember { mutableStateOf<String?>(null) }
+    var pinLayeringMenuOffset by remember { mutableStateOf<Offset?>(null) }
 
     LaunchedEffect(Unit) {
         val fontsDir = File(context.filesDir, "fonts")
@@ -998,6 +1006,10 @@ fun EditorScreen(
     val vmUiState = resolvedViewModel?.uiState?.collectAsState()?.value
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
     val currentFocus = vmUiState?.focusMode ?: com.flowcut.app.ui.timeline.TimelineFocusState.S0_NONE
+
+    LaunchedEffect(vmUiState?.selectedOverlayId) {
+        showPinLayeringMenu = false
+    }
 
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var isWaitingForFrameState by remember { mutableStateOf(previewRenderer.isWaitingForFrame) }
@@ -1787,7 +1799,18 @@ fun EditorScreen(
                                                             previewRenderer.requestRender()
                                                             frameDriver.wake()
                                                         }
+                                                        5 -> { // Right Midpoint: Pin Layering Handle Tap (Text only)
+                                                            if (activeOverlay.type == com.flowcut.app.engine.LayerType.TEXT) {
+                                                                try {
+                                                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                } catch (_: Throwable) {}
+                                                                pinLayeringTargetOverlayId = activeOverlayId
+                                                                pinLayeringMenuOffset = rmPos
+                                                                showPinLayeringMenu = true
+                                                            }
+                                                        }
                                                         else -> { // Double-tap on Body resets transform
+                                                            showPinLayeringMenu = false
                                                             val tapDist = (downPos - lastTapPosition).getDistance()
                                                             if ((upTime - lastTapTimeMs) < 350L && tapDist < 60f) {
                                                                 val resetTransform = currentTransform.copy(
@@ -2156,6 +2179,147 @@ fun EditorScreen(
                             }
                         }
                     }
+                    }
+
+                    // Compact Frosted-Dark Popup Menu for Pin Layering Handle (Clip End & Video End)
+                    if (showPinLayeringMenu && pinLayeringTargetOverlayId != null && vmUiState?.selectedOverlayId == pinLayeringTargetOverlayId) {
+                        val targetId = pinLayeringTargetOverlayId!!
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .pointerInput(Unit) {
+                                    detectTapGestures {
+                                        showPinLayeringMenu = false
+                                    }
+                                }
+                        ) {
+                            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                                val localDensity = LocalDensity.current
+                                val menuW = 140.dp
+                                val menuH = 88.dp
+                                val menuWPx = with(localDensity) { menuW.toPx() }
+                                val menuHPx = with(localDensity) { menuH.toPx() }
+                                val maxWPx = with(localDensity) { maxWidth.toPx() }
+                                val maxHPx = with(localDensity) { maxHeight.toPx() }
+                                val marginPx = with(localDensity) { 8.dp.toPx() }
+
+                                val anchor = pinLayeringMenuOffset ?: Offset(maxWPx / 2f, maxHPx / 2f)
+                                val preferredX = if (anchor.x + menuWPx + marginPx > maxWPx) {
+                                    anchor.x - menuWPx - with(localDensity) { 8.dp.toPx() }
+                                } else {
+                                    anchor.x + with(localDensity) { 8.dp.toPx() }
+                                }
+                                val clampedX = preferredX.coerceIn(marginPx, (maxWPx - menuWPx - marginPx).coerceAtLeast(marginPx))
+                                val clampedY = (anchor.y - menuHPx / 2f)
+                                    .coerceIn(marginPx, (maxHPx - menuHPx - marginPx).coerceAtLeast(marginPx))
+
+                                val offsetX = with(localDensity) { clampedX.toDp() }
+                                val offsetY = with(localDensity) { clampedY.toDp() }
+
+                                Surface(
+                                    modifier = Modifier
+                                        .offset(x = offsetX, y = offsetY)
+                                        .width(menuW)
+                                        .pointerInput(Unit) {
+                                            detectTapGestures { /* consume tap inside menu */ }
+                                        },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = Color(0xF018181D),
+                                    border = BorderStroke(1.dp, Color(0xFF383842)),
+                                    shadowElevation = 8.dp
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(vertical = 4.dp)
+                                    ) {
+                                        // 1. Clip End
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    val playheadUs = playbackController.playhead.timeUs
+                                                    val success = resolvedViewModel?.extendOverlayEndTime(
+                                                        itemId = targetId,
+                                                        playheadUs = playheadUs,
+                                                        alignment = OverlayEndAlignment.CLIP_END
+                                                    ) ?: false
+                                                    if (success) {
+                                                        if (USE_NEW_CORE) {
+                                                            resolvedViewModel?.let { vm ->
+                                                                snapshotHolder.current = vm.getSnapshot()
+                                                            }
+                                                        }
+                                                        previewRenderer.requestRender()
+                                                        frameDriver.wake()
+                                                    }
+                                                    showPinLayeringMenu = false
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                                contentDescription = "Clip End",
+                                                tint = Color(0xFFFF2D55),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = "Clip End",
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(horizontal = 8.dp),
+                                            thickness = 0.5.dp,
+                                            color = Color(0xFF2E2E38)
+                                        )
+
+                                        // 2. Video End
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    val playheadUs = playbackController.playhead.timeUs
+                                                    val success = resolvedViewModel?.extendOverlayEndTime(
+                                                        itemId = targetId,
+                                                        playheadUs = playheadUs,
+                                                        alignment = OverlayEndAlignment.VIDEO_END
+                                                    ) ?: false
+                                                    if (success) {
+                                                        if (USE_NEW_CORE) {
+                                                            resolvedViewModel?.let { vm ->
+                                                                snapshotHolder.current = vm.getSnapshot()
+                                                            }
+                                                        }
+                                                        previewRenderer.requestRender()
+                                                        frameDriver.wake()
+                                                    }
+                                                    showPinLayeringMenu = false
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.LastPage,
+                                                contentDescription = "Video End",
+                                                tint = Color(0xFFFF2D55),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = "Video End",
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Floating 3-Second "Apply to All" Pill in bottom-right corner of preview

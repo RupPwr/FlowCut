@@ -163,6 +163,11 @@ data class FreezeResult(
     val freezeStartMs: Long
 )
 
+enum class OverlayEndAlignment {
+    CLIP_END,
+    VIDEO_END
+}
+
 val MAX_TIMELINE_DURATION_US: Long = msToUs(MAX_TOTAL_MS)
 
 fun getLayerCapLimitMessage(type: LayerType): String {
@@ -2232,6 +2237,49 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         updateProject(_uiState.value.project, recordUndo = false)
+    }
+
+    fun extendOverlayEndTime(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
+        val idx = _layerItems.indexOfFirst { it.id == itemId }
+        if (idx < 0) return false
+        val item = _layerItems[idx]
+        val tl = ProgramTimeline(_uiState.value.project)
+        if (tl.n == 0) return false
+
+        val totalDurationUs = msToUs(tl.totalMs)
+        val targetEndUs = when (alignment) {
+            OverlayEndAlignment.CLIP_END -> {
+                val targetTimeUs = if (playheadUs in item.startUs..item.endUs) playheadUs else item.startUs
+                var clipIdx = (0 until tl.n).firstOrNull { i ->
+                    targetTimeUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
+                } ?: tl.lastStartAtOrBefore(usToMs(targetTimeUs)).coerceIn(0, maxOf(0, tl.n - 1))
+
+                var clipEndUs = msToUs(tl.endMs[clipIdx])
+                if (clipEndUs <= item.startUs && clipIdx + 1 < tl.n) {
+                    clipIdx++
+                    clipEndUs = msToUs(tl.endMs[clipIdx])
+                }
+                minOf(clipEndUs, totalDurationUs).coerceAtLeast(item.startUs + OverlayItem.MIN_DURATION_US)
+            }
+            OverlayEndAlignment.VIDEO_END -> {
+                maxOf(totalDurationUs, item.startUs + OverlayItem.MIN_DURATION_US)
+            }
+        }
+
+        if (targetEndUs == item.endUs) return false
+
+        pushUndoState()
+        _layerItems[idx] = item.copy(endUs = targetEndUs)
+        syncLayerPlan()
+        _uiState.update {
+            it.copy(
+                selectedOverlayId = itemId,
+                selectedClipIndex = null,
+                selectedJunctionIndex = null
+            )
+        }
+        updateProject(_uiState.value.project, recordUndo = false)
+        return true
     }
 
     fun liveOverlayMove(itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) {
