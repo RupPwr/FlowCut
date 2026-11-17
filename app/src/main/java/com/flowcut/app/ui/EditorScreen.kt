@@ -673,7 +673,6 @@ fun EditorScreen(
     var isAdjustSheetVisible by remember { mutableStateOf(false) }
     var isBackgroundSheetVisible by remember { mutableStateOf(false) }
     var isOpacitySheetVisible by remember { mutableStateOf(false) }
-    var showClipSortSheet by remember { mutableStateOf(false) }
     var isTextSheetVisible by remember { mutableStateOf(false) }
     var isTextToolbarActive by remember { mutableStateOf(false) }
     var trimTargetClipIndex by remember { mutableIntStateOf(-1) }
@@ -2279,7 +2278,6 @@ fun EditorScreen(
                         onApplyTransition = onApplyTransition,
                         onAddClipsClick = onAddClipsClick,
                         onCommitTrim = onCommitTrim,
-                        onOpenClipSortSheet = { showClipSortSheet = true },
                         onOpenCoverDialog = { showCoverDialog = true },
                         onSetOverlappingConflictItemIds = { overlappingConflictItemIds = it }
                     )
@@ -3375,17 +3373,6 @@ fun EditorScreen(
                 onDismiss = { showCoverDialog = false }
             )
         }
-
-        ClipSortSheetHost(
-            isVisible = showClipSortSheet,
-            clips = timeline.project.clips,
-            selectedClipIndex = selectedClipIndex,
-            resolvedViewModel = resolvedViewModel,
-            snapshotHolder = snapshotHolder,
-            frameDriver = frameDriver,
-            previewRenderer = previewRenderer,
-            onDismiss = { showClipSortSheet = false }
-        )
     }
 }
 
@@ -3414,7 +3401,6 @@ private fun EditorTimelineCanvasHost(
     onApplyTransition: (TransitionType) -> Unit,
     onAddClipsClick: () -> Unit,
     onCommitTrim: (Int, Long, Long, Long) -> Unit,
-    onOpenClipSortSheet: () -> Unit,
     onOpenCoverDialog: () -> Unit,
     onSetOverlappingConflictItemIds: (List<String>?) -> Unit,
     modifier: Modifier = Modifier
@@ -3445,11 +3431,7 @@ private fun EditorTimelineCanvasHost(
             onSelect = { sel ->
                 when (sel) {
                     is TimelineSelection.ClipSelected -> {
-                        if (selectedClipIndex == sel.index) {
-                            onOpenClipSortSheet()
-                        } else {
-                            onSelectClip(sel.index)
-                        }
+                        onSelectClip(sel.index)
                     }
                     is TimelineSelection.JunctionSelected -> onSelectJunction(sel.index)
                     is TimelineSelection.TransitionClicked -> onSelectJunction(sel.junctionIndex)
@@ -3634,36 +3616,6 @@ private fun AudioAdjustmentSheetsHost(
             onDismiss = onDismissSpeed
         )
     }
-}
-
-@Composable
-private fun ClipSortSheetHost(
-    isVisible: Boolean,
-    clips: List<com.flowcut.app.model.Clip>,
-    selectedClipIndex: Int?,
-    resolvedViewModel: EditorViewModel?,
-    snapshotHolder: com.flowcut.app.core.timeline.SnapshotHolder,
-    frameDriver: com.flowcut.app.engine.FrameDriver,
-    previewRenderer: PreviewRenderer,
-    onDismiss: () -> Unit
-) {
-    if (!isVisible || clips.isEmpty()) return
-    ClipSortSheet(
-        clips = clips,
-        selectedClipIndex = selectedClipIndex,
-        clipTimeMaps = resolvedViewModel?.clipTimeMaps ?: emptyMap(),
-        onConfirm = { reorderedClips ->
-            resolvedViewModel?.reorderClips(reorderedClips)
-            if (USE_NEW_CORE) {
-                resolvedViewModel?.let { vm ->
-                    snapshotHolder.current = vm.getSnapshot()
-                }
-            }
-            frameDriver.wake()
-            previewRenderer.requestRender()
-        },
-        onDismiss = onDismiss
-    )
 }
 
 @Composable

@@ -4149,55 +4149,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun moveClip(fromIndex: Int, toIndex: Int) {
-        val currentClips = _uiState.value.project.clips.toMutableList()
-        if (fromIndex !in currentClips.indices || toIndex !in currentClips.indices || fromIndex == toIndex) return
-        val item = currentClips.removeAt(fromIndex)
-        currentClips.add(toIndex, item)
-        reorderClips(currentClips)
-    }
-
-    fun reorderClips(newClips: List<Clip>) {
-        val oldClips = _uiState.value.project.clips
-        if (newClips.size != oldClips.size) return
-        if (newClips == oldClips) return
-
-        val oldTransitions = _uiState.value.project.transitions
-        val newTransitions = mutableListOf<Transition>()
-        for (i in 0 until newClips.size - 1) {
-            val c1Id = newClips[i].id
-            val c2Id = newClips[i + 1].id
-            val oldPairIndex = (0 until oldClips.size - 1).firstOrNull { k ->
-                oldClips[k].id == c1Id && oldClips[k + 1].id == c2Id
-            }
-            if (oldPairIndex != null && oldPairIndex in oldTransitions.indices) {
-                newTransitions.add(oldTransitions[oldPairIndex])
-            } else {
-                newTransitions.add(Transition(TransitionType.NONE, 0L))
-            }
-        }
-
-        val newProject = _uiState.value.project.copy(
-            clips = newClips,
-            transitions = newTransitions
-        )
-
-        val currentSelectedId = _uiState.value.selectedClipIndex?.let { oldClips.getOrNull(it)?.id }
-        val newSelectedClipIndex = currentSelectedId?.let { id ->
-            newClips.indexOfFirst { it.id == id }.takeIf { it >= 0 }
-        }
-
-        updateProject(newProject, recordUndo = true)
-
-        _uiState.update {
-            it.copy(
-                selectedClipIndex = newSelectedClipIndex,
-                selectedJunctionIndex = null,
-                selectedOverlayId = null
-            )
-        }
-    }
-
     fun navigateTo(screen: AppScreen) {
         _uiState.update { it.copy(currentScreen = screen) }
     }
