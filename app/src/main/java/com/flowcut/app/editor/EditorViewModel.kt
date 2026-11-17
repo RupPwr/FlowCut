@@ -201,10 +201,6 @@ fun resolveOverlayHandleSnapBounds(
     val totalDurationUs = msToUs(tl.totalMs)
     if (tl.n == 0) return Pair(itemStartUs, itemEndUs)
 
-    val handleTimeUs = if (!isRightHandle) itemStartUs else itemEndUs
-    val clampedHandleUs = handleTimeUs.coerceIn(0L, totalDurationUs)
-    val eps = 15_000L
-
     val canonicalAction = when (action) {
         OverlayEndAlignment.CLIP_START -> OverlayEndAlignment.CLIP_START
         OverlayEndAlignment.CLIP_END,
@@ -216,74 +212,61 @@ fun resolveOverlayHandleSnapBounds(
         OverlayEndAlignment.RIGHT_VIDEO_END -> OverlayEndAlignment.VIDEO_END
     }
 
-    val targetHandlePosUs = when (canonicalAction) {
-        OverlayEndAlignment.VIDEO_START -> 0L
-        OverlayEndAlignment.VIDEO_END -> totalDurationUs
-        OverlayEndAlignment.CLIP_START -> {
-            var matchedClipIdx = -1
-            for (i in 0 until tl.n) {
-                val cEnd = msToUs(tl.endMs[i])
-                if (kotlin.math.abs(clampedHandleUs - cEnd) <= eps) {
-                    matchedClipIdx = i
-                    break
-                }
-            }
-            if (matchedClipIdx == -1) {
-                matchedClipIdx = (0 until tl.n).firstOrNull { i ->
-                    clampedHandleUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
-                } ?: tl.lastStartAtOrBefore(usToMs(clampedHandleUs)).coerceIn(0, maxOf(0, tl.n - 1))
-            }
-            msToUs(tl.startMs[matchedClipIdx])
-        }
-        OverlayEndAlignment.CLIP_END -> {
-            var matchedClipIdx = -1
-            for (i in (tl.n - 1) downTo 0) {
-                val cStart = msToUs(tl.startMs[i])
-                if (kotlin.math.abs(clampedHandleUs - cStart) <= eps) {
-                    matchedClipIdx = i
-                    break
-                }
-            }
-            if (matchedClipIdx == -1) {
-                matchedClipIdx = (0 until tl.n).firstOrNull { i ->
-                    clampedHandleUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
-                } ?: tl.lastStartAtOrBefore(usToMs(clampedHandleUs)).coerceIn(0, maxOf(0, tl.n - 1))
-            }
-            msToUs(tl.endMs[matchedClipIdx])
-        }
-        else -> 0L
-    }
-
-    val targetStartUs: Long
-    val targetEndUs: Long
-
     if (!isRightHandle) {
-        var newStart = targetHandlePosUs.coerceIn(0L, totalDurationUs)
-        var newEnd = itemEndUs
-        if (newStart >= newEnd) {
-            newEnd = minOf(totalDurationUs, newStart + minSpanUs)
-            if (newEnd - newStart < minSpanUs) {
-                newStart = maxOf(0L, totalDurationUs - minSpanUs)
-                newEnd = totalDurationUs
-            }
-        }
-        targetStartUs = newStart
-        targetEndUs = newEnd
-    } else {
-        var newStart = itemStartUs
-        var newEnd = targetHandlePosUs.coerceIn(0L, totalDurationUs)
-        if (newEnd <= newStart) {
-            newStart = maxOf(0L, newEnd - minSpanUs)
-            if (newEnd - newStart < minSpanUs) {
-                newStart = 0L
-                newEnd = minOf(totalDurationUs, minSpanUs)
-            }
-        }
-        targetStartUs = newStart
-        targetEndUs = newEnd
-    }
+        // Operating Left Handle: Right Handle (itemEndUs) stays completely untouched!
+        val clampedHandleUs = itemStartUs.coerceIn(0L, totalDurationUs)
+        val clipIdx = (tl.n - 1 downTo 0).firstOrNull { i ->
+            clampedHandleUs >= msToUs(tl.startMs[i]) && clampedHandleUs <= msToUs(tl.endMs[i])
+        } ?: (0 until tl.n).firstOrNull { i ->
+            clampedHandleUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
+        } ?: tl.lastStartAtOrBefore(usToMs(clampedHandleUs)).coerceIn(0, maxOf(0, tl.n - 1))
 
-    return Pair(targetStartUs, targetEndUs)
+        val clipStartUs = msToUs(tl.startMs[clipIdx])
+        val clipEndUs = msToUs(tl.endMs[clipIdx])
+
+        val newStartUs = when (canonicalAction) {
+            OverlayEndAlignment.CLIP_START -> {
+                clipStartUs.coerceIn(0L, maxOf(0L, itemEndUs - minSpanUs))
+            }
+            OverlayEndAlignment.CLIP_END -> {
+                minOf(clipEndUs, itemEndUs - minSpanUs).coerceAtLeast(clipStartUs)
+            }
+            OverlayEndAlignment.VIDEO_START -> {
+                0L.coerceIn(0L, maxOf(0L, itemEndUs - minSpanUs))
+            }
+            OverlayEndAlignment.VIDEO_END -> {
+                minOf(totalDurationUs, maxOf(0L, itemEndUs - minSpanUs))
+            }
+            else -> itemStartUs
+        }
+        return Pair(newStartUs, itemEndUs)
+    } else {
+        // Operating Right Handle: Left Handle (itemStartUs) stays completely untouched!
+        val clampedHandleUs = itemEndUs.coerceIn(0L, totalDurationUs)
+        val clipIdx = (0 until tl.n).firstOrNull { i ->
+            clampedHandleUs >= msToUs(tl.startMs[i]) && clampedHandleUs <= msToUs(tl.endMs[i])
+        } ?: tl.lastStartAtOrBefore(usToMs(clampedHandleUs)).coerceIn(0, maxOf(0, tl.n - 1))
+
+        val clipStartUs = msToUs(tl.startMs[clipIdx])
+        val clipEndUs = msToUs(tl.endMs[clipIdx])
+
+        val newEndUs = when (canonicalAction) {
+            OverlayEndAlignment.CLIP_END -> {
+                clipEndUs.coerceIn(minOf(totalDurationUs, itemStartUs + minSpanUs), totalDurationUs)
+            }
+            OverlayEndAlignment.CLIP_START -> {
+                maxOf(clipStartUs, itemStartUs + minSpanUs).coerceAtMost(clipEndUs)
+            }
+            OverlayEndAlignment.VIDEO_END -> {
+                totalDurationUs.coerceIn(minOf(totalDurationUs, itemStartUs + minSpanUs), totalDurationUs)
+            }
+            OverlayEndAlignment.VIDEO_START -> {
+                maxOf(0L, minOf(totalDurationUs, itemStartUs + minSpanUs))
+            }
+            else -> itemEndUs
+        }
+        return Pair(itemStartUs, newEndUs)
+    }
 }
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {

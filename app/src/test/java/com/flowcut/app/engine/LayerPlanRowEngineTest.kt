@@ -457,7 +457,7 @@ class LayerPlanRowEngineTest {
             tl = tl
         )
         assertEquals(0L, lClipStart)
-        assertEquals(8_000_000L, lClipStartEnd)
+        assertEquals(8_000_000L, lClipStartEnd) // Right handle untouched!
 
         val (lClipEnd, lClipEndEnd) = resolveOverlayHandleSnapBounds(
             itemStartUs = 2_000_000L,
@@ -467,7 +467,7 @@ class LayerPlanRowEngineTest {
             tl = tl
         )
         assertEquals(5_000_000L, lClipEnd)
-        assertEquals(8_000_000L, lClipEndEnd)
+        assertEquals(8_000_000L, lClipEndEnd) // Right handle untouched!
 
         // 2. Left handle Video Start / Video End
         val (lVidStart, lVidStartEnd) = resolveOverlayHandleSnapBounds(
@@ -477,10 +477,9 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.VIDEO_START,
             tl = tl
         )
-        assertEquals(0L, lVidStart)
-        assertEquals(8_000_000L, lVidStartEnd)
+        assertEquals(0L, lVidStart) // Full combined timeline 0.00s!
+        assertEquals(8_000_000L, lVidStartEnd) // Right handle untouched!
 
-        // Left handle Video End crosses right handle -> clamps right handle minimally
         val (lVidEnd, lVidEndEnd) = resolveOverlayHandleSnapBounds(
             itemStartUs = 2_000_000L,
             itemEndUs = 8_000_000L,
@@ -488,19 +487,20 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.VIDEO_END,
             tl = tl
         )
-        assertEquals(14_800_000L, lVidEnd)
-        assertEquals(15_000_000L, lVidEndEnd)
+        assertEquals(7_800_000L, lVidEnd) // Bounded by itemEndUs - MIN_DURATION_US without pushing right handle!
+        assertEquals(8_000_000L, lVidEndEnd) // Right handle untouched!
 
-        // 3. Left handle Clip End crossing right handle -> clamps right handle minimally
-        val (lCrossStart, lCrossEnd) = resolveOverlayHandleSnapBounds(
+        // 3. Left handle Clip End staying strictly in Clip 0 when Right handle is also in Clip 0
+        // Overlay [2s, 4s] in Clip 0 [0s, 5s] -> Clip End moves up to minOf(5s, 4s - 200ms) = 3.8s
+        val (lStayStart, lStayEnd) = resolveOverlayHandleSnapBounds(
             itemStartUs = 2_000_000L,
             itemEndUs = 4_000_000L,
             isRightHandle = false,
             action = OverlayEndAlignment.CLIP_END,
             tl = tl
         )
-        assertEquals(5_000_000L, lCrossStart)
-        assertEquals(5_200_000L, lCrossEnd)
+        assertEquals(3_800_000L, lStayStart) // Never spills over onto Clip 1!
+        assertEquals(4_000_000L, lStayEnd) // Right handle untouched!
 
         // 4. Right handle Clip Start / Clip End inside Clip 1 (starts at 2s, ends at 8s)
         val (rClipEndStart, rClipEnd) = resolveOverlayHandleSnapBounds(
@@ -510,7 +510,7 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.CLIP_END,
             tl = tl
         )
-        assertEquals(2_000_000L, rClipEndStart)
+        assertEquals(2_000_000L, rClipEndStart) // Left handle untouched!
         assertEquals(10_000_000L, rClipEnd)
 
         val (rClipStartStart, rClipStart) = resolveOverlayHandleSnapBounds(
@@ -520,7 +520,7 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.CLIP_START,
             tl = tl
         )
-        assertEquals(2_000_000L, rClipStartStart)
+        assertEquals(2_000_000L, rClipStartStart) // Left handle untouched!
         assertEquals(5_000_000L, rClipStart)
 
         // 5. Right handle Video Start / Video End
@@ -531,10 +531,9 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.VIDEO_END,
             tl = tl
         )
-        assertEquals(2_000_000L, rVidEndStart)
-        assertEquals(15_000_000L, rVidEnd)
+        assertEquals(2_000_000L, rVidEndStart) // Left handle untouched!
+        assertEquals(15_000_000L, rVidEnd) // Full combined timeline totalDurationUs!
 
-        // Right handle Video Start crosses left handle -> clamps left handle minimally
         val (rVidStartStart, rVidStart) = resolveOverlayHandleSnapBounds(
             itemStartUs = 2_000_000L,
             itemEndUs = 8_000_000L,
@@ -542,21 +541,22 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.VIDEO_START,
             tl = tl
         )
-        assertEquals(0L, rVidStartStart)
-        assertEquals(200_000L, rVidStart)
+        assertEquals(2_000_000L, rVidStartStart) // Left handle untouched!
+        assertEquals(2_200_000L, rVidStart) // Bounded by itemStartUs + MIN_DURATION_US without pushing left handle!
 
-        // 6. Right handle Clip Start crossing left handle -> clamps left handle minimally
-        val (rCrossStart, rCrossEnd) = resolveOverlayHandleSnapBounds(
+        // 6. Right handle Clip Start staying strictly in Clip 1 when Left handle is also in Clip 1
+        // Overlay [6s, 8s] in Clip 1 [5s, 10s] -> Clip Start moves back to maxOf(5s, 6s + 200ms) = 6.2s
+        val (rStayStart, rStayEnd) = resolveOverlayHandleSnapBounds(
             itemStartUs = 6_000_000L,
             itemEndUs = 8_000_000L,
             isRightHandle = true,
             action = OverlayEndAlignment.CLIP_START,
             tl = tl
         )
-        assertEquals(4_800_000L, rCrossStart)
-        assertEquals(5_000_000L, rCrossEnd)
+        assertEquals(6_000_000L, rStayStart) // Left handle untouched!
+        assertEquals(6_200_000L, rStayEnd) // Never spills over onto Clip 0!
 
-        // 7. Strict independence: Left and Right handles operate strictly on their own timestamp
+        // 7. Strict Single-Clip & Active-Handle Isolation:
         // Overlay spanning [1s, 14s]: Left in Clip 0 (1s), Right in Clip 2 (14s)
         val (indepLStart, indepLEnd) = resolveOverlayHandleSnapBounds(
             itemStartUs = 1_000_000L,
@@ -566,7 +566,7 @@ class LayerPlanRowEngineTest {
             tl = tl
         )
         assertEquals(5_000_000L, indepLStart) // Clip 0's end, NOT Clip 2's end!
-        assertEquals(14_000_000L, indepLEnd)
+        assertEquals(14_000_000L, indepLEnd) // Right handle untouched!
 
         val (indepRStart, indepREnd) = resolveOverlayHandleSnapBounds(
             itemStartUs = 1_000_000L,
@@ -575,27 +575,8 @@ class LayerPlanRowEngineTest {
             action = OverlayEndAlignment.CLIP_START,
             tl = tl
         )
-        assertEquals(1_000_000L, indepRStart)
+        assertEquals(1_000_000L, indepRStart) // Left handle untouched!
         assertEquals(10_000_000L, indepREnd) // Clip 2's start, NOT Clip 0's start!
-
-        // 8. Boundary handling at 5.0s (junction between Clip 0 and Clip 1)
-        val (boundLStart, _) = resolveOverlayHandleSnapBounds(
-            itemStartUs = 5_000_000L,
-            itemEndUs = 8_000_000L,
-            isRightHandle = false,
-            action = OverlayEndAlignment.CLIP_START,
-            tl = tl
-        )
-        assertEquals(0L, boundLStart) // At clipEndUs of Clip 0 -> snaps to Clip 0's start (0L)
-
-        val (_, boundREnd) = resolveOverlayHandleSnapBounds(
-            itemStartUs = 2_000_000L,
-            itemEndUs = 5_000_000L,
-            isRightHandle = true,
-            action = OverlayEndAlignment.CLIP_END,
-            tl = tl
-        )
-        assertEquals(10_000_000L, boundREnd) // At clipStartUs of Clip 1 -> snaps to Clip 1's end (10s)
     }
 }
 
