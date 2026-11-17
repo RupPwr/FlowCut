@@ -164,6 +164,10 @@ data class FreezeResult(
 )
 
 enum class OverlayEndAlignment {
+    CLIP_START,
+    CLIP_END,
+    VIDEO_START,
+    VIDEO_END,
     LEFT_CLIP_END,
     LEFT_VIDEO_END,
     RIGHT_CLIP_END,
@@ -184,6 +188,102 @@ fun getLayerCapLimitMessage(type: LayerType): String {
         LayerType.EFFECT -> "Effect"
     }
     return "Maximum limit reached: $cap $name"
+}
+
+fun resolveOverlayHandleSnapBounds(
+    itemStartUs: Long,
+    itemEndUs: Long,
+    isRightHandle: Boolean,
+    action: OverlayEndAlignment,
+    tl: ProgramTimeline,
+    minSpanUs: Long = OverlayItem.MIN_DURATION_US
+): Pair<Long, Long> {
+    val totalDurationUs = msToUs(tl.totalMs)
+    if (tl.n == 0) return Pair(itemStartUs, itemEndUs)
+
+    val handleTimeUs = if (!isRightHandle) itemStartUs else itemEndUs
+    val clampedHandleUs = handleTimeUs.coerceIn(0L, totalDurationUs)
+    val eps = 15_000L
+
+    val canonicalAction = when (action) {
+        OverlayEndAlignment.CLIP_START -> OverlayEndAlignment.CLIP_START
+        OverlayEndAlignment.CLIP_END,
+        OverlayEndAlignment.LEFT_CLIP_END,
+        OverlayEndAlignment.RIGHT_CLIP_END -> OverlayEndAlignment.CLIP_END
+        OverlayEndAlignment.VIDEO_START -> OverlayEndAlignment.VIDEO_START
+        OverlayEndAlignment.VIDEO_END,
+        OverlayEndAlignment.LEFT_VIDEO_END,
+        OverlayEndAlignment.RIGHT_VIDEO_END -> OverlayEndAlignment.VIDEO_END
+    }
+
+    val targetHandlePosUs = when (canonicalAction) {
+        OverlayEndAlignment.VIDEO_START -> 0L
+        OverlayEndAlignment.VIDEO_END -> totalDurationUs
+        OverlayEndAlignment.CLIP_START -> {
+            var matchedClipIdx = -1
+            for (i in 0 until tl.n) {
+                val cEnd = msToUs(tl.endMs[i])
+                if (kotlin.math.abs(clampedHandleUs - cEnd) <= eps) {
+                    matchedClipIdx = i
+                    break
+                }
+            }
+            if (matchedClipIdx == -1) {
+                matchedClipIdx = (0 until tl.n).firstOrNull { i ->
+                    clampedHandleUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
+                } ?: tl.lastStartAtOrBefore(usToMs(clampedHandleUs)).coerceIn(0, maxOf(0, tl.n - 1))
+            }
+            msToUs(tl.startMs[matchedClipIdx])
+        }
+        OverlayEndAlignment.CLIP_END -> {
+            var matchedClipIdx = -1
+            for (i in (tl.n - 1) downTo 0) {
+                val cStart = msToUs(tl.startMs[i])
+                if (kotlin.math.abs(clampedHandleUs - cStart) <= eps) {
+                    matchedClipIdx = i
+                    break
+                }
+            }
+            if (matchedClipIdx == -1) {
+                matchedClipIdx = (0 until tl.n).firstOrNull { i ->
+                    clampedHandleUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
+                } ?: tl.lastStartAtOrBefore(usToMs(clampedHandleUs)).coerceIn(0, maxOf(0, tl.n - 1))
+            }
+            msToUs(tl.endMs[matchedClipIdx])
+        }
+        else -> 0L
+    }
+
+    val targetStartUs: Long
+    val targetEndUs: Long
+
+    if (!isRightHandle) {
+        var newStart = targetHandlePosUs.coerceIn(0L, totalDurationUs)
+        var newEnd = itemEndUs
+        if (newStart >= newEnd) {
+            newEnd = minOf(totalDurationUs, newStart + minSpanUs)
+            if (newEnd - newStart < minSpanUs) {
+                newStart = maxOf(0L, totalDurationUs - minSpanUs)
+                newEnd = totalDurationUs
+            }
+        }
+        targetStartUs = newStart
+        targetEndUs = newEnd
+    } else {
+        var newStart = itemStartUs
+        var newEnd = targetHandlePosUs.coerceIn(0L, totalDurationUs)
+        if (newEnd <= newStart) {
+            newStart = maxOf(0L, newEnd - minSpanUs)
+            if (newEnd - newStart < minSpanUs) {
+                newStart = 0L
+                newEnd = minOf(totalDurationUs, minSpanUs)
+            }
+        }
+        targetStartUs = newStart
+        targetEndUs = newEnd
+    }
+
+    return Pair(targetStartUs, targetEndUs)
 }
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
@@ -2241,7 +2341,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         updateProject(_uiState.value.project, recordUndo = false)
     }
 
-    fun alignOverlayEdge(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
+    fun alignOverlayEdge(
+        itemId: String,
+        isRightHandle: Boolean,
+        alignment: OverlayEndAlignment
+    ): Boolean {
         val idx = _layerItems.indexOfFirst { it.id == itemId }
         if (idx < 0) return false
         val item = _layerItems[idx]
@@ -2249,39 +2353,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (tl.n == 0) return false
 
         val totalDurationUs = msToUs(tl.totalMs)
-
-        fun findClipIndexAtUs(posUs: Long): Int {
-            return (0 until tl.n).firstOrNull { i ->
-                posUs in msToUs(tl.startMs[i])..msToUs(tl.endMs[i])
-            } ?: tl.lastStartAtOrBefore(usToMs(posUs)).coerceIn(0, maxOf(0, tl.n - 1))
-        }
-
-        val (targetStartUs, targetEndUs) = when (alignment) {
-            OverlayEndAlignment.RIGHT_CLIP_END -> {
-                val leftAnchorClipIdx = findClipIndexAtUs(item.startUs)
-                val targetEnd = msToUs(tl.endMs[leftAnchorClipIdx]).coerceIn(
-                    item.startUs + OverlayItem.MIN_DURATION_US,
-                    totalDurationUs
-                )
-                Pair(item.startUs, targetEnd)
-            }
-            OverlayEndAlignment.RIGHT_VIDEO_END -> {
-                val targetEnd = maxOf(totalDurationUs, item.startUs + OverlayItem.MIN_DURATION_US)
-                Pair(item.startUs, targetEnd)
-            }
-            OverlayEndAlignment.LEFT_CLIP_END -> {
-                val rightAnchorUs = (item.endUs - 1L).coerceAtLeast(item.startUs)
-                val rightAnchorClipIdx = findClipIndexAtUs(rightAnchorUs)
-                val targetStart = msToUs(tl.startMs[rightAnchorClipIdx]).coerceIn(
-                    0L,
-                    (item.endUs - OverlayItem.MIN_DURATION_US).coerceAtLeast(0L)
-                )
-                Pair(targetStart, item.endUs)
-            }
-            OverlayEndAlignment.LEFT_VIDEO_END -> {
-                Pair(0L, item.endUs)
-            }
-        }
+        val (targetStartUs, targetEndUs) = resolveOverlayHandleSnapBounds(
+            itemStartUs = item.startUs,
+            itemEndUs = item.endUs,
+            isRightHandle = isRightHandle,
+            action = alignment,
+            tl = tl,
+            minSpanUs = OverlayItem.MIN_DURATION_US
+        )
 
         val (clampedStartUs, clampedEndUs) = clampItemTrimBoundsOnRow(
             items = _layerItems,
@@ -2316,6 +2395,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         updateProject(_uiState.value.project, recordUndo = false)
         return true
+    }
+
+    fun alignOverlayEdge(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
+        val isRightHandle = when (alignment) {
+            OverlayEndAlignment.LEFT_CLIP_END,
+            OverlayEndAlignment.LEFT_VIDEO_END -> false
+            OverlayEndAlignment.RIGHT_CLIP_END,
+            OverlayEndAlignment.RIGHT_VIDEO_END -> true
+            OverlayEndAlignment.CLIP_START,
+            OverlayEndAlignment.VIDEO_START -> false
+            OverlayEndAlignment.CLIP_END,
+            OverlayEndAlignment.VIDEO_END -> true
+        }
+        return alignOverlayEdge(itemId, isRightHandle, alignment)
     }
 
     fun extendOverlayEndTime(itemId: String, playheadUs: Long, alignment: OverlayEndAlignment): Boolean {
