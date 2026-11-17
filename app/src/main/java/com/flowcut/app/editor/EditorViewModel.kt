@@ -2266,10 +2266,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        if (targetEndUs == item.endUs) return false
+        val (_, clampedEndUs) = clampItemTrimBoundsOnRow(
+            items = _layerItems,
+            itemId = itemId,
+            candidateStartUs = item.startUs,
+            candidateEndUs = targetEndUs,
+            totalProjectDurationUs = totalDurationUs
+        )
+
+        if (clampedEndUs == item.endUs) return false
 
         pushUndoState()
-        _layerItems[idx] = item.copy(endUs = targetEndUs)
+        val topZ = getTopZIndex()
+        _layerItems[idx] = item.copy(endUs = clampedEndUs, zIndex = topZ)
         syncLayerPlan()
         _uiState.update {
             it.copy(

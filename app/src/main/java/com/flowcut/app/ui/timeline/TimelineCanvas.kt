@@ -327,6 +327,7 @@ fun TimelineCanvas(
     onCommitTrim: (clipIndex: Int, newInUs: Long, newOutUs: Long, newDurationMs: Long) -> Unit = { _, _, _, _ -> },
     onCommitOverlayTrim: (itemId: String, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _ -> },
     onLiveOverlayTrim: (itemId: String, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _ -> },
+    onOverlayTrimHandleTap: (overlayId: String, isRightHandle: Boolean, tapOffset: Offset) -> Unit = { _, _, _ -> },
     onCommitOverlayMove: (itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _, _ -> },
     onLiveOverlayMove: (itemId: String, newLaneIndex: Int, newStartUs: Long, newEndUs: Long) -> Unit = { _, _, _, _ -> },
     onTrimPreview: (trimPreviewTimeUs: Long) -> Unit = {},
@@ -368,6 +369,7 @@ fun TimelineCanvas(
     val currentOnCommitTrim by rememberUpdatedState(onCommitTrim)
     val currentOnCommitOverlayTrim by rememberUpdatedState(onCommitOverlayTrim)
     val currentOnLiveOverlayTrim by rememberUpdatedState(onLiveOverlayTrim)
+    val currentOnOverlayTrimHandleTap by rememberUpdatedState(onOverlayTrimHandleTap)
     val currentOnCommitOverlayMove by rememberUpdatedState(onCommitOverlayMove)
     val currentOnLiveOverlayMove by rememberUpdatedState(onLiveOverlayMove)
     val currentOnTrimPreview by rememberUpdatedState(onTrimPreview)
@@ -1407,6 +1409,13 @@ fun TimelineCanvas(
                         if (wasMovingOnDown) {
                             controller.pause()
                             currentOnScrollingStateChanged(false)
+                            currentOnWakeFrameDriver()
+                        } else if (isOverlayTrimCandidate && curOverlayItem != null) {
+                            try {
+                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            } catch (_: Throwable) {}
+                            val isRightHandle = !isOverlayLeftHandle
+                            currentOnOverlayTrimHandleTap(curOverlayItem.id, isRightHandle, startPos)
                             currentOnWakeFrameDriver()
                         } else {
                             val halfWidthPx = size.width / 2f
