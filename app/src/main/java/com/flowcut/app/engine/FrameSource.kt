@@ -35,6 +35,8 @@ class FrameSource(
         private set
     val lastDecodedPtsUs: Long get() = currentPtsUs
     val currentDecoderPtsUs: Long get() = currentPtsUs
+    @Volatile var playbackSpeed: Float = 1.0f
+    private val effSpeed: Float get() = playbackSpeed.coerceAtLeast(1.0f)
     private var currentMime: String = ""
     private var lastSeekTargetUs: Long = -1L
     private var lastKeyframePtsUs: Long = -1L
@@ -605,9 +607,14 @@ class FrameSource(
             }
 
             val isInitial = currentPtsUs == -1L
-            // Bidirectional jump check: avoid redundant seek/flush on continuous playback (0 <= localUs - currentPtsUs <= 150ms),
-            // but trigger accurate seek on backward jumps (>100ms) or forward discontinuities (>150ms).
-            val isJump = currentPtsUs != -1L && (currentPtsUs > localUs + 100_000L || localUs > currentPtsUs + 150_000L)
+            val fwdJumpUs = maxOf(
+                150_000L,
+                (150_000L * effSpeed).toLong(),
+                if (effSpeed >= 4f) 1_000_000L else 0L
+            )
+            val backJumpUs = (100_000L * effSpeed).toLong()
+            val isJump = currentPtsUs != -1L &&
+                (currentPtsUs > localUs + backJumpUs || localUs > currentPtsUs + fwdJumpUs)
 
             // Decode whenever localUs >= currentPtsUs + 8_000L (8ms threshold instead of 25ms) so 30fps and 60fps clips never skip a frame during a fast transition
             if (!isInitial && !isJump && currentPtsUs != -1L && localUs < currentPtsUs + 8_000L) {
@@ -622,6 +629,14 @@ class FrameSource(
                 isCatchingUpFromSeek = false
             }
 
+            val deltaUs = if (currentPtsUs != -1L) localUs - currentPtsUs else 0L
+            val hiSpeed = effSpeed >= 4f
+            if (hiSpeed && deltaUs > 500_000L) {
+                val ok = seekTo(localUs, fastKeyframeOnly = true)
+                if (ok) { lastRenderedLocalUs = localUs }
+                return ok
+            }
+
             if (isInitial || isJump || (!isScrubbing && !isAccuratePausedFrameLatched)) {
                 lastForwardKeyframeHopUs = -1L
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)
@@ -631,8 +646,6 @@ class FrameSource(
                 }
                 return didRender
             }
-
-            val deltaUs = localUs - currentPtsUs
 
             // Case B (Extreme forward jump > 1.5s): Only hop to keyframe if keyframe is strictly AHEAD of currentPtsUs
             if (deltaUs > 1_500_000L && (lastForwardKeyframeHopUs == -1L || localUs - lastForwardKeyframeHopUs > 600_000L)) {
@@ -655,9 +668,10 @@ class FrameSource(
             }
 
             // Case A: Ultra-smooth forward playback decode & drain loop (Fix Bug #1)
-            // 1. Feed up to 4 input packets so hardware decoder queue is always well-fed
+            // 1. Feed input packets so hardware decoder queue is always well-fed
+            val maxFeed = if (hiSpeed) minOf(20, (3 * effSpeed).toInt()) else 4
             var inFed = 0
-            while (!inputEos && inFed < 4) {
+            while (!inputEos && inFed < maxFeed) {
                 val inIndex = dec.dequeueInputBuffer(0L)
                 if (inIndex >= 0) {
                     val inBuf = dec.getInputBuffer(inIndex)
@@ -680,7 +694,11 @@ class FrameSource(
 
             // 2. Dequeue output buffers with silent pre-roll: never render intermediate catch-up frames!
             val isFastForward = deltaUs >= 40_000L
-            val maxDrains = if (isFastForward) 6 else 3
+            val maxDrains = when {
+                hiSpeed -> minOf(24, (3 * effSpeed).toInt())
+                isFastForward -> 6
+                else -> 3
+            }
             var drainedCount = 0
             var renderedAny = false
             val bufferInfo = MediaCodec.BufferInfo()
@@ -704,7 +722,10 @@ class FrameSource(
                     (clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L)
 
                 // Fix 1A: Never render intermediate catch-up frames (pts < localUs - 20_000L) onto SurfaceTexture!
-                val shouldRender = pts >= localUs - 20_000L || atClipEnd
+                val isNearTarget = pts >= localUs - 20_000L || atClipEnd
+                val isLastDrainForcedRender = hiSpeed && !renderedAny && (drainedCount >= maxDrains - 1)
+                val shouldRender = isNearTarget || isLastDrainForcedRender
+
                 dec.releaseOutputBuffer(outIndex, shouldRender)
                 currentPtsUs = pts
                 if (shouldRender) {

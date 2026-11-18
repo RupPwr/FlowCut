@@ -775,6 +775,14 @@ class PreviewRenderer(
                 return
             }
 
+            val speedA = clipA.timeMap?.let { tm ->
+                tm.speedNum.toFloat() / tm.speedDen.coerceAtLeast(1).toFloat()
+            } ?: 1.0f
+            val clipBForSpeed = if (frame.isTransition && frame.clipBIndex >= 0) s.project.clips.getOrNull(frame.clipBIndex) else null
+            val speedB = clipBForSpeed?.timeMap?.let { tm ->
+                tm.speedNum.toFloat() / tm.speedDen.coerceAtLeast(1).toFloat()
+            } ?: 1.0f
+
             val isAccurateSeek = forceAccurateSeekPending && playhead.mode == PlayMode.PAUSED
             if (isAccurateSeek) {
                 forceAccurateSeekPending = false
@@ -810,6 +818,7 @@ class PreviewRenderer(
                             currentClipIndexB = frame.clipAIndex
                         }
                         val fsOutgoing = frameSourceB
+                        fsOutgoing?.playbackSpeed = speedA
                         if (fsOutgoing != null && fsOutgoing.prewarmStage < 3) {
                             fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
@@ -835,6 +844,7 @@ class PreviewRenderer(
                             currentClipIndexA = frame.clipBIndex
                         }
                         val fsIncoming = frameSourceA
+                        fsIncoming?.playbackSpeed = speedB
                         if (fsIncoming != null && fsIncoming.prewarmStage < 3) {
                             fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
                         }
@@ -872,6 +882,7 @@ class PreviewRenderer(
                             currentClipIndexA = frame.clipAIndex
                         }
                         val fsOutgoing = frameSourceA
+                        fsOutgoing?.playbackSpeed = speedA
                         if (fsOutgoing != null && fsOutgoing.prewarmStage < 3) {
                             fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
@@ -897,6 +908,7 @@ class PreviewRenderer(
                             currentClipIndexB = frame.clipBIndex
                         }
                         val fsIncoming = frameSourceB
+                        fsIncoming?.playbackSpeed = speedB
                         if (fsIncoming != null && fsIncoming.prewarmStage < 3) {
                             fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
                         }
@@ -1174,6 +1186,7 @@ class PreviewRenderer(
 
             val fsA = frameSourceA
             if (fsA != null) {
+                fsA.playbackSpeed = speedA
                 when (fsA.prewarmStage) {
                     0 -> {
                         fsA.prepareExtractorOnly()
@@ -1408,6 +1421,7 @@ class PreviewRenderer(
 
             val fsB = frameSourceB
             if (fsB != null) {
+                fsB.playbackSpeed = speedA
                 when (fsB.prewarmStage) {
                     0 -> {
                         fsB.prepareExtractorOnly()

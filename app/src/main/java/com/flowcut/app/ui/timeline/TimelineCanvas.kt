@@ -1009,7 +1009,8 @@ fun TimelineCanvas(
                                     selectedClipIndex = selectedClipIndex,
                                     selectedOverlayId = selectedOverlayId,
                                     overlayItems = currentOverlayItems,
-                                    focusMode = focus
+                                    focusMode = focus,
+                                    selection = currentSel
                                 )
                                 currentOnLongPress(hit)
                             }
@@ -1432,7 +1433,8 @@ fun TimelineCanvas(
                                 selectedClipIndex = selectedClipIndex,
                                 selectedOverlayId = selectedOverlayId,
                                 overlayItems = currentOverlayItems,
-                                focusMode = focus
+                                focusMode = focus,
+                                selection = currentSel
                             )
                             currentOnSelect(hit)
                             currentOnWakeFrameDriver()
@@ -2110,6 +2112,7 @@ fun TimelineCanvas(
             }
             val cellStepUs = if (zoomState.dpPerSecond < 30f) maxOf(baseStepUs, 1_000_000L) else baseStepUs
 
+            val selectedK = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
             for (k in k0..k1) {
                 val clipStartMs = snapshot.main.startMs[k]
                 val clipEndMs = snapshot.main.endMs[k]
@@ -2249,7 +2252,7 @@ fun TimelineCanvas(
                     }
                 }
 
-                if (selection != TimelineSelection.ClipSelected(k)) {
+                if (selectedK != k) {
                     drawPath(
                         path = clipPath,
                         color = clipBorderColor,
@@ -2259,7 +2262,6 @@ fun TimelineCanvas(
             }
 
             // Dedicated Pass: Selected Clip Crisp White Border & External Trim Handles
-            val selectedK = (selection as? TimelineSelection.ClipSelected)?.index ?: -1
             if (selectedK in 0 until n) {
                 val selClipStartUs = msToUs(snapshot.main.startMs[selectedK])
                 val selClipEndUs = msToUs(snapshot.main.endMs[selectedK])
@@ -2329,15 +2331,20 @@ fun TimelineCanvas(
             }
 
             // Dedicated Pass: Transition Junction Badges (Row C, 18.dp x 18.dp, 4.dp corner radius)
+            // Hidden only at the selected clip's left and right handles (selectedK - 1 and selectedK)
             if (n > 1) {
                 val junctionCenterY = rowCTop + (mainTrackHeightPx / 2f)
+                val selectedJunctionIdx = (selection as? TimelineSelection.JunctionSelected)?.index
+                    ?: (selection as? TimelineSelection.TransitionClicked)?.junctionIndex ?: -1
                 for (j in 0 until (n - 1)) {
+                    if (selectedK in 0 until n && (j == selectedK - 1 || j == selectedK)) {
+                        continue
+                    }
                     val centerMs = (snapshot.main.startMs[j + 1] + snapshot.main.endMs[j]) / 2L
                     val jx = zoomState.timeUsToX(msToUs(centerMs), offsetPx, halfWidthInt, pxPerUs)
                     if (jx in -50f..size.width + 50f) {
                         val jType = snapshot.main.types.getOrNull(j) ?: TransitionType.NONE
-                        val isJunctionSelected = selection == TimelineSelection.JunctionSelected(j) ||
-                                selection == TimelineSelection.TransitionClicked(j)
+                        val isJunctionSelected = selectedJunctionIdx == j
                         val hasTransition = jType != TransitionType.NONE
                         val jBg = if (hasTransition) junctionActivePinkBg else junctionCharcoalBg
 

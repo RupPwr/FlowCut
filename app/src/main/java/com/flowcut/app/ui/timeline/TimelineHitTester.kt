@@ -518,7 +518,8 @@ object TimelineHitTester {
         selectedClipIndex: Int = -1,
         selectedOverlayId: String? = null,
         overlayItems: List<OverlayItem> = emptyList(),
-        focusMode: TimelineFocusState = TimelineFocusState.S0_NONE
+        focusMode: TimelineFocusState = TimelineFocusState.S0_NONE,
+        selection: TimelineSelection = if (selectedClipIndex >= 0) TimelineSelection.ClipSelected(selectedClipIndex) else TimelineSelection.None
     ): TimelineSelection {
         val n = snapshot.main.n
         val totalUs = msToUs(snapshot.totalMs)
@@ -598,11 +599,12 @@ object TimelineHitTester {
         // -----------------------------------------------------------------------------------------
         // PRIORITY 0: Trim Handles of Currently Selected Main Clip (~28 dp touch target)
         // -----------------------------------------------------------------------------------------
-        if (selectedClipIndex in 0 until n) {
+        val activeClipIndex = (selection as? TimelineSelection.ClipSelected)?.index ?: selectedClipIndex
+        if (activeClipIndex in 0 until n) {
             val handleHit = hitTestTrimHandle(
                 tapX = tapX,
                 tapY = tapY,
-                selectedClipIndex = selectedClipIndex,
+                selectedClipIndex = activeClipIndex,
                 playheadUs = playheadUs,
                 halfWidthPx = halfWidthPx,
                 density = density,
@@ -612,8 +614,8 @@ object TimelineHitTester {
                 mainTrackHeightDp = mainTrackHeightDp
             )
             when (handleHit) {
-                TrimHandleType.LEFT -> return TimelineSelection.TrimHandleLeft(selectedClipIndex)
-                TrimHandleType.RIGHT -> return TimelineSelection.TrimHandleRight(selectedClipIndex)
+                TrimHandleType.LEFT -> return TimelineSelection.TrimHandleLeft(activeClipIndex)
+                TrimHandleType.RIGHT -> return TimelineSelection.TrimHandleRight(activeClipIndex)
                 TrimHandleType.NONE -> { /* fall through */ }
             }
         }
@@ -675,6 +677,7 @@ object TimelineHitTester {
 
         // -----------------------------------------------------------------------------------------
         // PRIORITY 2: Transition Junction Badges in Row C (±12.dp touch target, high priority)
+        // Hidden and hit-testing disabled only at the selected clip's left and right handles
         // -----------------------------------------------------------------------------------------
         val junctionTouchHalfXPx = 12f * density
         if (n > 1 && tapY in rowCTopPx..rowCBottomPx) {
@@ -682,6 +685,9 @@ object TimelineHitTester {
             val minJ = maxOf(0, k - 1)
             val maxJ = minOf(n - 2, k + 1)
             for (j in minJ..maxJ) {
+                if (activeClipIndex in 0 until n && (j == activeClipIndex - 1 || j == activeClipIndex)) {
+                    continue
+                }
                 val centerMs = (snapshot.main.startMs[j + 1] + snapshot.main.endMs[j]) / 2L
                 val junctionCenterPx = zoomState.timeUsToX(msToUs(centerMs), playheadUs, halfWidthPx, density)
                 val dx = abs(tapX - junctionCenterPx)
