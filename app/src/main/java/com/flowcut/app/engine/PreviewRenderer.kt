@@ -1116,12 +1116,14 @@ class PreviewRenderer(
 
         // 0ms Instant Cut Handover at the Boundary:
         if (primarySlot == 0) {
-            val canSlotAContinue = frameSourceA != null && frameSourceA?.clip?.path == clipA.path &&
+            val isCrossingToNextClip = currentClipIndexA != -1 && currentClipIndexA != frame.clipAIndex
+            val continuityLimitUs = maxOf(150_000L, (200_000L * speedA).toLong())
+            val canSlotAContinue = !isCrossingToNextClip && frameSourceA != null && frameSourceA?.clip?.path == clipA.path &&
                 (frameSourceA!!.prewarmStage >= 3) &&
-                (kotlin.math.abs(frame.clipASourceUs - frameSourceA!!.lastDecodedPtsUs) <= 120_000L ||
-                 (frame.clipASourceUs >= frameSourceA!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceA!!.lastDecodedPtsUs <= 150_000L))
+                (kotlin.math.abs(frame.clipASourceUs - frameSourceA!!.lastDecodedPtsUs) <= continuityLimitUs ||
+                 (frame.clipASourceUs >= frameSourceA!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceA!!.lastDecodedPtsUs <= continuityLimitUs))
 
-            if (!canSlotAContinue && (standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexB == frame.clipAIndex)) &&
+            if (isCrossingToNextClip && !canSlotAContinue && (standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexB == frame.clipAIndex)) &&
                 frameSourceB != null && (frameSourceB?.clip?.id == clipA.id || currentClipIndexB == frame.clipAIndex)) {
                 primarySlot = 1
                 standbySlotReadyForClipId = null
@@ -1132,10 +1134,12 @@ class PreviewRenderer(
                 currentClipIndexA = -1
             }
         } else {
-            val canSlotBContinue = frameSourceB != null && frameSourceB?.clip?.path == clipA.path &&
+            val isCrossingToNextClip = currentClipIndexB != -1 && currentClipIndexB != frame.clipAIndex
+            val continuityLimitUs = maxOf(150_000L, (200_000L * speedA).toLong())
+            val canSlotBContinue = !isCrossingToNextClip && frameSourceB != null && frameSourceB?.clip?.path == clipA.path &&
                 (frameSourceB!!.prewarmStage >= 3) &&
-                (kotlin.math.abs(frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs) <= 120_000L ||
-                 (frame.clipASourceUs >= frameSourceB!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs <= 150_000L))
+                (kotlin.math.abs(frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs) <= continuityLimitUs ||
+                 (frame.clipASourceUs >= frameSourceB!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs <= continuityLimitUs))
 
             // primarySlot == 1: Release frameSourceA if it still held an old clip from before the transition
             if (frameSourceA != null && frameSourceA?.clip?.id != clipA.id && currentClipIndexA < frame.clipAIndex && !canSlotBContinue) {
@@ -1143,7 +1147,7 @@ class PreviewRenderer(
                 frameSourceA = null
                 currentClipIndexA = -1
             }
-            if (!canSlotBContinue && (standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexA == frame.clipAIndex)) &&
+            if (isCrossingToNextClip && !canSlotBContinue && (standbySlotReadyForClipId == clipA.id || (standbyPreparedPath == clipA.path && currentClipIndexA == frame.clipAIndex)) &&
                 frameSourceA != null && (frameSourceA?.clip?.id == clipA.id || currentClipIndexA == frame.clipAIndex)) {
                 primarySlot = 0
                 standbySlotReadyForClipId = null
@@ -1169,10 +1173,15 @@ class PreviewRenderer(
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
                         val targetPts = frame.clipASourceUs
+                        val fwdLimit = maxOf(600_000L, (400_000L * speedA).toLong())
                         val isContinuous = (currentPts != -1L) &&
-                            (kotlin.math.abs(targetPts - currentPts) <= 120_000L ||
-                             (targetPts >= currentPts && targetPts - currentPts <= 150_000L))
-                        if (!isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)) {
+                            (targetPts >= currentPts - 100_000L && targetPts <= currentPts + fwdLimit)
+                        val shouldSeek = if (!isPaused && !isScrubbing) {
+                            currentPts != -1L && (targetPts < currentPts - 100_000L || targetPts > currentPts + fwdLimit)
+                        } else {
+                            !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
+                        }
+                        if (shouldSeek) {
                             activeFs.seekTo(targetPts, fastKeyframeOnly = false)
                         }
                     }
@@ -1403,10 +1412,15 @@ class PreviewRenderer(
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
                         val targetPts = frame.clipASourceUs
+                        val fwdLimit = maxOf(600_000L, (400_000L * speedA).toLong())
                         val isContinuous = (currentPts != -1L) &&
-                            (kotlin.math.abs(targetPts - currentPts) <= 120_000L ||
-                             (targetPts >= currentPts && targetPts - currentPts <= 150_000L))
-                        if (!isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)) {
+                            (targetPts >= currentPts - 100_000L && targetPts <= currentPts + fwdLimit)
+                        val shouldSeek = if (!isPaused && !isScrubbing) {
+                            currentPts != -1L && (targetPts < currentPts - 100_000L || targetPts > currentPts + fwdLimit)
+                        } else {
+                            !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
+                        }
+                        if (shouldSeek) {
                             activeFs.seekTo(targetPts, fastKeyframeOnly = false)
                         }
                     }

@@ -492,7 +492,7 @@ class FrameSource(
             }
             inputEos = false
             outputEos = false
-            currentPtsUs = -1L
+            currentPtsUs = seekTimeUs
 
             val bufferInfo = MediaCodec.BufferInfo()
             val timeoutUs = 1_000L
@@ -582,45 +582,8 @@ class FrameSource(
     }
 
     private fun startFast() {
-        if (fastRun) return
-        val ext = extractor ?: return
-        val dec = codec ?: return
-        fastRun = true
-        fastThread = Thread {
-            try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Throwable) {}
-            var lastTarget = -2L
-            try {
-                while (fastRun && !outputEos) {
-                    val t = fastTargetUs
-                    val stale = System.nanoTime() - fastStampNs > 150_000_000L
-                    if (t < 0L || stale) { java.util.concurrent.locks.LockSupport.parkNanos(3_000_000L); continue }
-                    if (t == lastTarget && currentPtsUs >= t - 15_000L) {
-                        java.util.concurrent.locks.LockSupport.parkNanos(2_000_000L); continue
-                    }
-                    val targetChanged = t != lastTarget
-                    lastTarget = t
-
-                    // hop sirf tab, jab target naya ho, aur keyframe kaafi aage ho, aur wahi keyframe dobara na ho
-                    if (targetChanged && currentPtsUs != -1L) {
-                        val lagUs = t - currentPtsUs
-                        if (lagUs > 600_000L) {
-                            val kf = getKeyframes()
-                            if (kf != null && kf.isNotEmpty()) {
-                                val kfMs = com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(kf, t / 1000L)
-                                val kfUs = kfMs * 1000L
-                                if (kfMs >= 0L && kfUs > currentPtsUs + 400_000L && kfUs > lastHopKfUs) {
-                                    lastHopKfUs = kfUs
-                                    hopToKeyframe(kfUs)
-                                }
-                            }
-                        }
-                    }
-                    decodeForwardFast(t, ext, dec, effectiveMediaDurationUs)
-                }
-            } catch (_: Throwable) {
-            }
-            fastRun = false
-        }.also { it.name = "fast-decode"; it.start() }
+        // Disabled: Deterministic vsync-paced Case A drain handles 0.2x..10.0x without rogue background thread
+        return
     }
 
     private fun stopFast() {
@@ -629,7 +592,10 @@ class FrameSource(
         val th = fastThread
         fastThread = null
         if (th != null && th !== Thread.currentThread()) {
-            try { th.join(300) } catch (_: Exception) {}
+            try {
+                th.interrupt()
+                th.join(200)
+            } catch (_: Exception) {}
         }
     }
 
@@ -799,13 +765,11 @@ class FrameSource(
                 return false
             }
 
-            if (effSpeed <= 1.5f || isScrubbing) stopFast()
+            stopFast()
 
             val isInitial = currentPtsUs == -1L
-            val fastMode = effSpeed > 1.5f
-            val fwdJumpUs = if (fastMode) maxOf(3_000_000L, (150_000L * effSpeed).toLong())
-                            else maxOf(500_000L, (350_000L * effSpeed).toLong())
-            val backJumpUs = if (fastMode) 250_000L else maxOf(150_000L, (150_000L * effSpeed).toLong())
+            val fwdJumpUs = maxOf(500_000L, (350_000L * effSpeed).toLong())
+            val backJumpUs = maxOf(150_000L, (150_000L * effSpeed).toLong())
             val isJump = currentPtsUs != -1L &&
                 (currentPtsUs > localUs + backJumpUs || localUs > currentPtsUs + fwdJumpUs)
 
@@ -823,14 +787,6 @@ class FrameSource(
             }
 
             val deltaUs = if (currentPtsUs != -1L) localUs - currentPtsUs else 0L
-            val hiSpeed = false
-
-            if (fastMode && !isInitial && !isJump) {
-                fastTargetUs = localUs
-                fastStampNs = System.nanoTime()
-                startFast()
-                return false   // frame aane par hasPendingSurfaceFrame flag updateTexImage karwata hai
-            }
 
             if (isInitial || isJump || (isPaused && !isScrubbing && !isAccuratePausedFrameLatched)) {
                 if (isInitial || isJump) stopFast()
@@ -865,7 +821,8 @@ class FrameSource(
 
             // Case A: Ultra-smooth forward playback decode & drain loop (Fix Bug #1)
             // 1. Feed input packets so hardware decoder queue is always well-fed
-            val maxFeed = if (hiSpeed) minOf(20, (3 * effSpeed).toInt()) else 4
+            val isSpeedUp = effSpeed > 1.2f
+            val maxFeed = if (isSpeedUp) minOf(24, (4 * effSpeed).toInt()) else 4
             var inFed = 0
             while (!inputEos && inFed < maxFeed) {
                 val inIndex = dec.dequeueInputBuffer(0L)
@@ -891,7 +848,7 @@ class FrameSource(
             // 2. Dequeue output buffers with silent pre-roll: never render intermediate catch-up frames!
             val isFastForward = deltaUs >= 40_000L
             val maxDrains = when {
-                hiSpeed -> minOf(24, (3 * effSpeed).toInt())
+                isSpeedUp -> minOf(30, maxOf(10, (6 * effSpeed).toInt()))
                 isFastForward -> 6
                 else -> 3
             }
@@ -919,7 +876,7 @@ class FrameSource(
 
                 // Fix 1A: Never render intermediate catch-up frames (pts < localUs - 20_000L) onto SurfaceTexture!
                 val isNearTarget = pts >= localUs - 20_000L || atClipEnd
-                val isLastDrainForcedRender = hiSpeed && !renderedAny && (drainedCount >= maxDrains - 1)
+                val isLastDrainForcedRender = isSpeedUp && !renderedAny && (drainedCount >= maxDrains - 1)
                 val shouldRender = isNearTarget || isLastDrainForcedRender
 
                 dec.releaseOutputBuffer(outIndex, shouldRender)
