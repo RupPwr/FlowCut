@@ -32,6 +32,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Live preview resolution (720x1280, 9:16 portrait).
@@ -510,6 +511,20 @@ class PreviewRenderer(
         onRenderRequested?.invoke()
     }
 
+    fun notifyClipSpeedChanged(clipId: String) {
+        Companion.notifyClipSpeedChanged(clipId)
+        if (frameSourceA?.clip?.id == clipId) {
+            frameSourceA?.invalidatePausedLatch()
+        }
+        if (frameSourceB?.clip?.id == clipId) {
+            frameSourceB?.invalidatePausedLatch()
+        }
+        isWaitingForFrame = true
+        isFirstFrameLatched = false
+        glSurfaceView?.requestRender()
+        onRenderRequested?.invoke()
+    }
+
     fun requestRender() {
         glSurfaceView?.requestRender()
         onRenderRequested?.invoke()
@@ -523,6 +538,18 @@ class PreviewRenderer(
         outputWidth: Int = PREVIEW_W,
         outputHeight: Int = PREVIEW_H
     ): ResolvedFrame {
+        val speedInvalidatedId = pendingSpeedInvalidateClipId.getAndSet(null)
+        if (speedInvalidatedId != null) {
+            if (frameSourceA?.clip?.id == speedInvalidatedId) {
+                frameSourceA?.invalidatePausedLatch()
+            }
+            if (frameSourceB?.clip?.id == speedInvalidatedId) {
+                frameSourceB?.invalidatePausedLatch()
+            }
+            isFirstFrameLatched = false
+            isWaitingForFrame = true
+        }
+
         // Step 1: Read snapshot and playhead ONCE per frame
         val s = holder.current
         val previewTimeUs = trimPreviewTimeUs
@@ -1164,6 +1191,7 @@ class PreviewRenderer(
                 if (activeFs != null && activeFs.clip.path == clipA.path && activeFs.canReuse(legacyClipA)) {
                     // Reuse active decoder across split clips sharing the same media path
                     activeFs.clip = legacyClipA
+                    activeFs.playbackSpeed = speedA
                     currentClipIndexA = frame.clipAIndex
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
@@ -1177,13 +1205,14 @@ class PreviewRenderer(
                     }
                 } else {
                     frameSourceA?.release()
-                    frameSourceA = FrameSource(legacyClipA, stA)
+                    frameSourceA = FrameSource(legacyClipA, stA).apply { playbackSpeed = speedA }
                     currentClipIndexA = frame.clipAIndex
                 }
             } else {
                 currentClipIndexA = frame.clipAIndex
             }
 
+            var renderedA = false
             val fsA = frameSourceA
             if (fsA != null) {
                 fsA.playbackSpeed = speedA
@@ -1204,14 +1233,14 @@ class PreviewRenderer(
                         glSurfaceView?.requestRender()
                     }
                     else -> {
-                        try {
+                        renderedA = try {
                             fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
                         } catch (_: Exception) { false }
                     }
                 }
             }
 
-            if (hasPendingSurfaceFrameA.getAndSet(false)) {
+            if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
                 try {
                     stA.updateTexImage()
                     stA.getTransformMatrix(rawMatA)
@@ -1237,13 +1266,17 @@ class PreviewRenderer(
                     val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
                             (standbySlotReadyForClipId == nextClip.id && (frameSourceB?.prewarmStage ?: 0) >= 3)
                     if (!alreadyPrepared) {
+                        val nextSpeed = nextClip.timeMap?.let { tm ->
+                            tm.speedNum.toFloat() / tm.speedDen.coerceAtLeast(1).toFloat()
+                        } ?: 1.0f
                         if (frameSourceB == null || frameSourceB?.clip?.id != nextClip.id || currentClipIndexB != m) {
                             frameSourceB?.release()
-                            frameSourceB = FrameSource(toLegacyClip(nextClip), stB)
+                            frameSourceB = FrameSource(toLegacyClip(nextClip), stB).apply { playbackSpeed = nextSpeed }
                             currentClipIndexB = m
                         }
                         val fsB = frameSourceB
                         if (fsB != null) {
+                            fsB.playbackSpeed = nextSpeed
                             val isNearTransition = timeUntilTransitionUs <= 800_000L || playhead.mode == PlayMode.PAUSED
                             if (isNearTransition) {
                                 if (fsB.prewarmStage < 1) fsB.prepareExtractorOnly()
@@ -1399,6 +1432,7 @@ class PreviewRenderer(
                 if (activeFs != null && activeFs.clip.path == clipA.path && activeFs.canReuse(legacyClipA)) {
                     // Reuse active decoder across split clips sharing the same media path
                     activeFs.clip = legacyClipA
+                    activeFs.playbackSpeed = speedA
                     currentClipIndexB = frame.clipAIndex
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
@@ -1412,13 +1446,14 @@ class PreviewRenderer(
                     }
                 } else {
                     frameSourceB?.release()
-                    frameSourceB = FrameSource(legacyClipA, stB)
+                    frameSourceB = FrameSource(legacyClipA, stB).apply { playbackSpeed = speedA }
                     currentClipIndexB = frame.clipAIndex
                 }
             } else {
                 currentClipIndexB = frame.clipAIndex
             }
 
+            var renderedB = false
             val fsB = frameSourceB
             if (fsB != null) {
                 fsB.playbackSpeed = speedA
@@ -1439,14 +1474,14 @@ class PreviewRenderer(
                         glSurfaceView?.requestRender()
                     }
                     else -> {
-                        try {
+                        renderedB = try {
                             fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
                         } catch (_: Exception) { false }
                     }
                 }
             }
 
-            if (hasPendingSurfaceFrameB.getAndSet(false)) {
+            if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
                 try {
                     stB.updateTexImage()
                     stB.getTransformMatrix(rawMatB)
@@ -1472,9 +1507,12 @@ class PreviewRenderer(
                     val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
                             (standbySlotReadyForClipId == nextClip.id && (frameSourceA?.prewarmStage ?: 0) >= 3)
                     if (!alreadyPrepared) {
+                        val nextSpeed = nextClip.timeMap?.let { tm ->
+                            tm.speedNum.toFloat() / tm.speedDen.coerceAtLeast(1).toFloat()
+                        } ?: 1.0f
                         if (frameSourceA == null || frameSourceA?.clip?.id != nextClip.id || currentClipIndexA != m) {
                             frameSourceA?.release()
-                            frameSourceA = FrameSource(toLegacyClip(nextClip), stA)
+                            frameSourceA = FrameSource(toLegacyClip(nextClip), stA).apply { playbackSpeed = nextSpeed }
                             currentClipIndexA = m
                         }
                         val fsA = frameSourceA
@@ -1984,6 +2022,11 @@ class PreviewRenderer(
         val clipTransforms = ConcurrentHashMap<String, ClipTransform>()
         val clipColorAdjusts = ConcurrentHashMap<String, ClipColorAdjust>()
         val clipBackgrounds = ConcurrentHashMap<String, ClipBackground>()
+        private val pendingSpeedInvalidateClipId = AtomicReference<String?>(null)
+
+        fun notifyClipSpeedChanged(clipId: String) {
+            pendingSpeedInvalidateClipId.set(clipId)
+        }
 
         fun getClipOpacity(clipId: String?): Float {
             if (clipId == null) return 1.0f

@@ -31,7 +31,7 @@ class FrameSource(
     private var isPrepared = false
     private var inputEos = false
     private var outputEos = false
-    var currentPtsUs: Long = -1L
+    @Volatile var currentPtsUs: Long = -1L
         private set
     val lastDecodedPtsUs: Long get() = currentPtsUs
     val currentDecoderPtsUs: Long get() = currentPtsUs
@@ -43,6 +43,11 @@ class FrameSource(
     private var lastRenderedLocalUs: Long = -1L
     var isAccuratePausedFrameLatched: Boolean = false
         internal set
+
+    fun invalidatePausedLatch() {
+        isAccuratePausedFrameLatched = false
+        lastRenderedLocalUs = -1L
+    }
     private var catchUpStartMs: Long = 0L
     private var _isCatchingUpFromSeek: Boolean = false
     private var mediaDurationUs: Long = -1L
@@ -77,6 +82,10 @@ class FrameSource(
 
     fun hasValidFrameNear(targetUs: Long): Boolean {
         checkCatchUpTimeout()
+        if (effSpeed > 1.5f && currentPtsUs != -1L &&
+            kotlin.math.abs(targetUs - currentPtsUs) <= (60_000L * effSpeed).toLong().coerceAtLeast(400_000L)) {
+            return true
+        }
         val durationUs = effectiveMediaDurationUs
         val isNearEos = durationUs > 0L && targetUs >= durationUs - 85_000L
         if (isNearEos && (outputEos || (currentPtsUs != -1L && currentPtsUs >= durationUs - 85_000L))) {
@@ -212,6 +221,13 @@ class FrameSource(
 
         try {
             surface = Surface(surfaceTexture)
+            try {
+                format.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                format.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                }
+            } catch (_: Exception) {}
             var decoder: MediaCodec? = null
 
             // Pass 1: Try Hardware Decoder
@@ -593,7 +609,8 @@ class FrameSource(
 
             // Case 2: Playback / Paused mode
             // If already accurately latched on this target in PAUSED mode, do zero work!
-            if (isAccuratePausedFrameLatched && (kotlin.math.abs(localUs - lastRenderedLocalUs) <= 5_000L || (isNearClipEnd && lastRenderedLocalUs >= clipDurationUs - 85_000L))) {
+            val latchToleranceUs = (5_000L * playbackSpeed.coerceIn(0.1f, 10.0f)).toLong().coerceAtLeast(800L)
+            if (isAccuratePausedFrameLatched && (kotlin.math.abs(localUs - lastRenderedLocalUs) <= latchToleranceUs || (isNearClipEnd && lastRenderedLocalUs >= clipDurationUs - 85_000L))) {
                 isCatchingUpFromSeek = false
                 return false
             }
@@ -630,10 +647,14 @@ class FrameSource(
             }
 
             val deltaUs = if (currentPtsUs != -1L) localUs - currentPtsUs else 0L
-            val hiSpeed = effSpeed >= 4f
-            if (hiSpeed && deltaUs > 500_000L) {
+            val isHighSpeed = playbackSpeed > 1.2f
+
+            if (effSpeed >= 4f && deltaUs > 500_000L) {
                 val ok = seekTo(localUs, fastKeyframeOnly = true)
-                if (ok) { lastRenderedLocalUs = localUs }
+                if (ok) {
+                    lastRenderedLocalUs = localUs
+                    isAccuratePausedFrameLatched = true
+                }
                 return ok
             }
 
@@ -669,7 +690,7 @@ class FrameSource(
 
             // Case A: Ultra-smooth forward playback decode & drain loop (Fix Bug #1)
             // 1. Feed input packets so hardware decoder queue is always well-fed
-            val maxFeed = if (hiSpeed) minOf(20, (3 * effSpeed).toInt()) else 4
+            val maxFeed = if (isHighSpeed) minOf(20, (4 * effSpeed).toInt()) else 4
             var inFed = 0
             while (!inputEos && inFed < maxFeed) {
                 val inIndex = dec.dequeueInputBuffer(0L)
@@ -695,7 +716,7 @@ class FrameSource(
             // 2. Dequeue output buffers with silent pre-roll: never render intermediate catch-up frames!
             val isFastForward = deltaUs >= 40_000L
             val maxDrains = when {
-                hiSpeed -> minOf(24, (3 * effSpeed).toInt())
+                isHighSpeed -> minOf(24, (5 * effSpeed).toInt())
                 isFastForward -> 6
                 else -> 3
             }
@@ -722,8 +743,8 @@ class FrameSource(
                     (clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L)
 
                 // Fix 1A: Never render intermediate catch-up frames (pts < localUs - 20_000L) onto SurfaceTexture!
-                val isNearTarget = pts >= localUs - 20_000L || atClipEnd
-                val isLastDrainForcedRender = hiSpeed && !renderedAny && (drainedCount >= maxDrains - 1)
+                val isNearTarget = pts >= localUs - (if (isHighSpeed) (25_000L * effSpeed).toLong() else 20_000L) || atClipEnd
+                val isLastDrainForcedRender = isHighSpeed && !renderedAny && (drainedCount >= maxDrains - 1)
                 val shouldRender = isNearTarget || isLastDrainForcedRender
 
                 dec.releaseOutputBuffer(outIndex, shouldRender)
