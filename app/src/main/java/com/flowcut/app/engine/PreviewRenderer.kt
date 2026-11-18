@@ -787,6 +787,7 @@ class PreviewRenderer(
             if (isAccurateSeek) {
                 forceAccurateSeekPending = false
             }
+            val isPaused = playhead.mode == PlayMode.PAUSED
             val isScrubbing = !isAccurateSeek && ((trimPreviewTimeUs >= 0L) ||
                     playhead.mode == PlayMode.SCRUBBING ||
                     playhead.mode == PlayMode.FLINGING)
@@ -823,7 +824,7 @@ class PreviewRenderer(
                             fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
                         val renderedA = try {
-                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) ?: false
+                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
                         if (renderedA || hasPendingSurfaceFrameB.getAndSet(false)) {
                             try {
@@ -849,7 +850,7 @@ class PreviewRenderer(
                             fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
                         }
                         val renderedB = try {
-                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing) ?: false
+                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
                         if (renderedB || hasPendingSurfaceFrameA.getAndSet(false)) {
                             try {
@@ -887,7 +888,7 @@ class PreviewRenderer(
                             fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
                         val renderedA = try {
-                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing) ?: false
+                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
                         if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
                             try {
@@ -913,7 +914,7 @@ class PreviewRenderer(
                             fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
                         }
                         val renderedB = try {
-                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing) ?: false
+                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
                         if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
                             try {
@@ -1205,7 +1206,7 @@ class PreviewRenderer(
                     }
                     else -> {
                         try {
-                            fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
+                            fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
                         } catch (_: Exception) { false }
                     }
                 }
@@ -1244,12 +1245,11 @@ class PreviewRenderer(
                         }
                         val fsB = frameSourceB
                         if (fsB != null) {
-                            val isNearTransition = timeUntilTransitionUs <= 800_000L || playhead.mode == PlayMode.PAUSED
+                            val isNearTransition = timeUntilTransitionUs in 0L..800_000L
                             if (isNearTransition) {
                                 if (fsB.prewarmStage < 1) fsB.prepareExtractorOnly()
                                 if (fsB.prewarmStage < 2) fsB.startCodecAndSeek(nextClipInUs)
                                 if (fsB.prewarmStage < 3) fsB.stepPrewarmTo(nextClipInUs)
-                                if (fsB.prewarmStage < 3) fsB.ensureDecodedAt(nextClipInUs)
                                 if (hasPendingSurfaceFrameB.getAndSet(false) || fsB.prewarmStage >= 3) {
                                     try {
                                         stB.updateTexImage()
@@ -1440,7 +1440,7 @@ class PreviewRenderer(
                     }
                     else -> {
                         try {
-                            fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing)
+                            fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
                         } catch (_: Exception) { false }
                     }
                 }
@@ -1479,12 +1479,11 @@ class PreviewRenderer(
                         }
                         val fsA = frameSourceA
                         if (fsA != null) {
-                            val isNearTransition = timeUntilTransitionUs <= 800_000L || playhead.mode == PlayMode.PAUSED
+                            val isNearTransition = timeUntilTransitionUs in 0L..800_000L
                             if (isNearTransition) {
                                 if (fsA.prewarmStage < 1) fsA.prepareExtractorOnly()
                                 if (fsA.prewarmStage < 2) fsA.startCodecAndSeek(nextClipInUs)
                                 if (fsA.prewarmStage < 3) fsA.stepPrewarmTo(nextClipInUs)
-                                if (fsA.prewarmStage < 3) fsA.ensureDecodedAt(nextClipInUs)
                                 if (hasPendingSurfaceFrameA.getAndSet(false) || fsA.prewarmStage >= 3) {
                                     try {
                                         stA.updateTexImage()

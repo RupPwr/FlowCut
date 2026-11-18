@@ -401,14 +401,14 @@ class FrameSource(
         }
         if (prewarmStage < 2 || codec == null) {
             if (!startCodecAndSeek(targetUs)) return false
-        }
-        val fastKeyframe = targetUs <= 100_000L
-        val didRender = seekTo(targetUs, fastKeyframeOnly = fastKeyframe)
-        if (didRender) {
-            prewarmStage = 3
-            isCatchingUpFromSeek = false
-            isAccuratePausedFrameLatched = true
-            return true
+            val fastKeyframe = targetUs <= 100_000L
+            val didRender = seekTo(targetUs, fastKeyframeOnly = fastKeyframe)
+            if (didRender) {
+                prewarmStage = 3
+                isCatchingUpFromSeek = false
+                isAccuratePausedFrameLatched = true
+                return true
+            }
         }
         for (i in 0 until 5) {
             if (stepPrewarmTo(targetUs)) {
@@ -418,7 +418,7 @@ class FrameSource(
                 return true
             }
         }
-        if (outputEos || (clipDurationUs > 0L && currentPtsUs >= clipDurationUs - 85_000L)) {
+        if (outputEos || (clipDurationUs > 0L && currentPtsUs >= clipDurationUs - 85_000L) || currentPtsUs != -1L) {
             prewarmStage = 3
             isCatchingUpFromSeek = false
             isAccuratePausedFrameLatched = true
@@ -754,7 +754,7 @@ class FrameSource(
         return false
     }
 
-    fun frameAt(localUs: Long, isScrubbing: Boolean = false): Boolean {
+    fun frameAt(localUs: Long, isScrubbing: Boolean = false, isPaused: Boolean = false): Boolean {
         checkCatchUpTimeout()
         val ext = extractor ?: return false
         val dec = codec ?: return false
@@ -804,8 +804,8 @@ class FrameSource(
             val isInitial = currentPtsUs == -1L
             val fastMode = effSpeed > 1.5f
             val fwdJumpUs = if (fastMode) maxOf(3_000_000L, (150_000L * effSpeed).toLong())
-                            else maxOf(150_000L, (150_000L * effSpeed).toLong())
-            val backJumpUs = if (fastMode) 250_000L else 100_000L
+                            else maxOf(500_000L, (350_000L * effSpeed).toLong())
+            val backJumpUs = if (fastMode) 250_000L else maxOf(150_000L, (150_000L * effSpeed).toLong())
             val isJump = currentPtsUs != -1L &&
                 (currentPtsUs > localUs + backJumpUs || localUs > currentPtsUs + fwdJumpUs)
 
@@ -832,7 +832,7 @@ class FrameSource(
                 return false   // frame aane par hasPendingSurfaceFrame flag updateTexImage karwata hai
             }
 
-            if (isInitial || isJump || (!fastMode && !isScrubbing && !isAccuratePausedFrameLatched)) {
+            if (isInitial || isJump || (isPaused && !isScrubbing && !isAccuratePausedFrameLatched)) {
                 if (isInitial || isJump) stopFast()
                 lastForwardKeyframeHopUs = -1L
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)

@@ -111,6 +111,16 @@ class ThumbnailService(
      * Stale requests can be cancelled via cancelStaleRequests().
      */
     fun requestTiles(requests: List<TileRequest>, onChanged: () -> Unit) {
+        val reqKeys = requests.map { it.key }.toSet()
+        val iter = inFlight.entries.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            if (!reqKeys.contains(entry.key)) {
+                entry.value.cancel()
+                iter.remove()
+            }
+        }
+
         val capped = requests.take(16)
         for (req in capped) {
             if (req.path.isEmpty()) continue
@@ -200,8 +210,9 @@ class ThumbnailService(
             kotlin.coroutines.coroutineContext.ensureActive()
 
             // Decode using OPTION_CLOSEST_SYNC for ultra-fast keyframe extraction
-            val retriever = MediaMetadataRetriever()
+            var retriever: MediaMetadataRetriever? = null
             try {
+                retriever = MediaMetadataRetriever()
                 kotlin.coroutines.coroutineContext.ensureActive()
                 retriever.setDataSource(path)
                 kotlin.coroutines.coroutineContext.ensureActive()
@@ -239,10 +250,12 @@ class ThumbnailService(
                 } else {
                     null
                 }
+            } catch (_: CancellationException) {
+                null
             } catch (_: Throwable) {
                 null
             } finally {
-                try { retriever.release() } catch (_: Throwable) {}
+                try { retriever?.release() } catch (_: Throwable) {}
             }
         }
     }
