@@ -206,12 +206,15 @@ data class ClipColorAdjust(
     val highlights: Float = 0f,  // -1f..1f (UI: -50 to +50)
     val shadows: Float = 0f,     // -1f..1f (UI: -50 to +50)
     val sharpness: Float = 0f,   //  0f..1f (UI:  0 to 100)
-    val vignette: Float = 0f     // -1f..1f (UI: -50 to +50)
+    val vignette: Float = 0f,    // -1f..1f (UI: -50 to +50)
+    val clarity: Float = 0f,     // -1f..1f (UI: -50 to +50)
+    val sharpPlus: Float = 0f    //  0f..1f (UI:  0 to 100)
 ) {
     val isIdentity: Boolean get() =
         brightness == 0f && contrast == 0f && saturation == 0f &&
         exposure == 0f && warmth == 0f && tint == 0f &&
-        highlights == 0f && shadows == 0f && sharpness == 0f && vignette == 0f
+        highlights == 0f && shadows == 0f && sharpness == 0f && vignette == 0f &&
+        clarity == 0f && sharpPlus == 0f
 
     companion object {
         val DEFAULT = ClipColorAdjust()
@@ -633,7 +636,11 @@ class PreviewRenderer(
     // ---------------------------------------------------------------------------------------------
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         renderer.init()
+        recreateSurfaceTextures()
+        releaseDecoders(synchronous = true)
+    }
 
+    private fun recreateSurfaceTextures() {
         surfaceTextureA?.setOnFrameAvailableListener(null)
         surfaceTextureA?.release()
         surfaceTextureB?.setOnFrameAvailableListener(null)
@@ -662,8 +669,6 @@ class PreviewRenderer(
 
         surfaceTextureA = stA
         surfaceTextureB = stB
-
-        releaseDecoders()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -694,23 +699,37 @@ class PreviewRenderer(
     private var pausedCatchUpAttempts: Int = 0
 
     private fun checkIsCatchingUp(frame: ResolvedFrame, isTransition: Boolean): Boolean {
+        // During active scrubbing/flinging: fast keyframe preview is shown, no loader needed.
+        // Only signal catching-up (loader) when truly paused and waiting for accurate frame.
+        val isScrubOrFling = playhead.mode == PlayMode.SCRUBBING || playhead.mode == PlayMode.FLINGING
+        if (isScrubOrFling) {
+            lastPausedTargetUs = -1L
+            pausedCatchUpAttempts = 0
+            return false
+        }
+
         return if (playhead.mode == PlayMode.PAUSED) {
             if (frame.tUs != lastPausedTargetUs) {
                 lastPausedTargetUs = frame.tUs
                 pausedCatchUpAttempts = 0
             }
             pausedCatchUpAttempts++
-            if (pausedCatchUpAttempts > 3) {
+            if (pausedCatchUpAttempts > 120) {
                 frameSourceA?.isAccuratePausedFrameLatched = true
                 frameSourceB?.isAccuratePausedFrameLatched = true
                 false
             } else {
                 val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
                 if (isTransition) {
-                    (frameSourceA != null && !frameSourceA!!.isAccuratePausedFrameLatched) ||
-                        (frameSourceB != null && !frameSourceB!!.isAccuratePausedFrameLatched)
+                    val readyA = frameSourceA != null && frameSourceA!!.prewarmStage >= 3 &&
+                            !frameSourceA!!.isCatchingUpFromSeek && frameSourceA!!.hasValidFrameNear(frame.clipASourceUs)
+                    val readyB = frameSourceB != null && frameSourceB!!.prewarmStage >= 3 &&
+                            !frameSourceB!!.isCatchingUpFromSeek && frameSourceB!!.hasValidFrameNear(frame.clipBSourceUs)
+                    !(readyA && readyB)
                 } else {
-                    activeFs != null && !activeFs.isAccuratePausedFrameLatched
+                    val isReady = activeFs != null && activeFs.prewarmStage >= 3 &&
+                            !activeFs.isCatchingUpFromSeek && activeFs.hasValidFrameNear(frame.clipASourceUs)
+                    !isReady
                 }
             }
         } else {
@@ -812,11 +831,14 @@ class PreviewRenderer(
                         // Outgoing clipA is on Slot B (stB)
                         val clipAChanged = frameSourceB == null ||
                                 currentClipIndexB != frame.clipAIndex ||
-                                frameSourceB?.clip?.id != clipA.id
+                                frameSourceB?.clip?.id != clipA.id ||
+                                frameSourceB?.clip?.path != clipA.path
                         if (clipAChanged) {
-                            frameSourceB?.release()
+                            frameSourceB?.release(synchronous = true)
                             frameSourceB = FrameSource(toLegacyClip(clipA), stB)
                             currentClipIndexB = frame.clipAIndex
+                        } else {
+                            frameSourceB?.clip = toLegacyClip(clipA)
                         }
                         val fsOutgoing = frameSourceB
                         fsOutgoing?.playbackSpeed = speedA
@@ -826,6 +848,9 @@ class PreviewRenderer(
                         val renderedA = try {
                             fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
+                        if (!renderedA && (fsOutgoing?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
+                            glSurfaceView?.requestRender()
+                        }
                         if (renderedA || hasPendingSurfaceFrameB.getAndSet(false)) {
                             try {
                                 stB.updateTexImage()
@@ -838,11 +863,14 @@ class PreviewRenderer(
                         // Incoming clipB is on Slot A (stA)
                         val clipBChanged = frameSourceA == null ||
                                 currentClipIndexA != frame.clipBIndex ||
-                                frameSourceA?.clip?.id != clipB.id
+                                frameSourceA?.clip?.id != clipB.id ||
+                                frameSourceA?.clip?.path != clipB.path
                         if (clipBChanged) {
-                            frameSourceA?.release()
+                            frameSourceA?.release(synchronous = true)
                             frameSourceA = FrameSource(toLegacyClip(clipB), stA)
                             currentClipIndexA = frame.clipBIndex
+                        } else {
+                            frameSourceA?.clip = toLegacyClip(clipB)
                         }
                         val fsIncoming = frameSourceA
                         fsIncoming?.playbackSpeed = speedB
@@ -852,6 +880,9 @@ class PreviewRenderer(
                         val renderedB = try {
                             fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
+                        if (!renderedB && (fsIncoming?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
+                            glSurfaceView?.requestRender()
+                        }
                         if (renderedB || hasPendingSurfaceFrameA.getAndSet(false)) {
                             try {
                                 stA.updateTexImage()
@@ -876,11 +907,14 @@ class PreviewRenderer(
                         // Outgoing clipA is on Slot A (stA)
                         val clipAChanged = frameSourceA == null ||
                                 currentClipIndexA != frame.clipAIndex ||
-                                frameSourceA?.clip?.id != clipA.id
+                                frameSourceA?.clip?.id != clipA.id ||
+                                frameSourceA?.clip?.path != clipA.path
                         if (clipAChanged) {
-                            frameSourceA?.release()
+                            frameSourceA?.release(synchronous = true)
                             frameSourceA = FrameSource(toLegacyClip(clipA), stA)
                             currentClipIndexA = frame.clipAIndex
+                        } else {
+                            frameSourceA?.clip = toLegacyClip(clipA)
                         }
                         val fsOutgoing = frameSourceA
                         fsOutgoing?.playbackSpeed = speedA
@@ -890,6 +924,9 @@ class PreviewRenderer(
                         val renderedA = try {
                             fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
+                        if (!renderedA && (fsOutgoing?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
+                            glSurfaceView?.requestRender()
+                        }
                         if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
                             try {
                                 stA.updateTexImage()
@@ -902,11 +939,14 @@ class PreviewRenderer(
                         // Incoming clipB is on Slot B (stB)
                         val clipBChanged = frameSourceB == null ||
                                 currentClipIndexB != frame.clipBIndex ||
-                                frameSourceB?.clip?.id != clipB.id
+                                frameSourceB?.clip?.id != clipB.id ||
+                                frameSourceB?.clip?.path != clipB.path
                         if (clipBChanged) {
-                            frameSourceB?.release()
+                            frameSourceB?.release(synchronous = true)
                             frameSourceB = FrameSource(toLegacyClip(clipB), stB)
                             currentClipIndexB = frame.clipBIndex
+                        } else {
+                            frameSourceB?.clip = toLegacyClip(clipB)
                         }
                         val fsIncoming = frameSourceB
                         fsIncoming?.playbackSpeed = speedB
@@ -916,6 +956,9 @@ class PreviewRenderer(
                         val renderedB = try {
                             fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
                         } catch (_: Exception) { false }
+                        if (!renderedB && (fsIncoming?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
+                            glSurfaceView?.requestRender()
+                        }
                         if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
                             try {
                                 stB.updateTexImage()
@@ -1077,7 +1120,10 @@ class PreviewRenderer(
             val isCatchingUp = checkIsCatchingUp(frame, isTransition)
 
             if (isCatchingUp) {
-                isWaitingForFrame = true
+                // Only show loader spinner when paused (not during scrubbing/flinging)
+                if (playhead.mode == PlayMode.PAUSED) {
+                    isWaitingForFrame = true
+                }
                 glSurfaceView?.requestRender()
                 onRenderRequested?.invoke()
             } else {
@@ -1142,7 +1188,7 @@ class PreviewRenderer(
                  (frame.clipASourceUs >= frameSourceB!!.lastDecodedPtsUs && frame.clipASourceUs - frameSourceB!!.lastDecodedPtsUs <= continuityLimitUs))
 
             // primarySlot == 1: Release frameSourceA if it still held an old clip from before the transition
-            if (frameSourceA != null && frameSourceA?.clip?.id != clipA.id && currentClipIndexA < frame.clipAIndex && !canSlotBContinue) {
+            if (frameSourceA != null && (frameSourceA?.clip?.id != clipA.id || frameSourceA?.clip?.path != clipA.path) && currentClipIndexA < frame.clipAIndex && !canSlotBContinue) {
                 frameSourceA?.release()
                 frameSourceA = null
                 currentClipIndexA = -1
@@ -1161,7 +1207,10 @@ class PreviewRenderer(
 
         if (primarySlot == 0) {
             // --- Slot A is Primary (stA / texAId) ---
-            val clipAChanged = frameSourceA == null || frameSourceA?.clip?.id != clipA.id || currentClipIndexA != frame.clipAIndex
+            val clipAChanged = frameSourceA == null ||
+                frameSourceA?.clip?.id != clipA.id ||
+                frameSourceA?.clip?.path != clipA.path ||
+                currentClipIndexA != frame.clipAIndex
 
             if (clipAChanged) {
                 val legacyClipA = toLegacyClip(clipA)
@@ -1182,41 +1231,45 @@ class PreviewRenderer(
                             !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
                         }
                         if (shouldSeek) {
-                            activeFs.seekTo(targetPts, fastKeyframeOnly = false)
+                            activeFs.seekTo(targetPts, fastKeyframeOnly = isScrubbing)
                         }
                     }
                 } else {
-                    frameSourceA?.release()
+                    frameSourceA?.release(synchronous = true)
                     frameSourceA = FrameSource(legacyClipA, stA)
                     currentClipIndexA = frame.clipAIndex
                 }
             } else {
                 currentClipIndexA = frame.clipAIndex
+                val legacyClipA = toLegacyClip(clipA)
+                if (frameSourceA == null || frameSourceA?.clip?.path != clipA.path) {
+                    frameSourceA?.release(synchronous = true)
+                    frameSourceA = FrameSource(legacyClipA, stA)
+                } else {
+                    frameSourceA?.clip = legacyClipA
+                }
             }
 
             val fsA = frameSourceA
             if (fsA != null) {
                 fsA.playbackSpeed = speedA
-                when (fsA.prewarmStage) {
-                    0 -> {
-                        fsA.prepareExtractorOnly()
+                if (fsA.prewarmStage < 2) {
+                    fsA.startCodecAndSeek(frame.clipASourceUs)
+                    onRenderRequested?.invoke()
+                    glSurfaceView?.requestRender()
+                }
+                if (fsA.prewarmStage == 2) {
+                    fsA.stepPrewarmTo(frame.clipASourceUs)
+                    onRenderRequested?.invoke()
+                    glSurfaceView?.requestRender()
+                }
+                if (fsA.prewarmStage >= 3) {
+                    val rendered = try {
+                        fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
+                    } catch (_: Exception) { false }
+                    if (!rendered && (fsA.isCatchingUpFromSeek || isWaitingForFrame)) {
                         onRenderRequested?.invoke()
                         glSurfaceView?.requestRender()
-                    }
-                    1 -> {
-                        fsA.startCodecAndSeek(frame.clipASourceUs)
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
-                    }
-                    2 -> {
-                        fsA.stepPrewarmTo(frame.clipASourceUs)
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
-                    }
-                    else -> {
-                        try {
-                            fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
-                        } catch (_: Exception) { false }
                     }
                 }
             }
@@ -1247,8 +1300,11 @@ class PreviewRenderer(
                     val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
                             (standbySlotReadyForClipId == nextClip.id && (frameSourceB?.prewarmStage ?: 0) >= 3)
                     if (!alreadyPrepared) {
-                        if (frameSourceB == null || frameSourceB?.clip?.id != nextClip.id || currentClipIndexB != m) {
-                            frameSourceB?.release()
+                        if (frameSourceB == null ||
+                            frameSourceB?.clip?.id != nextClip.id ||
+                            frameSourceB?.clip?.path != nextClip.path ||
+                            currentClipIndexB != m) {
+                            frameSourceB?.release(synchronous = true)
                             frameSourceB = FrameSource(toLegacyClip(nextClip), stB)
                             currentClipIndexB = m
                         }
@@ -1392,7 +1448,10 @@ class PreviewRenderer(
             val isCatchingUp = checkIsCatchingUp(frame, isTransition)
 
             if (isCatchingUp) {
-                isWaitingForFrame = true
+                // Only show loader spinner when paused (not during scrubbing/flinging)
+                if (playhead.mode == PlayMode.PAUSED) {
+                    isWaitingForFrame = true
+                }
                 glSurfaceView?.requestRender()
                 onRenderRequested?.invoke()
             } else {
@@ -1400,7 +1459,10 @@ class PreviewRenderer(
             }
         } else {
             // --- Slot B is Primary (stB / texBId) ---
-            val clipBChanged = frameSourceB == null || frameSourceB?.clip?.id != clipA.id || currentClipIndexB != frame.clipAIndex
+            val clipBChanged = frameSourceB == null ||
+                frameSourceB?.clip?.id != clipA.id ||
+                frameSourceB?.clip?.path != clipA.path ||
+                currentClipIndexB != frame.clipAIndex
 
             if (clipBChanged) {
                 val legacyClipA = toLegacyClip(clipA)
@@ -1421,41 +1483,45 @@ class PreviewRenderer(
                             !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
                         }
                         if (shouldSeek) {
-                            activeFs.seekTo(targetPts, fastKeyframeOnly = false)
+                            activeFs.seekTo(targetPts, fastKeyframeOnly = isScrubbing)
                         }
                     }
                 } else {
-                    frameSourceB?.release()
+                    frameSourceB?.release(synchronous = true)
                     frameSourceB = FrameSource(legacyClipA, stB)
                     currentClipIndexB = frame.clipAIndex
                 }
             } else {
                 currentClipIndexB = frame.clipAIndex
+                val legacyClipA = toLegacyClip(clipA)
+                if (frameSourceB == null || frameSourceB?.clip?.path != clipA.path) {
+                    frameSourceB?.release(synchronous = true)
+                    frameSourceB = FrameSource(legacyClipA, stB)
+                } else {
+                    frameSourceB?.clip = legacyClipA
+                }
             }
 
             val fsB = frameSourceB
             if (fsB != null) {
                 fsB.playbackSpeed = speedA
-                when (fsB.prewarmStage) {
-                    0 -> {
-                        fsB.prepareExtractorOnly()
+                if (fsB.prewarmStage < 2) {
+                    fsB.startCodecAndSeek(frame.clipASourceUs)
+                    onRenderRequested?.invoke()
+                    glSurfaceView?.requestRender()
+                }
+                if (fsB.prewarmStage == 2) {
+                    fsB.stepPrewarmTo(frame.clipASourceUs)
+                    onRenderRequested?.invoke()
+                    glSurfaceView?.requestRender()
+                }
+                if (fsB.prewarmStage >= 3) {
+                    val rendered = try {
+                        fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
+                    } catch (_: Exception) { false }
+                    if (!rendered && (fsB.isCatchingUpFromSeek || isWaitingForFrame)) {
                         onRenderRequested?.invoke()
                         glSurfaceView?.requestRender()
-                    }
-                    1 -> {
-                        fsB.startCodecAndSeek(frame.clipASourceUs)
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
-                    }
-                    2 -> {
-                        fsB.stepPrewarmTo(frame.clipASourceUs)
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
-                    }
-                    else -> {
-                        try {
-                            fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
-                        } catch (_: Exception) { false }
                     }
                 }
             }
@@ -1486,8 +1552,11 @@ class PreviewRenderer(
                     val alreadyPrepared = (standbyPreparedPath == nextClip.path && standbyPreparedInUs == nextClipInUs) ||
                             (standbySlotReadyForClipId == nextClip.id && (frameSourceA?.prewarmStage ?: 0) >= 3)
                     if (!alreadyPrepared) {
-                        if (frameSourceA == null || frameSourceA?.clip?.id != nextClip.id || currentClipIndexA != m) {
-                            frameSourceA?.release()
+                        if (frameSourceA == null ||
+                            frameSourceA?.clip?.id != nextClip.id ||
+                            frameSourceA?.clip?.path != nextClip.path ||
+                            currentClipIndexA != m) {
+                            frameSourceA?.release(synchronous = true)
                             frameSourceA = FrameSource(toLegacyClip(nextClip), stA)
                             currentClipIndexA = m
                         }
@@ -1631,7 +1700,10 @@ class PreviewRenderer(
             val isCatchingUp = checkIsCatchingUp(frame, isTransition)
 
             if (isCatchingUp) {
-                isWaitingForFrame = true
+                // Only show loader spinner when paused (not during scrubbing/flinging)
+                if (playhead.mode == PlayMode.PAUSED) {
+                    isWaitingForFrame = true
+                }
                 glSurfaceView?.requestRender()
                 onRenderRequested?.invoke()
             } else {
@@ -1832,18 +1904,20 @@ class PreviewRenderer(
         }
     }
 
-    private fun releaseDecoders() {
+    private fun releaseDecoders(synchronous: Boolean = false) {
         isFirstFrameLatched = false
-        frameSourceA?.release()
+        frameSourceA?.release(synchronous = synchronous)
         frameSourceA = null
         currentClipIndexA = -1
 
-        frameSourceB?.release()
+        frameSourceB?.release(synchronous = synchronous)
         frameSourceB = null
         currentClipIndexB = -1
 
         primarySlot = 0
         standbySlotReadyForClipId = null
+        standbyPreparedPath = null
+        standbyPreparedInUs = -1L
         lastTransitionIncomingSlot = -1
         lastTransitionIncomingClipIndex = -1
         lastRenderedTransitionJunction = -1
@@ -1852,15 +1926,32 @@ class PreviewRenderer(
         Matrix.setIdentityM(rawMatB, 0)
     }
 
+    fun invalidateDecoders() {
+        val gl = glSurfaceView
+        if (gl != null) {
+            gl.queueEvent {
+                releaseDecoders(synchronous = true)
+                recreateSurfaceTextures()
+                glSurfaceView?.requestRender()
+                onRenderRequested?.invoke()
+            }
+        } else {
+            releaseDecoders(synchronous = true)
+            recreateSurfaceTextures()
+            glSurfaceView?.requestRender()
+            onRenderRequested?.invoke()
+        }
+    }
+
     fun suspendForExport() {
         isSuspendedForExport = true
         val gl = glSurfaceView
         if (gl != null) {
             gl.queueEvent {
-                releaseDecoders()
+                releaseDecoders(synchronous = true)
             }
         } else {
-            releaseDecoders()
+            releaseDecoders(synchronous = true)
         }
     }
 
@@ -1876,7 +1967,7 @@ class PreviewRenderer(
         }
         trimPreviewTimeUs = -1L
         stopPrefetch()
-        releaseDecoders()
+        releaseDecoders(synchronous = true)
         try {
             stCallbackThread.quitSafely()
         } catch (_: Throwable) {}
@@ -2172,14 +2263,21 @@ class PreviewRenderer(
             }
             val aScreen = if (canvasAspect > 0f) canvasAspect else (9.0f / 16.0f)
             val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform)
-            val isRot90or270 = (nearestCardinal == 90 || nearestCardinal == 270)
-            val effAspect = if (isRot90or270) (1.0f / videoAspect) else videoAspect
 
-            val baseHw = if (effAspect <= aScreen) 0.5f * (effAspect / aScreen) else 0.5f
-            val baseHh = if (effAspect <= aScreen) 0.5f else 0.5f * (aScreen / effAspect)
+            val rad = Math.toRadians(normRot.toDouble())
+            val cos = Math.abs(Math.cos(rad)).toFloat()
+            val sin = Math.abs(Math.sin(rad)).toFloat()
+
+            val maxBaseW = (0.5f * aScreen) / (videoAspect * cos + sin).coerceAtLeast(0.0001f)
+            val maxBaseH = 0.5f / (videoAspect * sin + cos).coerceAtLeast(0.0001f)
+            val baseSize = minOf(maxBaseW, maxBaseH)
+
+            val w_v = baseSize * videoAspect
+            val h_v = baseSize
+
             val scale = transform.scale.coerceIn(0.1f, 10.0f)
-            val hw = baseHw * scale
-            val hh = baseHh * scale
+            val hw = ((w_v * cos + h_v * sin) / aScreen) * scale
+            val hh = (w_v * sin + h_v * cos) * scale
 
             return (transform.panX - hw <= -0.5f) &&
                    (transform.panX + hw >= 0.5f) &&
@@ -2202,28 +2300,35 @@ class PreviewRenderer(
             val aScreen = if (canvasAspect > 0f) canvasAspect else (9.0f / 16.0f)
             val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform, cropLeft, cropTop, cropRight, cropBottom)
 
-            val fitScaleX: Float
-            val fitScaleY: Float
-            if (videoAspect < aScreen) {
-                fitScaleX = videoAspect / aScreen
-                fitScaleY = 1.0f
-            } else {
-                fitScaleX = 1.0f
-                fitScaleY = aScreen / videoAspect
-            }
+            val rad = Math.toRadians(transform.rotationDeg.toDouble())
+            val cos = Math.abs(Math.cos(rad)).toFloat()
+            val sin = Math.abs(Math.sin(rad)).toFloat()
+
+            // To fit the video inside the canvas with NO cropping:
+            // Bounding box of rotated video in isotropic space must fit within canvas half-width (0.5 * aScreen) and half-height (0.5):
+            // bbox_w = baseSize * (videoAspect * cos + 1.0f * sin) <= 0.5 * aScreen
+            // bbox_h = baseSize * (videoAspect * sin + 1.0f * cos) <= 0.5
+            val maxBaseW = (0.5f * aScreen) / (videoAspect * cos + sin).coerceAtLeast(0.0001f)
+            val maxBaseH = 0.5f / (videoAspect * sin + cos).coerceAtLeast(0.0001f)
+            val baseSize = minOf(maxBaseW, maxBaseH)
+
+            val w_v = baseSize * videoAspect
+            val h_v = baseSize
+
+            val scale_vid_x = 0.5f / w_v
+            val scale_vid_y = 0.5f / h_v
 
             Matrix.translateM(outMat, 0, 0.5f, 0.5f, 0f)
-            Matrix.scaleM(outMat, 0, 1.0f / fitScaleX, 1.0f / fitScaleY, 1f)
+            Matrix.scaleM(outMat, 0, scale_vid_x, scale_vid_y, 1f)
             val sInv = 1.0f / transform.scale.coerceIn(0.1f, 10.0f)
             Matrix.scaleM(outMat, 0, sInv, sInv, 1f)
-            Matrix.scaleM(outMat, 0, 1.0f / aScreen, 1.0f, 1f)
             if (transform.rotationDeg != 0f) {
                 Matrix.rotateM(outMat, 0, transform.rotationDeg, 0f, 0f, 1f)
             }
-            Matrix.scaleM(outMat, 0, aScreen, 1.0f, 1f)
             if (transform.isFlippedH) {
                 Matrix.scaleM(outMat, 0, -1f, 1f, 1f)
             }
+            Matrix.scaleM(outMat, 0, aScreen, 1.0f, 1f)
             Matrix.translateM(outMat, 0, -0.5f - transform.panX, -0.5f - transform.panY, 0f)
         }
 
@@ -2239,24 +2344,31 @@ class PreviewRenderer(
             val rot = (((Math.round(transform.rotationDeg / 90.0).toInt() * 90) % 360 + 360) % 360)
             val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform)
 
-            val scaleX: Float
-            val scaleY: Float
-            if (videoAspect < aScreen) {
-                scaleX = 1.0f
-                scaleY = videoAspect / aScreen
-            } else {
-                scaleX = aScreen / videoAspect
-                scaleY = 1.0f
-            }
+            val rad = Math.toRadians(rot.toDouble())
+            val cos = Math.abs(Math.cos(rad)).toFloat()
+            val sin = Math.abs(Math.sin(rad)).toFloat()
+
+            // For background COVER mode:
+            // Bounding box of rotated video in isotropic space must be >= canvas size (0.5 * aScreen, 0.5):
+            val minBaseW = (0.5f * aScreen) / (videoAspect * cos + sin).coerceAtLeast(0.0001f)
+            val minBaseH = 0.5f / (videoAspect * sin + cos).coerceAtLeast(0.0001f)
+            val bgBaseSize = maxOf(minBaseW, minBaseH)
+
+            val bg_w_v = bgBaseSize * videoAspect
+            val bg_h_v = bgBaseSize
+
+            val scale_bg_x = 0.5f / bg_w_v
+            val scale_bg_y = 0.5f / bg_h_v
 
             Matrix.translateM(outMat, 0, 0.5f, 0.5f, 0f)
+            Matrix.scaleM(outMat, 0, scale_bg_x, scale_bg_y, 1f)
             if (rot != 0) {
                 Matrix.rotateM(outMat, 0, rot.toFloat(), 0f, 0f, 1f)
             }
             if (transform.isFlippedH) {
                 Matrix.scaleM(outMat, 0, -1f, 1f, 1f)
             }
-            Matrix.scaleM(outMat, 0, scaleX, scaleY, 1f)
+            Matrix.scaleM(outMat, 0, aScreen, 1.0f, 1f)
             Matrix.translateM(outMat, 0, -0.5f, -0.5f, 0f)
         }
 
@@ -2271,8 +2383,8 @@ class PreviewRenderer(
             out1[3] = adjust.shadows
             out2[0] = adjust.sharpness
             out2[1] = adjust.vignette
-            out2[2] = 0f
-            out2[3] = 0f
+            out2[2] = adjust.clarity
+            out2[3] = adjust.sharpPlus
         }
 
         fun calculateClipCrop(
@@ -2327,19 +2439,21 @@ class PreviewRenderer(
         ): Boolean {
             val aScreen = if (height > 0) width.toFloat() / height.toFloat() else if (canvasAspectRatio > 0f) canvasAspectRatio else (9.0f / 16.0f)
             val videoAspect = computeVideoAspect(displayWidth, displayHeight, transform)
-            val baseHw = if (videoAspect <= aScreen) 0.5f * (videoAspect / aScreen) else 0.5f
-            val baseHh = if (videoAspect <= aScreen) 0.5f else 0.5f * (aScreen / videoAspect)
-
-            val scale = transform.scale.coerceIn(0.25f, 5.0f)
-            val hw = baseHw * scale
-            val hh = baseHh * scale
 
             val rad = Math.toRadians(transform.rotationDeg.toDouble())
             val cos = Math.abs(Math.cos(rad)).toFloat()
             val sin = Math.abs(Math.sin(rad)).toFloat()
 
-            val rx = hw * cos + (hh * sin / aScreen)
-            val ry = (hw * aScreen * sin) + (hh * cos)
+            val maxBaseW = (0.5f * aScreen) / (videoAspect * cos + sin).coerceAtLeast(0.0001f)
+            val maxBaseH = 0.5f / (videoAspect * sin + cos).coerceAtLeast(0.0001f)
+            val baseSize = minOf(maxBaseW, maxBaseH)
+
+            val w_v = baseSize * videoAspect
+            val h_v = baseSize
+
+            val scale = transform.scale.coerceIn(0.25f, 5.0f)
+            val rx = ((w_v * cos + h_v * sin) / aScreen) * scale
+            val ry = (w_v * sin + h_v * cos) * scale
 
             val leftNorm = 0.5f + transform.panX - rx
             val rightNorm = 0.5f + transform.panX + rx
@@ -2370,10 +2484,11 @@ class PreviewRenderer(
         }
 
         fun toLegacyClip(clip: Clip): com.flowcut.app.model.Clip {
+            val effDurMs = maxOf(clip.durationMs, usToMs(clip.timeMap?.outUs ?: 0L))
             return com.flowcut.app.model.Clip(
                 id = clip.id,
                 path = clip.path,
-                durationMs = clip.durationMs,
+                durationMs = effDurMs,
                 width = clip.width,
                 height = clip.height,
                 rotation = clip.rotation,

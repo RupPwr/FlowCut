@@ -3043,6 +3043,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val newClip = oldClip.copy(durationMs = newDurationMs)
         val newClips = currentProject.clips.toMutableList()
         newClips[clipIndex] = newClip
+        clipTimeMaps[newClip.id] = finalMap
 
         // Adjust adjacent transitions if needed (Section 4 invariants: transition <= min(d1, d2) / 2)
         val newTransitions = currentProject.transitions.toMutableList()
@@ -3067,7 +3068,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         redoBackgrounds.clear()
         undoLayerItems.addLast(ArrayList(_layerItems))
         redoLayerItems.clear()
-        clipTimeMaps[oldClip.id] = finalMap
+        clipTimeMaps[newClip.id] = finalMap
         updateProject(newProject, recordUndo = false)
     }
 
@@ -3639,7 +3640,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val targetDurUs = msToUs(targetDurMs)
         val newMap = TimeMap(inUs = 0L, outUs = targetDurUs, speedNum = 100, speedDen = 100)
 
-        val updatedClip = oldClip.copy(
+        val newClipId = newImportedClip.id
+        val updatedClip = Clip(
+            id = newClipId,
             path = newImportedClip.path,
             durationMs = targetDurMs,
             width = newImportedClip.width,
@@ -3672,21 +3675,49 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
         undoBackgrounds.addLast(HashMap(clipBackgrounds))
+        undoFilterStates.addLast(HashMap(clipFilterStates))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
         redoBackgrounds.clear()
+        redoFilterStates.clear()
         undoLayerItems.addLast(ArrayList(_layerItems))
         redoLayerItems.clear()
 
-        // Reset transforms to default
-        clipTransforms[oldClip.id] = ClipTransform.DEFAULT
-        PreviewRenderer.setClipTransform(oldClip.id, ClipTransform.DEFAULT)
+        // Clean up oldClip.id mappings and register newClipId
+        clipTransforms.remove(oldClip.id)
+        clipTransforms[newClipId] = ClipTransform.DEFAULT
+        PreviewRenderer.setClipTransform(newClipId, ClipTransform.DEFAULT)
 
-        // Register natural duration and timeMap
-        clipNaturalDurations[oldClip.id] = msToUs(newNaturalMs)
-        clipTimeMaps[oldClip.id] = newMap
+        val fileMediaDurUs = getMediaFileDurationUs(newImportedClip)
+        val trueSourceDurationUs = maxOf(msToUs(newNaturalMs), fileMediaDurUs)
+
+        clipNaturalDurations.remove(oldClip.id)
+        clipNaturalDurations[newClipId] = trueSourceDurationUs
+        if (oldClip.path != newImportedClip.path) {
+            pathNaturalDurationsCache.remove(oldClip.path)
+        }
+        pathNaturalDurationsCache[newImportedClip.path] = trueSourceDurationUs
+
+        clipTimeMaps.remove(oldClip.id)
+        clipTimeMaps[newClipId] = newMap
+
+        val origVol = clipVolumes.remove(oldClip.id) ?: 1.0f
+        clipVolumes[newClipId] = origVol
+        savedPreMuteVolumes.remove(oldClip.id)
+        ClipAudioContributor.setClipVolume(newClipId, origVol)
+
+        clipColorAdjusts.remove(oldClip.id)
+        clipColorAdjusts[newClipId] = ClipColorAdjust.DEFAULT
+        PreviewRenderer.setClipColorAdjust(newClipId, ClipColorAdjust.DEFAULT)
+
+        clipBackgrounds.remove(oldClip.id)
+        clipBackgrounds[newClipId] = ClipBackground.DEFAULT
+        PreviewRenderer.setClipBackground(newClipId, ClipBackground.DEFAULT)
+
+        clipFilterStates.remove(oldClip.id)
+        PreviewRenderer.clipFilterStates.remove(oldClip.id)
 
         updateProject(newProject, recordUndo = false)
 
