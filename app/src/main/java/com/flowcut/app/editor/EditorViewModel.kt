@@ -3229,7 +3229,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         clipTimeMaps[oldClip.id] = TimeMap(oldMap.inUs, oldMap.outUs, finalSpeedNum, speedDen)
-        PreviewRenderer.notifyClipSpeedChanged(oldClip.id)
         val newProject = currentProject.copy(clips = newClips, transitions = newTransitions)
         updateProject(newProject, recordUndo = false)
     }
@@ -3332,9 +3331,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             clipTimeMaps.putAll(tempMaps)
-            for (c in newClips) {
-                PreviewRenderer.notifyClipSpeedChanged(c.id)
-            }
 
             val newTransitions = currentProject.transitions.toMutableList()
             for (j in newTransitions.indices) {
@@ -3354,9 +3350,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun revertSpeedEdit(originalProject: Project, originalTimeMaps: Map<String, TimeMap>) {
         clipTimeMaps.clear()
         clipTimeMaps.putAll(originalTimeMaps)
-        for ((id, _) in originalTimeMaps) {
-            PreviewRenderer.notifyClipSpeedChanged(id)
-        }
         updateProject(originalProject, recordUndo = false)
     }
 

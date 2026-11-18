@@ -237,7 +237,7 @@ class ClipAudioContributor(
                                     val mapA = clipA.map()
                                     if (mapA.speedNum > 0) {
                                         val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                                        if (speedA <= 4.0f) {
+                                        if (speedA <= 10.0f) {
                                             val decoderA = decoders[clipA.path]
                                             if (decoderA != null) {
                                                 val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
@@ -254,7 +254,7 @@ class ClipAudioContributor(
                                     val mapNext = nextClip.map()
                                     if (mapNext.speedNum > 0) {
                                         val speedNext = if (mapNext.speedDen > 0) mapNext.speedNum.toFloat() / mapNext.speedDen.toFloat() else 1.0f
-                                        if (speedNext <= 4.0f) {
+                                        if (speedNext <= 10.0f) {
                                             val decoderNext = decoders[nextClip.path]
                                             if (decoderNext != null) {
                                                 val srcUsNext = mapNext.sourceUs(0L)
@@ -288,7 +288,7 @@ class ClipAudioContributor(
                             val mapA = clipA.map()
                             if (mapA.speedNum > 0) {
                                 val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                                if (speedA <= 4.0f) {
+                                if (speedA <= 10.0f) {
                                     val decoderA = getOrCreateDecoder(clipA)
                                     val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
                                     val srcFrameA = usToAudioFrames(srcUsA)
@@ -312,7 +312,7 @@ class ClipAudioContributor(
                             val mapA = clipA.map()
                             if (mapA.speedNum > 0) {
                                 val speedA = if (mapA.speedDen > 0) mapA.speedNum.toFloat() / mapA.speedDen.toFloat() else 1.0f
-                                if (speedA <= 4.0f) {
+                                if (speedA <= 10.0f) {
                                     val decoderA = getOrCreateDecoder(clipA)
                                     val srcUsA = mapA.sourceUs(activeSet.aLocalUs)
                                     val srcFrameA = usToAudioFrames(srcUsA)
@@ -323,7 +323,7 @@ class ClipAudioContributor(
                             val mapB = clipB.map()
                             if (mapB.speedNum > 0) {
                                 val speedB = if (mapB.speedDen > 0) mapB.speedNum.toFloat() / mapB.speedDen.toFloat() else 1.0f
-                                if (speedB <= 4.0f) {
+                                if (speedB <= 10.0f) {
                                     val decoderB = getOrCreateDecoder(clipB)
                                     val srcUsB = mapB.sourceUs(activeSet.bLocalUs)
                                     val srcFrameB = usToAudioFrames(srcUsB)

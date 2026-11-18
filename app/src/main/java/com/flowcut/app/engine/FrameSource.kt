@@ -33,6 +33,11 @@ class FrameSource(
     private var outputEos = false
     @Volatile var currentPtsUs: Long = -1L
         private set
+    @Volatile private var fastTargetUs: Long = -1L
+    @Volatile private var fastRun = false
+    private var fastThread: Thread? = null
+    @Volatile private var fastStampNs: Long = 0L
+    private var lastHopKfUs: Long = -1L
     val lastDecodedPtsUs: Long get() = currentPtsUs
     val currentDecoderPtsUs: Long get() = currentPtsUs
     @Volatile var playbackSpeed: Float = 1.0f
@@ -43,11 +48,6 @@ class FrameSource(
     private var lastRenderedLocalUs: Long = -1L
     var isAccuratePausedFrameLatched: Boolean = false
         internal set
-
-    fun invalidatePausedLatch() {
-        isAccuratePausedFrameLatched = false
-        lastRenderedLocalUs = -1L
-    }
     private var catchUpStartMs: Long = 0L
     private var _isCatchingUpFromSeek: Boolean = false
     private var mediaDurationUs: Long = -1L
@@ -203,6 +203,8 @@ class FrameSource(
     }
 
     fun startCodecAndSeek(targetUs: Long): Boolean {
+        stopFast()
+        lastHopKfUs = -1L
         if (prewarmStage >= 2 && codec != null) return true
         if (prewarmStage < 1 || extractor == null || videoFormat == null) {
             if (!prepareExtractorOnly()) return false
@@ -445,6 +447,8 @@ class FrameSource(
 
     fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false, isExport: Boolean = false): Boolean {
         checkCatchUpTimeout()
+        stopFast()
+        lastHopKfUs = -1L
         val clipDurationUs = effectiveMediaDurationUs
         val isNearClipEnd = clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L
         if (isPrepared && currentPtsUs != -1L) {
@@ -577,6 +581,179 @@ class FrameSource(
         }
     }
 
+    private fun startFast() {
+        if (fastRun) return
+        val ext = extractor ?: return
+        val dec = codec ?: return
+        fastRun = true
+        fastThread = Thread {
+            try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Throwable) {}
+            var lastTarget = -2L
+            try {
+                while (fastRun && !outputEos) {
+                    val t = fastTargetUs
+                    val stale = System.nanoTime() - fastStampNs > 150_000_000L
+                    if (t < 0L || stale) { java.util.concurrent.locks.LockSupport.parkNanos(3_000_000L); continue }
+                    if (t == lastTarget && currentPtsUs >= t - 15_000L) {
+                        java.util.concurrent.locks.LockSupport.parkNanos(2_000_000L); continue
+                    }
+                    val targetChanged = t != lastTarget
+                    lastTarget = t
+
+                    // hop sirf tab, jab target naya ho, aur keyframe kaafi aage ho, aur wahi keyframe dobara na ho
+                    if (targetChanged && currentPtsUs != -1L) {
+                        val lagUs = t - currentPtsUs
+                        if (lagUs > 600_000L) {
+                            val kf = getKeyframes()
+                            if (kf != null && kf.isNotEmpty()) {
+                                val kfMs = com.flowcut.app.storage.KeyframeIndex.findClosestKeyframeAtOrBefore(kf, t / 1000L)
+                                val kfUs = kfMs * 1000L
+                                if (kfMs >= 0L && kfUs > currentPtsUs + 400_000L && kfUs > lastHopKfUs) {
+                                    lastHopKfUs = kfUs
+                                    hopToKeyframe(kfUs)
+                                }
+                            }
+                        }
+                    }
+                    decodeForwardFast(t, ext, dec, effectiveMediaDurationUs)
+                }
+            } catch (_: Throwable) {
+            }
+            fastRun = false
+        }.also { it.name = "fast-decode"; it.start() }
+    }
+
+    private fun stopFast() {
+        fastRun = false
+        fastTargetUs = -1L
+        val th = fastThread
+        fastThread = null
+        if (th != null && th !== Thread.currentThread()) {
+            try { th.join(300) } catch (_: Exception) {}
+        }
+    }
+
+    private fun hopToKeyframe(kfUs: Long): Boolean {
+        val ext = extractor ?: return false
+        val dec = codec ?: return false
+        return try {
+            ext.seekTo(kfUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            dec.flush()
+            inputEos = false
+            outputEos = false
+            currentPtsUs = kfUs
+            lastSeekTargetUs = kfUs
+            isAccuratePausedFrameLatched = false
+            isCatchingUpFromSeek = false
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun feedInput(ext: MediaExtractor, dec: MediaCodec, max: Int) {
+        var fed = 0
+        while (!inputEos && fed < max) {
+            val inIdx = dec.dequeueInputBuffer(0L)
+            if (inIdx < 0) break
+            val inBuf = dec.getInputBuffer(inIdx)
+            if (inBuf != null) {
+                inBuf.clear()
+                val size = ext.readSampleData(inBuf, 0)
+                if (size < 0) {
+                    dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    inputEos = true
+                } else {
+                    dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime, 0)
+                    ext.advance()
+                }
+            }
+            fed++
+        }
+    }
+
+    private fun decodeForwardFast(
+        localUs: Long,
+        ext: MediaExtractor,
+        dec: MediaCodec,
+        clipDurationUs: Long
+    ): Boolean {
+        val info = MediaCodec.BufferInfo()
+        val deadlineNs = System.nanoTime() + 20_000_000L
+        var pendingIdx = -1
+        var pendingPts = -1L
+        var reached = false
+
+        while (!reached && !outputEos) {
+            // feed: queue bhari rakho
+            var fed = 0
+            while (!inputEos && fed < 32) {
+                val inIdx = dec.dequeueInputBuffer(0L)
+                if (inIdx < 0) break
+                val inBuf = dec.getInputBuffer(inIdx)
+                if (inBuf != null) {
+                    inBuf.clear()
+                    val size = ext.readSampleData(inBuf, 0)
+                    if (size < 0) {
+                        dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputEos = true
+                    } else {
+                        dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime, 0)
+                        ext.advance()
+                    }
+                }
+                fed++
+            }
+
+            // drain: beech ke frames drop, sirf latest hold
+            var first = true
+            while (true) {
+                val outIdx = dec.dequeueOutputBuffer(info, if (first) 1_500L else 0L)
+                first = false
+                if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
+                    outIdx == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) continue
+                if (outIdx < 0) break
+
+                val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                if (isEos) outputEos = true
+                if (isEos && info.size == 0) {
+                    dec.releaseOutputBuffer(outIdx, false)
+                    reached = true
+                    break
+                }
+                if (pendingIdx >= 0) dec.releaseOutputBuffer(pendingIdx, false)
+                pendingIdx = outIdx
+                pendingPts = info.presentationTimeUs
+                if (isEos || pendingPts >= localUs - 15_000L) {
+                    reached = true
+                    break
+                }
+            }
+            if (!reached && System.nanoTime() >= deadlineNs) break
+        }
+
+        if (pendingIdx >= 0) {
+            dec.releaseOutputBuffer(pendingIdx, true)   // har tick par max 1 frame render
+            currentPtsUs = pendingPts
+            lastRenderedLocalUs = localUs
+            val atEnd = outputEos || (clipDurationUs > 0L && pendingPts >= clipDurationUs - 85_000L)
+            if (reached || atEnd) isAccuratePausedFrameLatched = true
+            if (currentPtsUs >= lastSeekTargetUs - 50_000L || atEnd) isCatchingUpFromSeek = false
+            if (atEnd) prewarmStage = 3
+            feedInput(ext, dec, 40)   // decoder agle tick tak kaam karta rahe
+            notifyFirstFrame()
+            return true
+        }
+        if (pendingIdx < 0) feedInput(ext, dec, 40)
+        if (outputEos) {
+            isCatchingUpFromSeek = false
+            isAccuratePausedFrameLatched = true
+            prewarmStage = 3
+            lastRenderedLocalUs = localUs
+        }
+        return false
+    }
+
     fun frameAt(localUs: Long, isScrubbing: Boolean = false): Boolean {
         checkCatchUpTimeout()
         val ext = extractor ?: return false
@@ -609,8 +786,7 @@ class FrameSource(
 
             // Case 2: Playback / Paused mode
             // If already accurately latched on this target in PAUSED mode, do zero work!
-            val latchToleranceUs = (5_000L * playbackSpeed.coerceIn(0.1f, 10.0f)).toLong().coerceAtLeast(800L)
-            if (isAccuratePausedFrameLatched && (kotlin.math.abs(localUs - lastRenderedLocalUs) <= latchToleranceUs || (isNearClipEnd && lastRenderedLocalUs >= clipDurationUs - 85_000L))) {
+            if (isAccuratePausedFrameLatched && (kotlin.math.abs(localUs - lastRenderedLocalUs) <= 5_000L || (isNearClipEnd && lastRenderedLocalUs >= clipDurationUs - 85_000L))) {
                 isCatchingUpFromSeek = false
                 return false
             }
@@ -623,13 +799,13 @@ class FrameSource(
                 return false
             }
 
+            if (effSpeed <= 1.5f || isScrubbing) stopFast()
+
             val isInitial = currentPtsUs == -1L
-            val fwdJumpUs = maxOf(
-                150_000L,
-                (150_000L * effSpeed).toLong(),
-                if (effSpeed >= 4f) 1_000_000L else 0L
-            )
-            val backJumpUs = (100_000L * effSpeed).toLong()
+            val fastMode = effSpeed > 1.5f
+            val fwdJumpUs = if (fastMode) maxOf(3_000_000L, (150_000L * effSpeed).toLong())
+                            else maxOf(150_000L, (150_000L * effSpeed).toLong())
+            val backJumpUs = if (fastMode) 250_000L else 100_000L
             val isJump = currentPtsUs != -1L &&
                 (currentPtsUs > localUs + backJumpUs || localUs > currentPtsUs + fwdJumpUs)
 
@@ -647,18 +823,17 @@ class FrameSource(
             }
 
             val deltaUs = if (currentPtsUs != -1L) localUs - currentPtsUs else 0L
-            val isHighSpeed = playbackSpeed > 1.2f
+            val hiSpeed = false
 
-            if (effSpeed >= 4f && deltaUs > 500_000L) {
-                val ok = seekTo(localUs, fastKeyframeOnly = true)
-                if (ok) {
-                    lastRenderedLocalUs = localUs
-                    isAccuratePausedFrameLatched = true
-                }
-                return ok
+            if (fastMode && !isInitial && !isJump) {
+                fastTargetUs = localUs
+                fastStampNs = System.nanoTime()
+                startFast()
+                return false   // frame aane par hasPendingSurfaceFrame flag updateTexImage karwata hai
             }
 
-            if (isInitial || isJump || (!isScrubbing && !isAccuratePausedFrameLatched)) {
+            if (isInitial || isJump || (!fastMode && !isScrubbing && !isAccuratePausedFrameLatched)) {
+                if (isInitial || isJump) stopFast()
                 lastForwardKeyframeHopUs = -1L
                 val didRender = seekTo(localUs, fastKeyframeOnly = false)
                 if (didRender) {
@@ -690,7 +865,7 @@ class FrameSource(
 
             // Case A: Ultra-smooth forward playback decode & drain loop (Fix Bug #1)
             // 1. Feed input packets so hardware decoder queue is always well-fed
-            val maxFeed = if (isHighSpeed) minOf(20, (4 * effSpeed).toInt()) else 4
+            val maxFeed = if (hiSpeed) minOf(20, (3 * effSpeed).toInt()) else 4
             var inFed = 0
             while (!inputEos && inFed < maxFeed) {
                 val inIndex = dec.dequeueInputBuffer(0L)
@@ -716,7 +891,7 @@ class FrameSource(
             // 2. Dequeue output buffers with silent pre-roll: never render intermediate catch-up frames!
             val isFastForward = deltaUs >= 40_000L
             val maxDrains = when {
-                isHighSpeed -> minOf(24, (5 * effSpeed).toInt())
+                hiSpeed -> minOf(24, (3 * effSpeed).toInt())
                 isFastForward -> 6
                 else -> 3
             }
@@ -743,8 +918,8 @@ class FrameSource(
                     (clipDurationUs > 0L && localUs >= clipDurationUs - 85_000L)
 
                 // Fix 1A: Never render intermediate catch-up frames (pts < localUs - 20_000L) onto SurfaceTexture!
-                val isNearTarget = pts >= localUs - (if (isHighSpeed) (25_000L * effSpeed).toLong() else 20_000L) || atClipEnd
-                val isLastDrainForcedRender = isHighSpeed && !renderedAny && (drainedCount >= maxDrains - 1)
+                val isNearTarget = pts >= localUs - 20_000L || atClipEnd
+                val isLastDrainForcedRender = hiSpeed && !renderedAny && (drainedCount >= maxDrains - 1)
                 val shouldRender = isNearTarget || isLastDrainForcedRender
 
                 dec.releaseOutputBuffer(outIndex, shouldRender)
@@ -878,6 +1053,8 @@ class FrameSource(
      * Note: Do NOT call surface.release() here as it invalidates the underlying SurfaceTexture's connection.
      */
     fun release() {
+        stopFast()
+        lastHopKfUs = -1L
         val oldCodec = codec
         val oldExt = extractor
 

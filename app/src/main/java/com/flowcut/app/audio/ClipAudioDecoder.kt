@@ -401,8 +401,8 @@ class ClipAudioDecoder(val filePath: String) {
             return
         }
 
-        // For extreme speed (> 4.0x), mute live audio to prevent audio thread starvation and AudioClock stalls
-        if (speed > 4.0f) {
+        // Cap supported speed range between 0.1f and 10.0f
+        if (speed > 10.0f || speed <= 0f) {
             return
         }
 
@@ -462,14 +462,30 @@ class ClipAudioDecoder(val filePath: String) {
             val countBuffered = bufferedFrames
 
             if (actualStartFrame < start || actualStartFrame > start + countBuffered + 24_000L) {
-                internalSeekToFrame(actualStartFrame, maxIterations = 3, targetMinFrames = totalNeededSrcFrames)
+                val seekIterations = when {
+                    speed >= 8.0f -> 12
+                    speed >= 4.0f -> 8
+                    else -> 4
+                }
+                val seekMinFrames = maxOf(totalNeededSrcFrames, if (speed > 4.0f) totalNeededSrcFrames * 2 else PREFILL_FRAMES / 2)
+                internalSeekToFrame(actualStartFrame, maxIterations = seekIterations, targetMinFrames = seekMinFrames)
             } else if (targetEnd > start + countBuffered) {
-                // Strictly at most 1 non-blocking chunk decode per 10ms block so AudioEngine thread never stalls!
-                internalDecodeChunk()
+                val maxCatchupChunks = when {
+                    speed >= 8.0f -> 10
+                    speed >= 4.0f -> 6
+                    speed >= 2.0f -> 3
+                    else -> 2
+                }
+                var decodeCount = 0
+                while (bufferStartFrame + bufferedFrames < targetEnd && !outputEos && decodeCount < maxCatchupChunks) {
+                    val produced = internalDecodeChunk(timeoutUs = 0L)
+                    decodeCount++
+                    if (!produced) break
+                }
             } else {
                 val remaining = (start + countBuffered) - targetEnd
                 if (remaining < PREFILL_FRAMES / 2 && !outputEos) {
-                    internalDecodeChunk()
+                    internalDecodeChunk(timeoutUs = 0L)
                 }
             }
 
