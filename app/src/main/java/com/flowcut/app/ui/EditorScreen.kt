@@ -2994,7 +2994,7 @@ fun EditorScreen(
             )
         }
 
-        // Speed BottomSheet (0.2x to 10.0x) for selected clip
+        // Speed BottomSheet (0.2x to 4.0x) for selected clip
         if (isSpeedSheetVisible && selectedClipIndex != null) {
             val currentProject = vmUiState?.project ?: com.flowcut.app.model.Project()
             val initialProject = remember(selectedClipIndex) { currentProject }
@@ -3006,7 +3006,7 @@ fun EditorScreen(
                 previewRenderer = previewRenderer,
                 onWakeFrameDriver = { frameDriver.wake() },
                 getClipSpeed = { id -> resolvedViewModel?.getClipSpeed(id) ?: 1.0f },
-                getMaxSpeedForClip = { k -> resolvedViewModel?.getMaxSpeedForClip(k) ?: 10.0f },
+                getMaxSpeedForClip = { k -> resolvedViewModel?.getMaxSpeedForClip(k) ?: 4.0f },
                 onSetLiveSpeed = { k, spd ->
                     resolvedViewModel?.setLiveClipSpeed(k, spd)
                     resolvedViewModel?.let { vm ->

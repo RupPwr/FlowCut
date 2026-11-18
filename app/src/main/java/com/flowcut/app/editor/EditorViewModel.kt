@@ -3170,16 +3170,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val map = clipTimeMaps[clipId] ?: return 1.0f
         return if (map.speedDen > 0 && map.speedNum > 0L) {
             val raw = map.speedNum.toFloat() / map.speedDen.toFloat()
-            (kotlin.math.round(raw * 100f) / 100f).coerceIn(0.2f, 10.0f)
+            (kotlin.math.round(raw * 100f) / 100f).coerceIn(0.2f, 4.0f)
         } else 1.0f
     }
 
     fun getMaxSpeedForClip(clipIndex: Int): Float {
-        val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return 10.0f
+        val clip = _uiState.value.project.clips.getOrNull(clipIndex) ?: return 4.0f
         val oldMap = clipTimeMaps[clip.id] ?: TimeMap(0L, msToUs(clip.durationMs))
         if (oldMap.speedNum == 0) return 1.0f
         val sourceSpanUs = maxOf(200_000L, oldMap.outUs - oldMap.inUs)
-        return (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
+        return (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 4.0f)
     }
 
     fun setLiveClipSpeed(clipIndex: Int, speed: Float) {
@@ -3189,7 +3189,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val oldMap = clipTimeMaps[oldClip.id] ?: TimeMap(0L, msToUs(oldClip.durationMs))
         val sourceSpanUs = oldMap.outUs - oldMap.inUs
 
-        val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
+        val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 4.0f)
         val clampedSpeed = speed.coerceIn(0.2f, maxSpeed)
         val rawSpeedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
         val speedDen = 100
@@ -3299,7 +3299,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val clip = newClips[i]
                 val oldMap = clipTimeMaps[clip.id] ?: TimeMap(0L, msToUs(clip.durationMs))
                 val sourceSpanUs = oldMap.outUs - oldMap.inUs
-                val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 10.0f)
+                val maxSpeed = (sourceSpanUs.toFloat() / 200_000f).coerceIn(0.2f, 4.0f)
                 val clampedSpeed = speed.coerceIn(0.2f, maxSpeed)
                 val rawSpeedNum = maxOf(1, (clampedSpeed * 100f).roundToInt())
 

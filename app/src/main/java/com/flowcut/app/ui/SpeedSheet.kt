@@ -58,14 +58,14 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-val PRESET_SPEEDS = listOf(0.2f, 0.5f, 1.0f, 1.5f, 2.0f, 4.0f, 8.0f, 10.0f)
+val PRESET_SPEEDS = listOf(0.2f, 0.5f, 1.0f, 1.5f, 2.0f, 4.0f)
 
 /**
- * Dedicated Speed BottomSheet (0.2x to 10.0x, default 1.0x) for the selected clip.
+ * Dedicated Speed BottomSheet (0.2x to 4.0x, default 1.0x) for the selected clip.
  * Anchored strictly at the bottom of the screen with a dismissible scrim so the preview
  * remains fully unobstructed.
  *
- * Supports 8 Quick Preset buttons, smooth continuous slider with piecewise slow-mo precision
+ * Supports 6 Quick Preset buttons, smooth continuous slider with piecewise slow-mo precision
  * and magnetic snap at 1.0x, live duration readout, Reset to 1.0x, and Apply to All.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -103,13 +103,13 @@ fun SpeedSheet(
     var isCommitted by remember { mutableStateOf(false) }
 
     fun speedToSlider(speed: Float): Float {
-        val s = speed.coerceIn(0.2f, 10.0f)
+        val s = speed.coerceIn(0.2f, 4.0f)
         return if (s <= 1.0f) {
             // 0.2f..1.0f maps to 0.0f..0.35f
             ((s - 0.2f) / 0.8f) * 0.35f
         } else {
-            // 1.0f..10.0f maps to 0.35f..1.0f
-            0.35f + ((s - 1.0f) / 9.0f) * 0.65f
+            // 1.0f..4.0f maps to 0.35f..1.0f
+            0.35f + ((s - 1.0f) / 3.0f) * 0.65f
         }
     }
 
@@ -120,7 +120,7 @@ fun SpeedSheet(
             0.2f + t * 0.8f
         } else {
             val t = (p - 0.35f) / 0.65f
-            1.0f + t * 9.0f
+            1.0f + t * 3.0f
         }
         val snapped = if (abs(rawSpeed - 1.0f) <= 0.05f) {
             1.0f
@@ -344,7 +344,7 @@ fun SpeedSheet(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Quick Preset Pills (0.2x, 0.5x, 1.0x, 1.5x, 2.0x, 4.0x, 8.0x, 10.0x)
+                // Quick Preset Pills (0.2x, 0.5x, 1.0x, 1.5x, 2.0x, 4.0x)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -395,7 +395,7 @@ fun SpeedSheet(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                // Continuous Smooth Speed Slider (0.2x to 10.0x)
+                // Continuous Smooth Speed Slider (0.2x to 4.0x)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -422,14 +422,14 @@ fun SpeedSheet(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    // Tick labels below slider: 0.2x, 1x, 2x, 5x, 10x
+                    // Tick labels below slider: 0.2x, 1x, 2x, 3x, 4x
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        listOf("0.2x", "1x", "2x", "5x", "10x").forEach { label ->
+                        listOf("0.2x", "1x", "2x", "3x", "4x").forEach { label ->
                             Text(
                                 text = label,
                                 fontSize = 10.sp,
