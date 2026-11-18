@@ -48,6 +48,8 @@ fun PlaybackRow(
     isPlaying: Boolean,
     onPlayPauseClick: () -> Unit,
     onSeekScrub: (Long) -> Unit,
+    onScrubStart: () -> Unit = {},
+    onScrubEnd: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = FlowCutTheme.colors
@@ -94,19 +96,26 @@ fun PlaybackRow(
                 .pointerInput(totalMs) {
                     detectTapGestures { offset ->
                         if (totalMs > 0 && size.width > 0) {
+                            onScrubStart()
                             val targetProgress = (offset.x / size.width).coerceIn(0f, 1f)
                             onSeekScrub((targetProgress * totalMs).toLong())
+                            onScrubEnd()
                         }
                     }
                 }
                 .pointerInput(totalMs) {
-                    detectDragGestures { change, _ ->
-                        change.consume()
-                        if (totalMs > 0 && size.width > 0) {
-                            val targetProgress = (change.position.x / size.width).coerceIn(0f, 1f)
-                            onSeekScrub((targetProgress * totalMs).toLong())
+                    detectDragGestures(
+                        onDragStart = { onScrubStart() },
+                        onDragEnd = { onScrubEnd() },
+                        onDragCancel = { onScrubEnd() },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            if (totalMs > 0 && size.width > 0) {
+                                val targetProgress = (change.position.x / size.width).coerceIn(0f, 1f)
+                                onSeekScrub((targetProgress * totalMs).toLong())
+                            }
                         }
-                    }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {

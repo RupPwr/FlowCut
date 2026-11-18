@@ -492,7 +492,7 @@ class FrameSource(
             }
             inputEos = false
             outputEos = false
-            currentPtsUs = seekTimeUs
+            currentPtsUs = -1L
 
             val bufferInfo = MediaCodec.BufferInfo()
             val timeoutUs = 1_000L
@@ -568,15 +568,15 @@ class FrameSource(
                 }
             }
             isCatchingUpFromSeek = false
-            isAccuratePausedFrameLatched = true
+            isAccuratePausedFrameLatched = rendered
             prewarmStage = 3
-            if (lastRenderedLocalUs == -1L) {
+            if (rendered) {
                 lastRenderedLocalUs = localUs
             }
             return rendered
         } catch (_: Exception) {
             isCatchingUpFromSeek = false
-            isAccuratePausedFrameLatched = true
+            isAccuratePausedFrameLatched = false
             return false
         }
     }
@@ -752,17 +752,20 @@ class FrameSource(
 
             // Case 2: Playback / Paused mode
             // If already accurately latched on this target in PAUSED mode, do zero work!
-            if (isAccuratePausedFrameLatched && (kotlin.math.abs(localUs - lastRenderedLocalUs) <= 5_000L || (isNearClipEnd && lastRenderedLocalUs >= clipDurationUs - 85_000L))) {
+            if (isPaused && isAccuratePausedFrameLatched && (kotlin.math.abs(localUs - lastRenderedLocalUs) <= 5_000L || (isNearClipEnd && lastRenderedLocalUs >= clipDurationUs - 85_000L))) {
                 isCatchingUpFromSeek = false
                 return false
             }
 
-            if (outputEos || (isNearClipEnd && currentPtsUs != -1L && currentPtsUs >= clipDurationUs - 85_000L)) {
+            if (isNearClipEnd && (outputEos || (currentPtsUs != -1L && currentPtsUs >= clipDurationUs - 85_000L))) {
                 isAccuratePausedFrameLatched = true
                 isCatchingUpFromSeek = false
                 prewarmStage = 3
                 lastRenderedLocalUs = localUs
                 return false
+            } else if (outputEos && !isNearClipEnd) {
+                outputEos = false
+                inputEos = false
             }
 
             stopFast()

@@ -5748,15 +5748,24 @@ private fun TransportControlsRow(
                     onPlayPauseClick()
                 }
             },
-            onSeekScrub = { ms ->
-                val prevUs = playbackController.playhead.timeUs
-                val targetUs = msToUs(ms)
-                if (playbackController.playhead.mode == PlayMode.PAUSED && kotlin.math.abs(targetUs - prevUs) > 80_000L) {
-                    previewRenderer.isWaitingForFrame = true
-                }
-                onSeekScrub(ms)
+            onScrubStart = {
                 if (USE_NEW_CORE) {
-                    playbackController.seekTo(targetUs)
+                    playbackController.beginScrub()
+                    frameDriver.wake()
+                }
+            },
+            onSeekScrub = { targetMs ->
+                onSeekScrub(targetMs)
+                if (USE_NEW_CORE) {
+                    playbackController.seekTo(targetMs * 1_000L)
+                    frameDriver.wake()
+                }
+            },
+            onScrubEnd = {
+                if (USE_NEW_CORE) {
+                    playbackController.endScrub(0.0)
+                    previewRenderer.isWaitingForFrame = true
+                    previewRenderer.requestAccurateSeek()
                     frameDriver.wake()
                 }
             }
