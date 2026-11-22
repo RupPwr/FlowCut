@@ -16,6 +16,7 @@ class FrameDriver(
 ) : Choreographer.FrameCallback {
 
     private var running = false
+    var keepAlive: () -> Boolean = { false }
 
     fun wake() {
         if (!running) {
@@ -32,11 +33,22 @@ class FrameDriver(
     }
 
     override fun doFrame(frameTimeNanos: Long) {
+        val isPerfPlaying = com.flowcut.app.BuildConfig.PERF_TELEMETRY && controller.playhead.mode == com.flowcut.app.core.playback.PlayMode.PLAYING
+        if (isPerfPlaying) {
+            PacePerfTracker.onChoreographerFrame(frameTimeNanos, controller.playhead.mode)
+        }
+        val startNs = if (isPerfPlaying) System.nanoTime() else 0L
+
         controller.tick(frameTimeNanos)
         frameTick.longValue = frameTimeNanos
         onRequestRender()
 
-        if (controller.needsFrames()) {
+        if (isPerfPlaying) {
+            val durNs = System.nanoTime() - startNs
+            PacePerfTracker.onDoFrameDuration(durNs, controller.playhead.mode)
+        }
+
+        if (controller.needsFrames() || keepAlive()) {
             Choreographer.getInstance().postFrameCallback(this)
         } else {
             running = false

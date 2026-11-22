@@ -25,6 +25,8 @@ interface FeatureRegistry {
     fun audioContributor(c: AudioContributor)
     fun prefetcher(p: Prefetcher)
     fun clipTool(t: ClipTool)
+    fun renderPass(p: RenderPass)
+    fun layerRenderer(r: LayerRenderer)
 }
 
 /**

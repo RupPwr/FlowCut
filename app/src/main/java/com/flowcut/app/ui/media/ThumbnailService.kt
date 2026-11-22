@@ -62,6 +62,32 @@ class ThumbnailService(
     private val inFlight = ConcurrentHashMap<String, Job>()
     private val failed = ConcurrentHashMap.newKeySet<String>()
 
+    var isPaused: () -> Boolean = { false }
+    private val retrieverCache = ConcurrentHashMap<String, MediaMetadataRetriever>()
+
+    private fun getOrCreateRetriever(path: String): MediaMetadataRetriever {
+        return retrieverCache.computeIfAbsent(path) { p ->
+            MediaMetadataRetriever().apply {
+                setDataSource(p)
+            }
+        }
+    }
+
+    var onGeneratingChanged: ((Boolean) -> Unit)? = null
+    @Volatile
+    private var lastGeneratingReported: Boolean = false
+
+    private fun checkGeneratingState() {
+        val isGen = inFlight.isNotEmpty()
+        if (isGen != lastGeneratingReported) {
+            lastGeneratingReported = isGen
+            val cb = onGeneratingChanged
+            if (cb != null) {
+                scope.launch(Dispatchers.Main) { cb(isGen) }
+            }
+        }
+    }
+
     private var lastNotifyTimeMs = 0L
     private var pendingNotifyJob: Job? = null
     private val notifyLock = Any()
@@ -145,10 +171,12 @@ class ThumbnailService(
                     failed.add(key)
                 } finally {
                     inFlight.remove(key)
+                    checkGeneratingState()
                 }
             }
             inFlight[key] = job
         }
+        checkGeneratingState()
     }
 
     /**
@@ -163,6 +191,7 @@ class ThumbnailService(
                 iter.remove()
             }
         }
+        checkGeneratingState()
     }
 
     /**
@@ -176,7 +205,12 @@ class ThumbnailService(
         inFlight.values.forEach { it.cancel() }
         inFlight.clear()
         failed.clear()
+        retrieverCache.values.forEach { r ->
+            try { r.release() } catch (_: Throwable) {}
+        }
+        retrieverCache.clear()
         ready = emptyMap()
+        checkGeneratingState()
     }
 
     /**
@@ -205,16 +239,23 @@ class ThumbnailService(
         // Stale scroll check BEFORE acquiring decodeSemaphore
         kotlin.coroutines.coroutineContext.ensureActive()
 
+        while (isPaused()) {
+            delay(100L)
+            kotlin.coroutines.coroutineContext.ensureActive()
+        }
+
         return decodeSemaphore.withPermit {
             // Stale scroll check AFTER acquiring semaphore
             kotlin.coroutines.coroutineContext.ensureActive()
 
-            // Decode using OPTION_CLOSEST_SYNC for ultra-fast keyframe extraction
-            var retriever: MediaMetadataRetriever? = null
-            try {
-                retriever = MediaMetadataRetriever()
+            while (isPaused()) {
+                delay(100L)
                 kotlin.coroutines.coroutineContext.ensureActive()
-                retriever.setDataSource(path)
+            }
+
+            // Decode using OPTION_CLOSEST_SYNC for ultra-fast keyframe extraction
+            try {
+                val retriever = getOrCreateRetriever(path)
                 kotlin.coroutines.coroutineContext.ensureActive()
                 val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     retriever.getScaledFrameAtTime(
@@ -253,9 +294,10 @@ class ThumbnailService(
             } catch (_: CancellationException) {
                 null
             } catch (_: Throwable) {
+                retrieverCache.remove(path)?.let {
+                    try { it.release() } catch (_: Throwable) {}
+                }
                 null
-            } finally {
-                try { retriever?.release() } catch (_: Throwable) {}
             }
         }
     }
@@ -289,7 +331,7 @@ class ThumbnailService(
     }
 
     companion object {
-        private val decodeSemaphore = Semaphore(2)
+        private val decodeSemaphore = Semaphore(1)
         const val TILE_WIDTH_PX = 80
         const val TILE_HEIGHT_PX = 80
         const val DEFAULT_MAX_DISK_BYTES = 100L * 1024L * 1024L // 100 MB

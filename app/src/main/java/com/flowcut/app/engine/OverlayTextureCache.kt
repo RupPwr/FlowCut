@@ -14,6 +14,7 @@ import android.os.Build
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
+import com.flowcut.app.engine.perf.ResourceTracker
 import com.flowcut.app.engine.proxy.ProxyStore
 import java.io.File
 import java.util.concurrent.Executors
@@ -25,12 +26,13 @@ import kotlin.math.roundToInt
  * Mutable fields allow zero-allocation cache hits on 60/120fps render loops (Rule R10).
  */
 class CachedOverlayTex(
-    var texId: Int = 0,
+    override var texId: Int = 0,
     var contentHash: Int = 0,
-    var width: Int = 0,
-    var height: Int = 0,
-    var lastUsedNs: Long = 0L
-) {
+    override var width: Int = 0,
+    override var height: Int = 0,
+    var lastUsedNs: Long = 0L,
+    var kind: String = ""
+) : LayerTexture {
     val byteSize: Long get() = width.toLong() * height.toLong() * 4L
 }
 
@@ -41,7 +43,7 @@ class CachedOverlayTex(
 class OverlayTextureCache(
     @Volatile var proxyStore: ProxyStore? = null,
     pipDecodeThreads: Int = defaultPipDecodeThreads()
-) {
+) : TextureProvider, PipTextureProvider {
 
     @Volatile
     var maxByteBudget: Long = defaultMaxByteBudget
@@ -55,6 +57,7 @@ class OverlayTextureCache(
     private val videoStates = HashMap<String, VideoPipState>()
     private val tempTexIds = IntArray(1)
     private val retrieverPool = RetrieverPool(maxEntries = 4)
+    private var accessCounter = 0L
 
     /**
      * Dedicated background executor for non-blocking preview PIP video frame decoding.
@@ -112,7 +115,7 @@ class OverlayTextureCache(
         val targetHash = computeContentHash(item)
         val existing = cache[item.id]
         if (existing != null && existing.contentHash == targetHash && existing.texId > 0) {
-            existing.lastUsedNs = System.nanoTime()
+            existing.lastUsedNs = ++accessCounter
             return existing
         }
 
@@ -156,9 +159,10 @@ class OverlayTextureCache(
         entry.contentHash = targetHash
         entry.width = w
         entry.height = h
-        entry.lastUsedNs = System.nanoTime()
+        entry.kind = item.type.name
+        entry.lastUsedNs = ++accessCounter
 
-        pruneToBudget(setOf(item.id))
+        pruneToBudget(item.id)
         return entry
     }
 
@@ -176,6 +180,12 @@ class OverlayTextureCache(
         return total
     }
 
+    fun pruneToBudget(protectedItemId: String) {
+        val total = currentTotalBytes()
+        if (total <= maxByteBudget) return
+        pruneToBudget(java.util.Collections.singleton(protectedItemId))
+    }
+
     /**
      * LRU Cache Pruning (Task T5.4):
      * Evicts oldest unreferenced textures via glDeleteTextures when total bytes exceed maxByteBudget.
@@ -189,16 +199,36 @@ class OverlayTextureCache(
             .filter { it.value.texId > 0 && it.key !in protectedItemIds }
             .sortedBy { it.value.lastUsedNs }
 
-        val deleteIds = IntArray(1)
         for ((id, entry) in candidates) {
             if (total <= maxByteBudget) break
             if (entry.texId > 0) {
-                deleteIds[0] = entry.texId
-                GLES20.glDeleteTextures(1, deleteIds, 0)
+                tempTexIds[0] = entry.texId
+                GLES20.glDeleteTextures(1, tempTexIds, 0)
                 entry.texId = 0
             }
             total -= entry.byteSize
             cache.remove(id)
+        }
+
+        if (total > maxByteBudget) {
+            val videoCandidates = videoStates.entries
+                .filter { it.value.texEntry.texId > 0 && it.key !in protectedItemIds }
+                .sortedBy { it.value.texEntry.lastUsedNs }
+
+            for ((id, vState) in videoCandidates) {
+                if (total <= maxByteBudget) break
+                if (vState.texEntry.texId > 0) {
+                    tempTexIds[0] = vState.texEntry.texId
+                    GLES20.glDeleteTextures(1, tempTexIds, 0)
+                    vState.texEntry.texId = 0
+                }
+                total -= vState.texEntry.byteSize
+                synchronized(vState.lock) {
+                    vState.backBitmap?.recycle()
+                    vState.backBitmap = null
+                }
+                videoStates.remove(id)
+            }
         }
     }
 
@@ -584,7 +614,7 @@ class OverlayTextureCache(
                 }
             }
             if (state.texEntry.texId > 0) {
-                state.texEntry.lastUsedNs = System.nanoTime()
+                state.texEntry.lastUsedNs = ++accessCounter
                 return state.texEntry
             }
             return null
@@ -661,22 +691,49 @@ class OverlayTextureCache(
         }
 
         if (state.texEntry.texId > 0) {
-            state.texEntry.lastUsedNs = System.nanoTime()
+            state.texEntry.lastUsedNs = ++accessCounter
             return state.texEntry
         }
         return null
     }
 
+    override fun getTexture(item: OverlayItem): LayerTexture? = getOrBakeTexture(item)
+
+    override fun getVideoTexture(item: OverlayItem, timelineUs: Long): LayerTexture? =
+        getOrUpdateVideoTexture(item, timelineUs, isSynchronous = false)
+
+    override fun releaseTexture(itemId: String) = remove(itemId)
+
+    override fun releaseKind(kind: String) = clearKind(kind)
+
+    fun clearKind(kind: String) {
+        val deleteIds = IntArray(1)
+        val iterator = cache.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.value.kind.equals(kind, ignoreCase = true)) {
+                if (entry.value.texId > 0) {
+                    deleteIds[0] = entry.value.texId
+                    GLES20.glDeleteTextures(1, deleteIds, 0)
+                    entry.value.texId = 0
+                }
+                iterator.remove()
+            }
+        }
+    }
+
     fun remove(itemId: String) {
         val cached = cache.remove(itemId)
         if (cached != null && cached.texId > 0) {
-            GLES20.glDeleteTextures(1, intArrayOf(cached.texId), 0)
+            tempTexIds[0] = cached.texId
+            GLES20.glDeleteTextures(1, tempTexIds, 0)
             cached.texId = 0
         }
         val vState = videoStates.remove(itemId)
         if (vState != null) {
             if (vState.texEntry.texId > 0) {
-                GLES20.glDeleteTextures(1, intArrayOf(vState.texEntry.texId), 0)
+                tempTexIds[0] = vState.texEntry.texId
+                GLES20.glDeleteTextures(1, tempTexIds, 0)
                 vState.texEntry.texId = 0
             }
             synchronized(vState.lock) {
@@ -689,7 +746,8 @@ class OverlayTextureCache(
     fun clear() {
         for (entry in cache.values) {
             if (entry.texId > 0) {
-                GLES20.glDeleteTextures(1, intArrayOf(entry.texId), 0)
+                tempTexIds[0] = entry.texId
+                GLES20.glDeleteTextures(1, tempTexIds, 0)
                 entry.texId = 0
             }
         }
@@ -697,7 +755,8 @@ class OverlayTextureCache(
 
         for (vState in videoStates.values) {
             if (vState.texEntry.texId > 0) {
-                GLES20.glDeleteTextures(1, intArrayOf(vState.texEntry.texId), 0)
+                tempTexIds[0] = vState.texEntry.texId
+                GLES20.glDeleteTextures(1, tempTexIds, 0)
                 vState.texEntry.texId = 0
             }
             synchronized(vState.lock) {
@@ -754,7 +813,9 @@ private class RetrieverPool(private val maxEntries: Int = 4) {
 
     class RetrieverEntry(
         var path: String = "",
-        val retriever: MediaMetadataRetriever = MediaMetadataRetriever(),
+        val retriever: MediaMetadataRetriever = MediaMetadataRetriever().also {
+            ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
+        },
         var lastUsedTime: Long = 0L
     )
 
@@ -768,13 +829,18 @@ private class RetrieverPool(private val maxEntries: Int = 4) {
             return existing.retriever
         }
         if (entries.size < maxEntries) {
-            val entry = RetrieverEntry(path, MediaMetadataRetriever(), now)
+            val entry = RetrieverEntry(path, MediaMetadataRetriever().also {
+                ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
+            }, now)
             try {
                 entry.retriever.setDataSource(path)
                 entries.add(entry)
                 return entry.retriever
             } catch (_: Throwable) {
-                try { entry.retriever.release() } catch (_: Throwable) {}
+                try {
+                    entry.retriever.release()
+                    ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
+                } catch (_: Throwable) {}
                 return null
             }
         }
@@ -794,6 +860,7 @@ private class RetrieverPool(private val maxEntries: Int = 4) {
         for (e in entries) {
             try {
                 e.retriever.release()
+                ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
             } catch (_: Throwable) {}
         }
         entries.clear()

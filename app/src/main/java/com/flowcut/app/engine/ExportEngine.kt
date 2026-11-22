@@ -161,7 +161,8 @@ class ExportEngine(private val context: Context) {
                 width = it.width,
                 height = it.height,
                 rotation = it.rotation,
-                frameRate = it.frameRate
+                frameRate = it.frameRate,
+                renderParams = it.renderParams
             )
         }
         val coreTransitions = timeline.project.transitions.map {
@@ -790,7 +791,7 @@ class ExportEngine(private val context: Context) {
                 drawSpec.aspectRatio = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
 
                 val timeSec = (res.tUs.toDouble() / 1_000_000.0).toFloat()
-                val st = PreviewRenderer.getClipFilterState(clipA.id)
+                val st = clipA.renderParams.filter
                 var filterId = st.filterPresetId
                 var filterInt = st.filterIntensity
                 var effectId = st.effectPresetId

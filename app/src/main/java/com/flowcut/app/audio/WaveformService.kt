@@ -64,6 +64,21 @@ class WaveformService(
 
     private val inFlight = ConcurrentHashMap<String, Job>()
 
+    var onGeneratingChanged: ((Boolean) -> Unit)? = null
+    @Volatile
+    private var lastGeneratingReported: Boolean = false
+
+    private fun checkGeneratingState() {
+        val isGen = inFlight.isNotEmpty()
+        if (isGen != lastGeneratingReported) {
+            lastGeneratingReported = isGen
+            val cb = onGeneratingChanged
+            if (cb != null) {
+                scope.launch(Dispatchers.Main) { cb(isGen) }
+            }
+        }
+    }
+
     init {
         try {
             if (!diskDir.exists()) {
@@ -116,9 +131,11 @@ class WaveformService(
                 } catch (_: Throwable) {
                 } finally {
                     inFlight.remove(path)
+                    checkGeneratingState()
                 }
             }
             inFlight[path] = job
+            checkGeneratingState()
         }
     }
 
@@ -129,6 +146,7 @@ class WaveformService(
         inFlight.values.forEach { it.cancel() }
         inFlight.clear()
         ready = emptyMap()
+        checkGeneratingState()
     }
 
     /**

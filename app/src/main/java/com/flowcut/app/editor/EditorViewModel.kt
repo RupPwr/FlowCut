@@ -295,6 +295,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(EditorUiState())
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
 
+    val loadingManager = LoadingStateManager(viewModelScope)
+    val isLoadingVisible: StateFlow<Boolean> = loadingManager.isLoadingVisible
+    val loadingMessage: StateFlow<String> = loadingManager.loadingMessage
+
+    fun setLoading(source: String, isLoading: Boolean, message: String = "Processing...") {
+        loadingManager.setLoading(source, isLoading, message)
+    }
+
+    fun startLoading(source: String, message: String = "Processing...") {
+        loadingManager.startLoading(source, message)
+    }
+
+    fun stopLoading(source: String) {
+        loadingManager.stopLoading(source)
+    }
+
+    fun isSourceLoading(source: String): Boolean = loadingManager.isSourceLoading(source)
+
     val timeline: ProgramTimeline
         get() = ProgramTimeline(_uiState.value.project)
 
@@ -333,11 +351,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val undoBackgrounds = ArrayDeque<Map<String, ClipBackground>>()
     private val redoBackgrounds = ArrayDeque<Map<String, ClipBackground>>()
     val clipBackgrounds = mutableMapOf<String, ClipBackground>()
-
-    // Per-clip filter & effect state and undo/redo stacks
-    private val undoFilterStates = ArrayDeque<Map<String, com.flowcut.app.engine.ClipFilterState>>()
-    private val redoFilterStates = ArrayDeque<Map<String, com.flowcut.app.engine.ClipFilterState>>()
-    val clipFilterStates = mutableMapOf<String, com.flowcut.app.engine.ClipFilterState>()
 
     // Multi-layer Overlay Items and undo/redo stacks
     private val undoLayerItems = ArrayDeque<List<OverlayItem>>()
@@ -568,34 +581,22 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun getClipFilterState(clipId: String): com.flowcut.app.engine.ClipFilterState =
-        clipFilterStates[clipId] ?: com.flowcut.app.engine.ClipFilterState.DEFAULT
+        _uiState.value.project.clips.find { it.id == clipId }?.renderParams?.filter
+            ?: com.flowcut.app.engine.ClipFilterState.DEFAULT
 
     fun commitClipFilter(clipIndex: Int, presetId: Int, intensity: Float) {
         val currentProject = _uiState.value.project
         val clip = currentProject.clips.getOrNull(clipIndex) ?: return
 
-        undoStack.push(currentProject)
-        undoTimeMaps.addLast(HashMap(clipTimeMaps))
-        undoVolumes.addLast(HashMap(clipVolumes))
-        undoTransforms.addLast(HashMap(clipTransforms))
-        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
-        undoBackgrounds.addLast(HashMap(clipBackgrounds))
-        undoFilterStates.addLast(HashMap(clipFilterStates))
-        redoTimeMaps.clear()
-        redoVolumes.clear()
-        redoTransforms.clear()
-        redoColorAdjusts.clear()
-        redoBackgrounds.clear()
-        redoFilterStates.clear()
-        undoLayerItems.addLast(ArrayList(_layerItems))
-        redoLayerItems.clear()
-
-        val existing = getClipFilterState(clip.id)
+        PreviewRenderer.clearLiveFilterOverride(clip.id)
+        val existing = clip.renderParams.filter
         val updated = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
-        clipFilterStates[clip.id] = updated
-        PreviewRenderer.setClipFilter(clip.id, presetId, intensity)
+        val updatedClip = clip.copy(renderParams = clip.renderParams.copy(filter = updated))
+        val updatedClips = currentProject.clips.toMutableList()
+        updatedClips[clipIndex] = updatedClip
+        val newProject = currentProject.copy(clips = updatedClips)
 
-        updateProject(currentProject, recordUndo = false)
+        updateProject(newProject, recordUndo = true)
     }
 
     fun commitApplyFilterToAll(presetId: Int, intensity: Float) {
@@ -604,30 +605,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         setProcessingEdit(true)
         try {
-            undoStack.push(currentProject)
-            undoTimeMaps.addLast(HashMap(clipTimeMaps))
-            undoVolumes.addLast(HashMap(clipVolumes))
-            undoTransforms.addLast(HashMap(clipTransforms))
-            undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
-            undoBackgrounds.addLast(HashMap(clipBackgrounds))
-            undoFilterStates.addLast(HashMap(clipFilterStates))
-            redoTimeMaps.clear()
-            redoVolumes.clear()
-            redoTransforms.clear()
-            redoColorAdjusts.clear()
-            redoBackgrounds.clear()
-            redoFilterStates.clear()
-            undoLayerItems.addLast(ArrayList(_layerItems))
-            redoLayerItems.clear()
-
-            for (c in currentProject.clips) {
-                val existing = getClipFilterState(c.id)
+            PreviewRenderer.clearLiveFilterOverride()
+            val updatedClips = currentProject.clips.map { c ->
+                val existing = c.renderParams.filter
                 val updated = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
-                clipFilterStates[c.id] = updated
-                PreviewRenderer.setClipFilter(c.id, presetId, intensity)
+                c.copy(renderParams = c.renderParams.copy(filter = updated))
             }
-
-            updateProject(currentProject, recordUndo = false)
+            val newProject = currentProject.copy(clips = updatedClips)
+            updateProject(newProject, recordUndo = true)
         } finally {
             setProcessingEdit(false)
         }
@@ -637,28 +622,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val currentProject = _uiState.value.project
         val clip = currentProject.clips.getOrNull(clipIndex) ?: return
 
-        undoStack.push(currentProject)
-        undoTimeMaps.addLast(HashMap(clipTimeMaps))
-        undoVolumes.addLast(HashMap(clipVolumes))
-        undoTransforms.addLast(HashMap(clipTransforms))
-        undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
-        undoBackgrounds.addLast(HashMap(clipBackgrounds))
-        undoFilterStates.addLast(HashMap(clipFilterStates))
-        redoTimeMaps.clear()
-        redoVolumes.clear()
-        redoTransforms.clear()
-        redoColorAdjusts.clear()
-        redoBackgrounds.clear()
-        redoFilterStates.clear()
-        undoLayerItems.addLast(ArrayList(_layerItems))
-        redoLayerItems.clear()
-
-        val existing = getClipFilterState(clip.id)
+        PreviewRenderer.clearLiveFilterOverride(clip.id)
+        val existing = clip.renderParams.filter
         val updated = existing.copy(effectPresetId = presetId, effectIntensity = intensity)
-        clipFilterStates[clip.id] = updated
-        PreviewRenderer.setClipEffect(clip.id, presetId, intensity)
+        val updatedClip = clip.copy(renderParams = clip.renderParams.copy(filter = updated))
+        val updatedClips = currentProject.clips.toMutableList()
+        updatedClips[clipIndex] = updatedClip
+        val newProject = currentProject.copy(clips = updatedClips)
 
-        updateProject(currentProject, recordUndo = false)
+        updateProject(newProject, recordUndo = true)
     }
 
     fun addFilterLayer(presetId: Int, intensity: Float, startUs: Long, durationUs: Long = 3_000_000L): OverlayItem? {
@@ -1276,7 +1248,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             undoTransforms.addLast(HashMap(clipTransforms))
             undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
             undoBackgrounds.addLast(HashMap(clipBackgrounds))
-            undoFilterStates.addLast(HashMap(clipFilterStates))
             undoLayerItems.addLast(ArrayList(_layerItems))
             undoAspectRatios.addLast(preSheetAspectRatioMode)
             redoTimeMaps.clear()
@@ -1284,7 +1255,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             redoTransforms.clear()
             redoColorAdjusts.clear()
             redoBackgrounds.clear()
-            redoFilterStates.clear()
             redoLayerItems.clear()
             redoAspectRatios.clear()
             preSheetAspectRatioMode = finalMode
@@ -3675,13 +3645,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         undoTransforms.addLast(HashMap(clipTransforms))
         undoColorAdjusts.addLast(HashMap(clipColorAdjusts))
         undoBackgrounds.addLast(HashMap(clipBackgrounds))
-        undoFilterStates.addLast(HashMap(clipFilterStates))
         redoTimeMaps.clear()
         redoVolumes.clear()
         redoTransforms.clear()
         redoColorAdjusts.clear()
         redoBackgrounds.clear()
-        redoFilterStates.clear()
         undoLayerItems.addLast(ArrayList(_layerItems))
         redoLayerItems.clear()
 
@@ -3715,9 +3683,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         clipBackgrounds.remove(oldClip.id)
         clipBackgrounds[newClipId] = ClipBackground.DEFAULT
         PreviewRenderer.setClipBackground(newClipId, ClipBackground.DEFAULT)
-
-        clipFilterStates.remove(oldClip.id)
-        PreviewRenderer.clipFilterStates.remove(oldClip.id)
 
         updateProject(newProject, recordUndo = false)
 
@@ -3946,6 +3911,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        viewModelScope.launch {
+            _uiState.collect { state ->
+                loadingManager.setLoading(
+                    LoadingSources.IMPORTING,
+                    state.isImporting,
+                    state.importProgressText.ifBlank { "Importing media..." }
+                )
+            }
+        }
         OverlayTextureCache.defaultProxyStore = proxyStore
         OverlayTextureCache.defaultMaxByteBudget = qualityBudget.overlayTexBudgetMb * 1024L * 1024L
         OverlayTextureCache.defaultPipUpdateFps = qualityBudget.pipUpdateFps
@@ -4033,7 +4007,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val transformsDraft = clipTransforms.mapValues { it.value.toDraft() }
         val colorAdjustsDraft = clipColorAdjusts.mapValues { it.value.toDraft() }
         val backgroundsDraft = clipBackgrounds.mapValues { it.value.toDraft() }
-        val filterStatesDraft = clipFilterStates.mapValues { it.value.toDraft() }
+        val filterStatesDraft = currProject.clips.associate { it.id to it.renderParams.filter.toDraft() }
         val junctionsDraft = mutableMapOf<Int, JunctionTransitionDraft>()
         val maxJunctions = maxOf(0, currProject.clips.size - 1)
         for (i in 0 until maxJunctions) {
@@ -4080,7 +4054,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             try {
                 val draft = projectStore.loadFull()
-            val loaded = draft.project
+            val rawLoaded = draft.project
+            // Backward-compat: migrate legacy draft.clipFilterStates into clip.renderParams.filter if needed
+            val loaded = if (draft.clipFilterStates.isNotEmpty()) {
+                val updatedClips = rawLoaded.clips.map { clip ->
+                    if (clip.renderParams.filter == com.flowcut.app.core.model.ClipFilterParams.DEFAULT) {
+                        val legacyFilter = draft.clipFilterStates[clip.id]?.toDomain()
+                        if (legacyFilter != null) {
+                            clip.copy(renderParams = clip.renderParams.copy(filter = legacyFilter))
+                        } else clip
+                    } else clip
+                }
+                rawLoaded.copy(clips = updatedClips)
+            } else rawLoaded
             projectStore.cleanupOrphanClips(loaded)
             for (clip in loaded.clips) {
                 if (!clipNaturalDurations.containsKey(clip.id)) {
@@ -4120,12 +4106,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val domainBgs = draft.clipBackgrounds.mapValues { it.value.toDomain() }
             clipBackgrounds.putAll(domainBgs)
             PreviewRenderer.syncBackgrounds(domainBgs)
-
-            // Restore Filter States
-            clipFilterStates.clear()
-            val domainFilters = draft.clipFilterStates.mapValues { it.value.toDomain() }
-            clipFilterStates.putAll(domainFilters)
-            PreviewRenderer.syncFilterStates(domainFilters)
 
             // Restore Junction Transitions
             junctionTransitionModes.clear()
@@ -4326,8 +4306,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             PreviewRenderer.clipColorAdjusts.remove(deletedId)
             clipBackgrounds.remove(deletedId)
             PreviewRenderer.clipBackgrounds.remove(deletedId)
-            clipFilterStates.remove(deletedId)
-            PreviewRenderer.clipFilterStates.remove(deletedId)
         }
         val newProject = ProgramTimeline.deleteClip(_uiState.value.project, index)
         val isAllMuted = newProject.clips.isNotEmpty() && newProject.clips.all { (clipVolumes[it.id] ?: 1.0f) <= 0.0001f }
@@ -4356,7 +4334,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         PreviewRenderer.syncTransforms(clipTransforms)
         PreviewRenderer.syncColorAdjusts(clipColorAdjusts)
         PreviewRenderer.syncBackgrounds(clipBackgrounds)
-        PreviewRenderer.syncFilterStates(clipFilterStates)
         PreviewRenderer.syncJunctionTransitions(junctionTransitionModes)
         PreviewRenderer.setAspectRatioMode(_uiState.value.aspectRatioMode, _uiState.value.project.clips.firstOrNull())
         if (_uiState.value.project.clips.isNotEmpty()) {
@@ -4416,9 +4393,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             undoBackgrounds.clear()
             redoBackgrounds.clear()
             clipBackgrounds.clear()
-            undoFilterStates.clear()
-            redoFilterStates.clear()
-            clipFilterStates.clear()
             undoLayerItems.clear()
             redoLayerItems.clear()
             _layerItems.clear()
@@ -4908,13 +4882,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipBackgrounds.putAll(prevBgs)
             PreviewRenderer.syncBackgrounds(clipBackgrounds)
         }
-        if (undoFilterStates.isNotEmpty()) {
-            val prevFilters = undoFilterStates.removeLast()
-            redoFilterStates.addLast(HashMap(clipFilterStates))
-            clipFilterStates.clear()
-            clipFilterStates.putAll(prevFilters)
-            PreviewRenderer.syncFilterStates(clipFilterStates)
-        }
         if (undoLayerItems.isNotEmpty()) {
             val prevLayers = undoLayerItems.removeLast()
             redoLayerItems.addLast(ArrayList(_layerItems))
@@ -4979,13 +4946,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             clipBackgrounds.clear()
             clipBackgrounds.putAll(nextBgs)
             PreviewRenderer.syncBackgrounds(clipBackgrounds)
-        }
-        if (redoFilterStates.isNotEmpty()) {
-            val nextFilters = redoFilterStates.removeLast()
-            undoFilterStates.addLast(HashMap(clipFilterStates))
-            clipFilterStates.clear()
-            clipFilterStates.putAll(nextFilters)
-            PreviewRenderer.syncFilterStates(clipFilterStates)
         }
         if (redoLayerItems.isNotEmpty()) {
             val nextLayers = redoLayerItems.removeLast()
@@ -5087,7 +5047,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 height = clip.height,
                 rotation = clip.rotation,
                 frameRate = clip.frameRate,
-                timeMap = timeMap
+                timeMap = timeMap,
+                renderParams = clip.renderParams
             )
         }
         val coreTransitions = project.transitions.map { trans ->
@@ -5216,6 +5177,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setProcessingEdit(processing: Boolean) {
         _uiState.update { it.copy(isProcessingEdit = processing) }
+        loadingManager.setLoading(LoadingSources.HEAVY_PROCESSING, processing, "Processing...")
     }
 
     fun showToast(message: String) {

@@ -93,10 +93,17 @@ fun PreviewBox(
                 ) {
                     if (glSurfaceView != null) {
                         AndroidView(
-                            factory = { glSurfaceView },
+                            factory = {
+                                com.flowcut.app.engine.perf.PreviewEventLog.log(com.flowcut.app.engine.perf.PreviewEventType.ANDROID_VIEW_LIFECYCLE, reason = "factory")
+                                glSurfaceView
+                            },
                             update = { view ->
+                                com.flowcut.app.engine.perf.PreviewEventLog.log(com.flowcut.app.engine.perf.PreviewEventType.ANDROID_VIEW_LIFECYCLE, reason = "update")
                                 (view as? android.view.SurfaceView)?.holder?.setSizeFromLayout()
                                 view.requestLayout()
+                            },
+                            onRelease = {
+                                com.flowcut.app.engine.perf.PreviewEventLog.log(com.flowcut.app.engine.perf.PreviewEventType.ANDROID_VIEW_LIFECYCLE, reason = "release")
                             },
                             modifier = Modifier.fillMaxSize()
                         )

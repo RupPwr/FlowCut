@@ -7,9 +7,14 @@ import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
+import com.flowcut.app.core.feature.FeatureRegistry
 import com.flowcut.app.core.feature.FrameCtx
+import com.flowcut.app.core.feature.LayerRenderer
+import com.flowcut.app.core.feature.PassCtx
 import com.flowcut.app.core.feature.Prefetcher
 import com.flowcut.app.core.feature.RenderContributor
+import com.flowcut.app.core.feature.RenderPass
 import com.flowcut.app.core.model.Clip
 import com.flowcut.app.core.model.TransitionType
 import com.flowcut.app.core.model.map
@@ -20,6 +25,11 @@ import com.flowcut.app.core.time.usToMs
 import com.flowcut.app.core.timeline.ActiveSet
 import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.core.timeline.TimelineSnapshot
+import com.flowcut.app.engine.perf.PreviewEventLog
+import com.flowcut.app.engine.perf.PreviewEventType
+import com.flowcut.app.engine.perf.PreviewWatchdog
+import com.flowcut.app.engine.perf.PreviewWatchdogStateProvider
+import com.flowcut.app.engine.perf.ResourceTracker
 import com.flowcut.app.model.ProgramTimeline
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +42,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Live preview resolution (720x1280, 9:16 portrait).
@@ -290,8 +301,68 @@ class PreviewRenderer(
     val playhead: PlayheadReader = DefaultPlayheadReader(),
     val context: Context? = null,
     var onRenderRequested: (() -> Unit)? = null,
-    val onVideoDecoderPrefetch: ((clipIndex: Int, sourceUs: Long) -> Unit)? = null
-) : GLSurfaceView.Renderer {
+    val onVideoDecoderPrefetch: ((clipIndex: Int, sourceUs: Long) -> Unit)? = null,
+    val featureRegistry: FeatureRegistry? = null
+) : GLSurfaceView.Renderer, OverlayHost, PreviewWatchdogStateProvider {
+
+    private var surfaceCreatedCount: Int = 0
+    private var lastNewFrameMsA: Long = 0L
+    private var lastNewFrameMsB: Long = 0L
+
+    private fun onNewFrameLatchedSlotA(ts: Long) {
+        val now = System.currentTimeMillis()
+        if (lastNewFrameMsA > 0L) {
+            val delta = now - lastNewFrameMsA
+            if (delta > 300L) {
+                PreviewEventLog.log(PreviewEventType.STALL_FLAG, slot = 0, arg0 = delta, reason = "stall_slot_0")
+            }
+        }
+        lastNewFrameMsA = now
+        PreviewEventLog.log(PreviewEventType.NEW_FRAME_LATCHED, slot = 0, arg0 = ts)
+    }
+
+    private fun onNewFrameLatchedSlotB(ts: Long) {
+        val now = System.currentTimeMillis()
+        if (lastNewFrameMsB > 0L) {
+            val delta = now - lastNewFrameMsB
+            if (delta > 300L) {
+                PreviewEventLog.log(PreviewEventType.STALL_FLAG, slot = 1, arg0 = delta, reason = "stall_slot_1")
+            }
+        }
+        lastNewFrameMsB = now
+        PreviewEventLog.log(PreviewEventType.NEW_FRAME_LATCHED, slot = 1, arg0 = ts)
+    }
+
+    override val playMode: PlayMode get() = playhead.mode
+    override val generation: Int get() = playhead.generation
+    override val slotAInfo: String get() = "clipId=${frameSourceA?.clip?.id}, stage=${frameSourceA?.prewarmStage}, catchUp=${frameSourceA?.isCatchingUpFromSeek}, lastPts=${frameSourceA?.lastRenderedPtsUs}, curPts=${frameSourceA?.currentPtsUs}"
+    override val slotBInfo: String get() = "clipId=${frameSourceB?.clip?.id}, stage=${frameSourceB?.prewarmStage}, catchUp=${frameSourceB?.isCatchingUpFromSeek}, lastPts=${frameSourceB?.lastRenderedPtsUs}, curPts=${frameSourceB?.currentPtsUs}"
+    override val pendingSurfaceFramesCountA: Int get() = this.pendingSurfaceFramesA.get()
+    override val pendingSurfaceFramesCountB: Int get() = this.pendingSurfaceFramesB.get()
+    override val pendingSeekInfo: String get() = "accuratePending=$forceAccurateSeekPending, waiting=$isWaitingForFrame, trimPreview=$trimPreviewTimeUs"
+    override val isSuspended: Boolean get() = isSuspendedForExport
+    override val stateMachineState: String get() = "waiting=$isWaitingForFrame, latched=$isFirstFrameLatched"
+
+    private val renderer = TransitionRenderer(context?.cacheDir)
+    internal val transitionRenderer: TransitionRenderer get() = renderer
+
+    val overlayTextureCache = OverlayTextureCache().apply {
+        onFrameReady = { requestRender() }
+    }
+
+    val passRegistry: PassRegistry = PassRegistry()
+    val overlayStagePass: OverlayStagePass = OverlayStagePass(this)
+    private val baseFrameInfo = MutableBaseFrameInfo()
+    private val passCtx = MutablePassCtx(baseFrame = baseFrameInfo)
+
+    init {
+        passRegistry.register(overlayStagePass)
+        featureRegistry?.let {
+            passRegistry.wireTo(it)
+            overlayStagePass.wireTo(it)
+        }
+        PreviewWatchdog.start(this)
+    }
 
     val glSurfaceView: GLSurfaceView? = context?.let { ctx ->
         GLSurfaceView(ctx).apply {
@@ -302,7 +373,6 @@ class PreviewRenderer(
         }
     }
 
-    private val renderer = TransitionRenderer(context?.cacheDir)
     private val stCallbackThread = HandlerThread("FlowCut-ST-Frames").apply { start() }
     private val stCallbackHandler = Handler(stCallbackThread.looper)
 
@@ -327,16 +397,17 @@ class PreviewRenderer(
     var lateFrames: Long = 0L
     @Volatile
     var renderedFrames: Long = 0L
-
-    val overlayTextureCache = OverlayTextureCache().apply {
-        onFrameReady = { requestRender() }
-    }
     private val animEvaluator = AnimatedTransformEvaluator()
     private var surfaceTextureA: SurfaceTexture? = null
     private var surfaceTextureB: SurfaceTexture? = null
 
     private var frameSourceA: FrameSource? = null
     private var frameSourceB: FrameSource? = null
+
+    val owesFrame: Boolean
+        get() = isWaitingForFrame ||
+                (frameSourceA?.isCatchingUpFromSeek == true) ||
+                (frameSourceB?.isCatchingUpFromSeek == true)
 
     private var currentClipIndexA: Int = -1
     private var currentClipIndexB: Int = -1
@@ -352,14 +423,14 @@ class PreviewRenderer(
     // Pre-allocated arrays and structures (Rule R10: Zero heap allocations on hot path)
     @Volatile var trimPreviewTimeUs: Long = -1L
     private var activeSet: ActiveSet = ActiveSet(holder.current.lanes.size)
-    private val activeLayerSet = ActiveLayerSet()
+    override val activeLayerSet: ActiveLayerSet = ActiveLayerSet()
     private val resolvedFrame = ResolvedFrame()
     private val frameCtx = MutableFrameCtx()
 
     private val matA = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
     private val matB = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
-    private val rawMatA = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
-    private val rawMatB = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
+    private val rawMatA = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
+    private val rawMatB = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
     private val cropA = FloatArray(2) { 1f }
     private val cropB = FloatArray(2) { 1f }
     private val scissorRect = IntArray(4)
@@ -415,10 +486,80 @@ class PreviewRenderer(
     fun getJunctionTransitionType(junctionIndex: Int): Int =
         Companion.getJunctionTransitionType(junctionIndex)
 
-    // Zero-allocation frame-time telemetry logger (Rule R10)
-    private var frameTimeSumUs: Long = 0L
-    private var frameTimeMaxUs: Long = 0L
-    private var frameCount: Int = 0
+    private fun safeRequestRender(caller: RenderRequestCaller = RenderRequestCaller.OTHER) {
+        PreviewWatchdog.onRequestRender()
+        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+            PacePerfTracker.onRequestRender(caller, playhead.mode)
+        }
+        val req = onRenderRequested
+        if (req != null) {
+            req.invoke()
+        } else {
+            glSurfaceView?.requestRender()
+        }
+    }
+
+    // Step C: Debug-only metrics (zero allocations per frame, reused StringBuilder)
+    private var passPerfFramesDrawn: Long = 0L
+    private var passPerfFramesLate: Long = 0L
+    private var passPerfBasePassTotalNs: Long = 0L
+    private var passPerfBasePassMaxNs: Long = 0L
+    private var passPerfBasePassCount: Long = 0L
+    private var lastPassPerfLogNs: Long = 0L
+    private val passPerfSb: StringBuilder = StringBuilder(256)
+
+    // STEP A: Debug-only FramePerf telemetry (zero allocations per frame, reused StringBuilder)
+    // PassPerf "late" counter definition (Rule R10 / Step A.4):
+    // The existing `passPerfFramesLate` counter is defined as DRAW EXECUTION DURATION of onDrawFrame() exceeding 16.666 ms
+    // (i.e. (System.nanoTime() - startNs) / 1000L > 16_666L), measuring CPU/GPU submission time of a single draw pass.
+    // It does NOT measure frame interval / pacing cadence (the elapsed time between consecutive frame starts).
+    // In FramePerf below, we track both whole onDrawFrame draw duration and frame interval between starts
+    // (including interval > 20ms and > 33ms dropped-vsync intervals) to separate decoder/draw bottlenecks from pacing jitter.
+    private var framePerfDecoderWaitTotalNs: Long = 0L
+    private var framePerfDecoderWaitMaxNs: Long = 0L
+    private var framePerfDecoderWaitCount: Long = 0L
+
+    private var framePerfUpdateTexTotalNs: Long = 0L
+    private var framePerfUpdateTexMaxNs: Long = 0L
+    private var framePerfUpdateTexCount: Long = 0L
+
+    private var framePerfDrawCpuTotalNs: Long = 0L
+    private var framePerfDrawCpuMaxNs: Long = 0L
+    private var framePerfDrawCpuCount: Long = 0L
+
+    private var framePerfWholeDrawTotalNs: Long = 0L
+    private var framePerfWholeDrawMaxNs: Long = 0L
+    private var framePerfWholeDrawCount: Long = 0L
+
+    private var framePerfLastFrameStartNs: Long = 0L
+    private var framePerfIntervalTotalNs: Long = 0L
+    private var framePerfIntervalMaxNs: Long = 0L
+    private var framePerfIntervalCount: Long = 0L
+    private var framePerfIntervalGt20ms: Long = 0L
+    private var framePerfIntervalGt33ms: Long = 0L
+
+    private var framePerfNewFramesCount: Long = 0L
+    private var framePerfRepeatedFramesCount: Long = 0L
+
+    private var lastFramePerfLogNs: Long = 0L
+    private val framePerfSb: StringBuilder = StringBuilder(512)
+    private var framePerfLoggedPlaybackStart: Boolean = false
+    private var lastSeenTexTimestampA: Long = -1L
+    private var lastSeenTexTimestampB: Long = -1L
+
+    private fun logPlaybackStart(clip: Clip, fs: FrameSource?) {
+        val codecStr = fs?.codecName ?: fs?.currentMimeType ?: "unknown"
+        val proxyStore = overlayTextureCache.proxyStore ?: OverlayTextureCache.defaultProxyStore
+        val isProxyUsed = proxyStore?.getReadyProxyPath(clip.path) != null
+        try {
+            android.util.Log.i(
+                "FramePerf",
+                "Playback Start: clipId=${clip.id}, res=${clip.width}x${clip.height} (display=${clip.displayWidth}x${clip.displayHeight}), fps=${clip.frameRate}, codec=$codecStr, proxyUsed=$isProxyUsed"
+            )
+        } catch (_: Throwable) {
+            println("[FramePerf] Playback Start: clipId=${clip.id}, res=${clip.width}x${clip.height} (display=${clip.displayWidth}x${clip.displayHeight}), fps=${clip.frameRate}, codec=$codecStr, proxyUsed=$isProxyUsed")
+        }
+    }
 
     // Pre-allocated per-slot background and foreground matrices & parameters (Rule R10)
     private val fgNormMatA = FloatArray(16)
@@ -432,7 +573,7 @@ class PreviewRenderer(
     private val lastActiveVideoMat = FloatArray(16)
     private val lastActiveCrop = floatArrayOf(1f, 1f)
 
-    private val drawSpec = DrawSpec()
+    internal val drawSpec = DrawSpec()
 
     private val contributors = mutableListOf<RenderContributor>()
     private val disabledContributors = mutableSetOf<RenderContributor>()
@@ -441,8 +582,10 @@ class PreviewRenderer(
     private var contributorLaneMap: Array<IntArray> = emptyArray()
 
     private val prefetchers = mutableListOf<Prefetcher>()
-    private val hasPendingSurfaceFrameA = AtomicBoolean(false)
-    private val hasPendingSurfaceFrameB = AtomicBoolean(false)
+    private val pendingSurfaceFramesA = AtomicInteger(0)
+    private val pendingSurfaceFramesB = AtomicInteger(0)
+    private val frameLockA = java.lang.Object()
+    private val frameLockB = java.lang.Object()
 
     val prefetchCoordinator = PrefetchCoordinator(
         holder = holder,
@@ -493,7 +636,7 @@ class PreviewRenderer(
      * Currently selected overlay item ID drawn last (topmost) on preview without mutating project z-index.
      */
     @Volatile
-    var selectedOverlayIdForPreview: String? = null
+    override var selectedOverlayIdForPreview: String? = null
 
     fun stopPrefetch() {
         // Disabled
@@ -509,11 +652,22 @@ class PreviewRenderer(
     fun requestAccurateSeek() {
         forceAccurateSeekPending = true
         isWaitingForFrame = true
+        pendingSurfaceFramesA.set(0)
+        pendingSurfaceFramesB.set(0)
+        PreviewEventLog.log(PreviewEventType.SEEK_ENTER, reason = "requestAccurateSeek")
+        PreviewWatchdog.onRequestRender()
+        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+            PacePerfTracker.onRequestRender(RenderRequestCaller.SEEK, playhead.mode)
+        }
         glSurfaceView?.requestRender()
         onRenderRequested?.invoke()
     }
 
-    fun requestRender() {
+    fun requestRender(caller: RenderRequestCaller = RenderRequestCaller.OTHER) {
+        PreviewWatchdog.onRequestRender()
+        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+            PacePerfTracker.onRequestRender(caller, playhead.mode)
+        }
         glSurfaceView?.requestRender()
         onRenderRequested?.invoke()
     }
@@ -635,35 +789,67 @@ class PreviewRenderer(
     // GLSurfaceView.Renderer implementation
     // ---------------------------------------------------------------------------------------------
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        PreviewWatchdog.glThread = Thread.currentThread()
+        surfaceCreatedCount++
+        val isEglLoss = surfaceCreatedCount > 1
+        PreviewEventLog.log(
+            if (isEglLoss) PreviewEventType.EGL_CONTEXT_LOSS else PreviewEventType.GL_SURFACE_CREATED,
+            arg0 = surfaceCreatedCount.toLong(),
+            reason = "recreate: renderer.init, textures, decoders, passes"
+        )
         renderer.init()
+        GlPassScope.restoreBaseline(PREVIEW_W, PREVIEW_H)
         recreateSurfaceTextures()
         releaseDecoders(synchronous = true)
+        passRegistry.onGlCreated()
     }
 
     private fun recreateSurfaceTextures() {
-        surfaceTextureA?.setOnFrameAvailableListener(null)
-        surfaceTextureA?.release()
-        surfaceTextureB?.setOnFrameAvailableListener(null)
-        surfaceTextureB?.release()
-        hasPendingSurfaceFrameA.set(false)
-        hasPendingSurfaceFrameB.set(false)
+        if (surfaceTextureA != null) {
+            surfaceTextureA?.setOnFrameAvailableListener(null)
+            surfaceTextureA?.release()
+            ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
+        }
+        if (surfaceTextureB != null) {
+            surfaceTextureB?.setOnFrameAvailableListener(null)
+            surfaceTextureB?.release()
+            ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
+        }
+        pendingSurfaceFramesA.set(0)
+        pendingSurfaceFramesB.set(0)
 
         val stA = SurfaceTexture(renderer.textureIdA()).apply {
+            ResourceTracker.onCreated(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
-                hasPendingSurfaceFrameA.set(true)
+                pendingSurfaceFramesA.incrementAndGet()
+                synchronized(frameLockA) {
+                    frameLockA.notifyAll()
+                }
                 isWaitingForFrame = false
-                onRenderRequested?.invoke()
-                glSurfaceView?.requestRender()
+                if (playhead.mode != PlayMode.PLAYING) {
+                    onRenderRequested?.invoke()
+                    glSurfaceView?.requestRender()
+                } else if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                    PacePerfTracker.onRequestRender(RenderRequestCaller.ON_FRAME_AVAILABLE, playhead.mode)
+                }
             }, stCallbackHandler)
         }
         val stB = SurfaceTexture(renderer.textureIdB()).apply {
+            ResourceTracker.onCreated(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
-                hasPendingSurfaceFrameB.set(true)
+                pendingSurfaceFramesB.incrementAndGet()
+                synchronized(frameLockB) {
+                    frameLockB.notifyAll()
+                }
                 isWaitingForFrame = false
-                onRenderRequested?.invoke()
-                glSurfaceView?.requestRender()
+                if (playhead.mode != PlayMode.PLAYING) {
+                    onRenderRequested?.invoke()
+                    glSurfaceView?.requestRender()
+                } else if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                    PacePerfTracker.onRequestRender(RenderRequestCaller.ON_FRAME_AVAILABLE, playhead.mode)
+                }
             }, stCallbackHandler)
         }
 
@@ -672,6 +858,8 @@ class PreviewRenderer(
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        PreviewWatchdog.glThread = Thread.currentThread()
+        PreviewEventLog.log(PreviewEventType.GL_SURFACE_CHANGED, arg0 = width.toLong(), arg1 = height.toLong(), reason = "viewport=${width}x${height}")
         if (width > 0 && height > 0) {
             viewportWidth = width
             viewportHeight = height
@@ -690,7 +878,7 @@ class PreviewRenderer(
             Companion.setCanvasAspectRatio(targetAspect)
             TransitionRenderer.canvasAspect = targetAspect
         }
-        GLES30.glViewport(0, 0, width, height)
+        GlPassScope.restoreBaseline(width, height)
         requestRender()
         onRenderRequested?.invoke()
     }
@@ -756,18 +944,40 @@ class PreviewRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        if (isSuspendedForExport) {
-            GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
-            GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
-            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-            return
-        }
-        val startNs = System.nanoTime()
+        PreviewWatchdog.onDrawFrameStart()
+        val startNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) System.nanoTime() else 0L
         val wasWaitingInitial = isWaitingForFrame
+        var showedNewFrame = false
         try {
+            if (isSuspendedForExport) {
+                PreviewEventLog.onBlackoutClearBranch("isSuspendedForExport", "isSuspended=true")
+                GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
+                GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+                return
+            }
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                PacePerfTracker.onDrawFrameStart(playhead.mode)
+            }
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                if (playhead.mode == PlayMode.PLAYING) {
+                    if (framePerfLastFrameStartNs > 0L) {
+                        val intervalNs = startNs - framePerfLastFrameStartNs
+                        framePerfIntervalTotalNs += intervalNs
+                        if (intervalNs > framePerfIntervalMaxNs) framePerfIntervalMaxNs = intervalNs
+                        framePerfIntervalCount++
+                        if (intervalNs > 20_000_000L) framePerfIntervalGt20ms++
+                        if (intervalNs > 33_333_333L) framePerfIntervalGt33ms++
+                    }
+                    framePerfLastFrameStartNs = startNs
+                } else {
+                    framePerfLastFrameStartNs = 0L
+                }
+            }
             val s = holder.current
             val clips = s.project.clips
             if (clips.isEmpty()) {
+                PreviewEventLog.onBlackoutClearBranch("clips_empty", "clipCount=0")
                 isFirstFrameLatched = false
                 isWaitingForFrame = false
                 GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
@@ -780,16 +990,22 @@ class PreviewRenderer(
 
             val frame = renderFrame(viewportWidth, viewportHeight)
             if (frame.clipAIndex < 0) {
+                PreviewEventLog.onBlackoutClearBranch("slot_invalid_negative_clip_index", "clipAIndex=${frame.clipAIndex}")
                 GLES30.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
                 isWaitingForFrame = false
                 return
             }
 
-            val stA = surfaceTextureA ?: return
-            val stB = surfaceTextureB ?: return
+            val stA = surfaceTextureA
+            val stB = surfaceTextureB
+            if (stA == null || stB == null) {
+                PreviewEventLog.onBlackoutClearBranch("surface_textures_null", "stA=${stA != null}, stB=${stB != null}")
+                return
+            }
             val clipA = s.project.clips.getOrNull(frame.clipAIndex)
             if (clipA == null) {
+                PreviewEventLog.onBlackoutClearBranch("clipA_null", "clipAIndex=${frame.clipAIndex}, clipCount=${clips.size}")
                 isWaitingForFrame = false
                 return
             }
@@ -835,11 +1051,14 @@ class PreviewRenderer(
                                 frameSourceB?.clip?.path != clipA.path
                         if (clipAChanged) {
                             frameSourceB?.release(synchronous = true)
-                            frameSourceB = FrameSource(toLegacyClip(clipA), stB)
+                            frameSourceB = FrameSource(toLegacyClip(clipA), stB).apply { slot = 1 }
+                            ResourceTracker.logAliveCounts("slot_recreated_B")
                             currentClipIndexB = frame.clipAIndex
                         } else {
+                            PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 1, clipId = clipA.id, reason = "case1_outgoing_reuse")
                             frameSourceB?.clip = toLegacyClip(clipA)
                         }
+                        val fsWaitStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                         val fsOutgoing = frameSourceB
                         fsOutgoing?.playbackSpeed = speedA
                         if (fsOutgoing != null && fsOutgoing.prewarmStage < 3) {
@@ -847,17 +1066,45 @@ class PreviewRenderer(
                         }
                         val renderedA = try {
                             fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
-                        } catch (_: Exception) { false }
-                        if (!renderedA && (fsOutgoing?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
-                            glSurfaceView?.requestRender()
+                        } catch (e: Exception) {
+                            PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsOutgoing_B", e)
+                            false
                         }
-                        if (renderedA || hasPendingSurfaceFrameB.getAndSet(false)) {
+                        if (!renderedA && fsOutgoing?.isCatchingUpFromSeek == true) {
+                            safeRequestRender()
+                        }
+                        val pendingB = pendingSurfaceFramesB.getAndSet(0)
+                        if (renderedA || pendingB > 0) {
+                            val updateStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                             try {
-                                stB.updateTexImage()
+                                var drained = 0
+                                while (drained < pendingB) {
+                                    stB.updateTexImage()
+                                    drained++
+                                }
+                                if (drained == 0 && renderedA) {
+                                    stB.updateTexImage()
+                                }
                                 stB.getTransformMatrix(rawMatB)
                                 isFirstFrameLatched = true
                                 isWaitingForFrame = false
-                            } catch (_: Exception) {}
+                                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                    val ts = stB.timestamp
+                                    if (ts != lastSeenTexTimestampB) {
+                                        lastSeenTexTimestampB = ts
+                                        showedNewFrame = true
+                                        onNewFrameLatchedSlotB(ts)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_stB", e)
+                            }
+                            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                                val updateDur = System.nanoTime() - updateStartNs
+                                framePerfUpdateTexTotalNs += updateDur
+                                if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
+                                framePerfUpdateTexCount++
+                            }
                         }
 
                         // Incoming clipB is on Slot A (stA)
@@ -867,9 +1114,11 @@ class PreviewRenderer(
                                 frameSourceA?.clip?.path != clipB.path
                         if (clipBChanged) {
                             frameSourceA?.release(synchronous = true)
-                            frameSourceA = FrameSource(toLegacyClip(clipB), stA)
+                            frameSourceA = FrameSource(toLegacyClip(clipB), stA).apply { slot = 0 }
+                            ResourceTracker.logAliveCounts("slot_recreated_A")
                             currentClipIndexA = frame.clipBIndex
                         } else {
+                            PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 0, clipId = clipB.id, reason = "case1_incoming_reuse")
                             frameSourceA?.clip = toLegacyClip(clipB)
                         }
                         val fsIncoming = frameSourceA
@@ -879,17 +1128,55 @@ class PreviewRenderer(
                         }
                         val renderedB = try {
                             fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
-                        } catch (_: Exception) { false }
-                        if (!renderedB && (fsIncoming?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
-                            glSurfaceView?.requestRender()
+                        } catch (e: Exception) {
+                            PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsIncoming_A", e)
+                            false
                         }
-                        if (renderedB || hasPendingSurfaceFrameA.getAndSet(false)) {
+                        if (!renderedB && fsIncoming?.isCatchingUpFromSeek == true) {
+                            safeRequestRender()
+                        }
+                        val pendingA = pendingSurfaceFramesA.getAndSet(0)
+                        if (renderedB || pendingA > 0) {
+                            val updateStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                             try {
-                                stA.updateTexImage()
+                                var drained = 0
+                                while (drained < pendingA) {
+                                    stA.updateTexImage()
+                                    drained++
+                                }
+                                if (drained == 0 && renderedB) {
+                                    stA.updateTexImage()
+                                }
                                 stA.getTransformMatrix(rawMatA)
                                 isFirstFrameLatched = true
                                 isWaitingForFrame = false
-                            } catch (_: Exception) {}
+                                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                    val ts = stA.timestamp
+                                    if (ts != lastSeenTexTimestampA) {
+                                        lastSeenTexTimestampA = ts
+                                        showedNewFrame = true
+                                        onNewFrameLatchedSlotA(ts)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_stA", e)
+                            }
+                            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                                val updateDur = System.nanoTime() - updateStartNs
+                                framePerfUpdateTexTotalNs += updateDur
+                                if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
+                                framePerfUpdateTexCount++
+                            }
+                        }
+                        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                            val fsWaitDur = System.nanoTime() - fsWaitStartNs
+                            framePerfDecoderWaitTotalNs += fsWaitDur
+                            if (fsWaitDur > framePerfDecoderWaitMaxNs) framePerfDecoderWaitMaxNs = fsWaitDur
+                            framePerfDecoderWaitCount++
+                            if (!framePerfLoggedPlaybackStart) {
+                                framePerfLoggedPlaybackStart = true
+                                logPlaybackStart(clipA, fsOutgoing)
+                            }
                         }
 
                         computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
@@ -911,11 +1198,14 @@ class PreviewRenderer(
                                 frameSourceA?.clip?.path != clipA.path
                         if (clipAChanged) {
                             frameSourceA?.release(synchronous = true)
-                            frameSourceA = FrameSource(toLegacyClip(clipA), stA)
+                            frameSourceA = FrameSource(toLegacyClip(clipA), stA).apply { slot = 0 }
+                            ResourceTracker.logAliveCounts("slot_recreated_A")
                             currentClipIndexA = frame.clipAIndex
                         } else {
+                            PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 0, clipId = clipA.id, reason = "case1_outgoing_reuse")
                             frameSourceA?.clip = toLegacyClip(clipA)
                         }
+                        val fsWaitStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                         val fsOutgoing = frameSourceA
                         fsOutgoing?.playbackSpeed = speedA
                         if (fsOutgoing != null && fsOutgoing.prewarmStage < 3) {
@@ -923,17 +1213,45 @@ class PreviewRenderer(
                         }
                         val renderedA = try {
                             fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
-                        } catch (_: Exception) { false }
-                        if (!renderedA && (fsOutgoing?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
-                            glSurfaceView?.requestRender()
+                        } catch (e: Exception) {
+                            PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsOutgoing_A", e)
+                            false
                         }
-                        if (renderedA || hasPendingSurfaceFrameA.getAndSet(false)) {
+                        if (!renderedA && fsOutgoing?.isCatchingUpFromSeek == true) {
+                            safeRequestRender()
+                        }
+                        val pendingA = pendingSurfaceFramesA.getAndSet(0)
+                        if (renderedA || pendingA > 0) {
+                            val updateStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                             try {
-                                stA.updateTexImage()
+                                var drained = 0
+                                while (drained < pendingA) {
+                                    stA.updateTexImage()
+                                    drained++
+                                }
+                                if (drained == 0 && renderedA) {
+                                    stA.updateTexImage()
+                                }
                                 stA.getTransformMatrix(rawMatA)
                                 isFirstFrameLatched = true
                                 isWaitingForFrame = false
-                            } catch (_: Exception) {}
+                                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                    val ts = stA.timestamp
+                                    if (ts != lastSeenTexTimestampA) {
+                                        lastSeenTexTimestampA = ts
+                                        showedNewFrame = true
+                                        onNewFrameLatchedSlotA(ts)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_stA", e)
+                            }
+                            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                                val updateDur = System.nanoTime() - updateStartNs
+                                framePerfUpdateTexTotalNs += updateDur
+                                if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
+                                framePerfUpdateTexCount++
+                            }
                         }
 
                         // Incoming clipB is on Slot B (stB)
@@ -943,9 +1261,11 @@ class PreviewRenderer(
                                 frameSourceB?.clip?.path != clipB.path
                         if (clipBChanged) {
                             frameSourceB?.release(synchronous = true)
-                            frameSourceB = FrameSource(toLegacyClip(clipB), stB)
+                            frameSourceB = FrameSource(toLegacyClip(clipB), stB).apply { slot = 1 }
+                            ResourceTracker.logAliveCounts("slot_recreated_B")
                             currentClipIndexB = frame.clipBIndex
                         } else {
+                            PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 1, clipId = clipB.id, reason = "case1_incoming_reuse")
                             frameSourceB?.clip = toLegacyClip(clipB)
                         }
                         val fsIncoming = frameSourceB
@@ -955,17 +1275,55 @@ class PreviewRenderer(
                         }
                         val renderedB = try {
                             fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
-                        } catch (_: Exception) { false }
-                        if (!renderedB && (fsIncoming?.isCatchingUpFromSeek == true || isWaitingForFrame)) {
-                            glSurfaceView?.requestRender()
+                        } catch (e: Exception) {
+                            PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsIncoming_B", e)
+                            false
                         }
-                        if (renderedB || hasPendingSurfaceFrameB.getAndSet(false)) {
+                        if (!renderedB && fsIncoming?.isCatchingUpFromSeek == true) {
+                            safeRequestRender()
+                        }
+                        val pendingB = pendingSurfaceFramesB.getAndSet(0)
+                        if (renderedB || pendingB > 0) {
+                            val updateStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                             try {
-                                stB.updateTexImage()
+                                var drained = 0
+                                while (drained < pendingB) {
+                                    stB.updateTexImage()
+                                    drained++
+                                }
+                                if (drained == 0 && renderedB) {
+                                    stB.updateTexImage()
+                                }
                                 stB.getTransformMatrix(rawMatB)
                                 isFirstFrameLatched = true
                                 isWaitingForFrame = false
-                            } catch (_: Exception) {}
+                                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                    val ts = stB.timestamp
+                                    if (ts != lastSeenTexTimestampB) {
+                                        lastSeenTexTimestampB = ts
+                                        showedNewFrame = true
+                                        onNewFrameLatchedSlotB(ts)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_stB", e)
+                            }
+                            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                                val updateDur = System.nanoTime() - updateStartNs
+                                framePerfUpdateTexTotalNs += updateDur
+                                if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
+                                framePerfUpdateTexCount++
+                            }
+                        }
+                        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                            val fsWaitDur = System.nanoTime() - fsWaitStartNs
+                            framePerfDecoderWaitTotalNs += fsWaitDur
+                            if (fsWaitDur > framePerfDecoderWaitMaxNs) framePerfDecoderWaitMaxNs = fsWaitDur
+                            framePerfDecoderWaitCount++
+                            if (!framePerfLoggedPlaybackStart) {
+                                framePerfLoggedPlaybackStart = true
+                                logPlaybackStart(clipA, fsOutgoing)
+                            }
                         }
 
                         computeFgNormMatrix(fgNormMatA, transformA, clipA.displayWidth, clipA.displayHeight, this.canvasAspectRatio)
@@ -1040,11 +1398,15 @@ class PreviewRenderer(
 
                     val needsScissor = (bgModeA == 0 && bgModeB == 0) &&
                         computeScissorRect(viewportWidth, viewportHeight, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
-                    if (needsScissor) {
-                        GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
-                        GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
-                    }
-                    try {
+                    val baseStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) System.nanoTime() else 0L
+                    GlPassScope.runPass(
+                        passName = "TransitionVideoPass",
+                        viewportWidth = viewportWidth,
+                        viewportHeight = viewportHeight,
+                        enableBlend = false,
+                        enableScissor = needsScissor,
+                        scissorRect = if (needsScissor) scissorRect else null
+                    ) {
                         val adjustA = getClipColorAdjust(clipA.id)
                         packAdjust(adjustA, adjA0, adjA1, adjA2)
                         val adjustB = getClipColorAdjust(clipB.id)
@@ -1102,19 +1464,29 @@ class PreviewRenderer(
                             }
                         }
 
-                        resolveFilterAndEffect(clipA.id, frame.tUs)
+                        resolveFilterAndEffect(clipA, frame.tUs)
+                        val drawCpuStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
+                        PreviewEventLog.onVideoDrawn()
                         renderer.draw(drawSpec)
-                    } catch (_: Exception) {
-                    } finally {
-                        if (needsScissor) {
-                            GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                            val drawCpuDur = System.nanoTime() - drawCpuStartNs
+                            framePerfDrawCpuTotalNs += drawCpuDur
+                            if (drawCpuDur > framePerfDrawCpuMaxNs) framePerfDrawCpuMaxNs = drawCpuDur
+                            framePerfDrawCpuCount++
                         }
+                    }
+
+                    if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                        val baseDur = System.nanoTime() - baseStartNs
+                        passPerfBasePassTotalNs += baseDur
+                        if (baseDur > passPerfBasePassMaxNs) passPerfBasePassMaxNs = baseDur
+                        passPerfBasePassCount++
                     }
 
                     lastTransitionIncomingSlot = if (isOutgoingOnSlotB) 0 else 1
                     lastTransitionIncomingClipIndex = frame.clipBIndex
 
-                    renderOverlays(frame.tUs)
+                    renderOverlaysStage(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
             val isCatchingUp = checkIsCatchingUp(frame, isTransition)
@@ -1123,15 +1495,19 @@ class PreviewRenderer(
                 // Only show loader spinner when paused (not during scrubbing/flinging)
                 if (playhead.mode == PlayMode.PAUSED) {
                     isWaitingForFrame = true
+                    val activelyCatchingUp = (frameSourceA?.isCatchingUpFromSeek == true) || (frameSourceB?.isCatchingUpFromSeek == true)
+                    if (activelyCatchingUp) {
+                        safeRequestRender()
+                    }
+                } else {
+                    safeRequestRender()
                 }
-                glSurfaceView?.requestRender()
-                onRenderRequested?.invoke()
             } else {
-                isWaitingForFrame = false
+                // No pending surface frame here. Do NOT clear isWaitingForFrame.
+                // Only onFrameAvailable and a successful updateTexImage may clear it.
             }
                     if (playhead.mode == PlayMode.PLAYING) {
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
+                        safeRequestRender()
                     }
                     return
                 }
@@ -1218,6 +1594,7 @@ class PreviewRenderer(
                 if (activeFs != null && activeFs.clip.path == clipA.path && activeFs.canReuse(legacyClipA)) {
                     // Reuse active decoder across split clips sharing the same media path
                     activeFs.clip = legacyClipA
+                    PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 0, clipId = clipA.id, reason = "split_reuse")
                     currentClipIndexA = frame.clipAIndex
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
@@ -1230,13 +1607,17 @@ class PreviewRenderer(
                         } else {
                             !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
                         }
+                        android.util.Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts current=$currentPts paused=$isPaused scrubbing=$isScrubbing")
                         if (shouldSeek) {
+                            pendingSurfaceFramesA.set(0)
                             activeFs.seekTo(targetPts, fastKeyframeOnly = isScrubbing)
                         }
                     }
                 } else {
                     frameSourceA?.release(synchronous = true)
-                    frameSourceA = FrameSource(legacyClipA, stA)
+                    pendingSurfaceFramesA.set(0)
+                    frameSourceA = FrameSource(legacyClipA, stA).apply { slot = 0 }
+                    ResourceTracker.logAliveCounts("slot_recreated_A")
                     currentClipIndexA = frame.clipAIndex
                 }
             } else {
@@ -1244,43 +1625,89 @@ class PreviewRenderer(
                 val legacyClipA = toLegacyClip(clipA)
                 if (frameSourceA == null || frameSourceA?.clip?.path != clipA.path) {
                     frameSourceA?.release(synchronous = true)
-                    frameSourceA = FrameSource(legacyClipA, stA)
+                    pendingSurfaceFramesA.set(0)
+                    frameSourceA = FrameSource(legacyClipA, stA).apply { slot = 0 }
+                    ResourceTracker.logAliveCounts("slot_recreated_A")
                 } else {
+                    PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 0, clipId = clipA.id, reason = "path_match_reuse")
                     frameSourceA?.clip = legacyClipA
                 }
             }
 
+            val fsWaitStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
             val fsA = frameSourceA
             if (fsA != null) {
                 fsA.playbackSpeed = speedA
                 if (fsA.prewarmStage < 2) {
                     fsA.startCodecAndSeek(frame.clipASourceUs)
-                    onRenderRequested?.invoke()
-                    glSurfaceView?.requestRender()
+                    safeRequestRender()
                 }
                 if (fsA.prewarmStage == 2) {
                     fsA.stepPrewarmTo(frame.clipASourceUs)
-                    onRenderRequested?.invoke()
-                    glSurfaceView?.requestRender()
+                    safeRequestRender()
                 }
                 if (fsA.prewarmStage >= 3) {
                     val rendered = try {
-                        fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
-                    } catch (_: Exception) { false }
-                    if (!rendered && (fsA.isCatchingUpFromSeek || isWaitingForFrame)) {
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
+                        fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = playhead.mode)
+                    } catch (e: Exception) {
+                        PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.fsA", e)
+                        false
+                    }
+                    if (!rendered && fsA.isCatchingUpFromSeek) {
+                        safeRequestRender()
+                    }
+                }
+            }
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                val fsWaitDur = System.nanoTime() - fsWaitStartNs
+                framePerfDecoderWaitTotalNs += fsWaitDur
+                if (fsWaitDur > framePerfDecoderWaitMaxNs) framePerfDecoderWaitMaxNs = fsWaitDur
+                framePerfDecoderWaitCount++
+                if (!framePerfLoggedPlaybackStart) {
+                    framePerfLoggedPlaybackStart = true
+                    logPlaybackStart(clipA, fsA)
+                }
+            }
+
+            if (playhead.mode == PlayMode.PLAYING && (fsA?.didReleaseOutputBuffer == true) && pendingSurfaceFramesA.get() == 0) {
+                synchronized(frameLockA) {
+                    if (pendingSurfaceFramesA.get() == 0) {
+                        try {
+                            frameLockA.wait(3L)
+                        } catch (_: InterruptedException) {}
                     }
                 }
             }
 
-            if (hasPendingSurfaceFrameA.getAndSet(false)) {
+            val pendingA = pendingSurfaceFramesA.getAndSet(0)
+            if (pendingA > 0) {
+                val updateStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                 try {
-                    stA.updateTexImage()
+                    var drained = 0
+                    while (drained < pendingA) {
+                        stA.updateTexImage()
+                        drained++
+                    }
                     stA.getTransformMatrix(rawMatA)
                     isFirstFrameLatched = true
                     isWaitingForFrame = false
-                } catch (_: Exception) {}
+                    if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                        val ts = stA.timestamp
+                        if (ts != lastSeenTexTimestampA) {
+                            lastSeenTexTimestampA = ts
+                            showedNewFrame = true
+                            onNewFrameLatchedSlotA(ts)
+                        }
+                    }
+                } catch (e: Exception) {
+                    PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.stA", e)
+                }
+                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                    val updateDur = System.nanoTime() - updateStartNs
+                    framePerfUpdateTexTotalNs += updateDur
+                    if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
+                    framePerfUpdateTexCount++
+                }
             }
             val transformA = getClipTransform(clipA.id)
             System.arraycopy(rawMatA, 0, matA, 0, 16)
@@ -1305,7 +1732,9 @@ class PreviewRenderer(
                             frameSourceB?.clip?.path != nextClip.path ||
                             currentClipIndexB != m) {
                             frameSourceB?.release(synchronous = true)
-                            frameSourceB = FrameSource(toLegacyClip(nextClip), stB)
+                            pendingSurfaceFramesB.set(0)
+                            frameSourceB = FrameSource(toLegacyClip(nextClip), stB).apply { slot = 1 }
+                            ResourceTracker.logAliveCounts("slot_recreated_B")
                             currentClipIndexB = m
                         }
                         val fsB = frameSourceB
@@ -1315,11 +1744,20 @@ class PreviewRenderer(
                                 if (fsB.prewarmStage < 1) fsB.prepareExtractorOnly()
                                 if (fsB.prewarmStage < 2) fsB.startCodecAndSeek(nextClipInUs)
                                 if (fsB.prewarmStage < 3) fsB.stepPrewarmTo(nextClipInUs)
-                                if (hasPendingSurfaceFrameB.getAndSet(false) || fsB.prewarmStage >= 3) {
+                                if (pendingSurfaceFramesB.getAndSet(0) > 0 || fsB.prewarmStage >= 3) {
                                     try {
                                         stB.updateTexImage()
                                         stB.getTransformMatrix(rawMatB)
-                                    } catch (_: Exception) {}
+                                        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                            val ts = stB.timestamp
+                                            if (ts != lastSeenTexTimestampB) {
+                                                lastSeenTexTimestampB = ts
+                                                onNewFrameLatchedSlotB(ts)
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.standby_stB", e)
+                                    }
                                     val nextTransform = getClipTransform(nextClip.id)
                                     System.arraycopy(rawMatB, 0, matB, 0, 16)
                                     applyTransformMatrix(matB, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
@@ -1332,21 +1770,28 @@ class PreviewRenderer(
                                 when (fsB.prewarmStage) {
                                     0 -> {
                                         fsB.prepareExtractorOnly()
-                                        onRenderRequested?.invoke()
-                                        glSurfaceView?.requestRender()
+                                        safeRequestRender()
                                     }
                                     1 -> {
                                         fsB.startCodecAndSeek(nextClipInUs)
-                                        onRenderRequested?.invoke()
-                                        glSurfaceView?.requestRender()
+                                        safeRequestRender()
                                     }
                                     2 -> {
                                         val ready = fsB.stepPrewarmTo(nextClipInUs)
-                                        if (ready || hasPendingSurfaceFrameB.getAndSet(false)) {
+                                        if (ready || pendingSurfaceFramesB.getAndSet(0) > 0) {
                                             try {
                                                 stB.updateTexImage()
                                                 stB.getTransformMatrix(rawMatB)
-                                            } catch (_: Exception) {}
+                                                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                                    val ts = stB.timestamp
+                                                    if (ts != lastSeenTexTimestampB) {
+                                                        lastSeenTexTimestampB = ts
+                                                        onNewFrameLatchedSlotB(ts)
+                                                    }
+                                                }
+                                            } catch (e: Exception) {
+                                                PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.standby_stB", e)
+                                            }
                                             val nextTransform = getClipTransform(nextClip.id)
                                             System.arraycopy(rawMatB, 0, matB, 0, 16)
                                             applyTransformMatrix(matB, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
@@ -1355,8 +1800,7 @@ class PreviewRenderer(
                                             standbyPreparedPath = nextClip.path
                                             standbyPreparedInUs = nextClipInUs
                                         } else {
-                                            onRenderRequested?.invoke()
-                                            glSurfaceView?.requestRender()
+                                            safeRequestRender()
                                         }
                                     }
                                 }
@@ -1394,11 +1838,15 @@ class PreviewRenderer(
 
             val needsScissor = (bgModeA == 0) &&
                 computeScissorRect(viewportWidth, viewportHeight, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
-            if (needsScissor) {
-                GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
-                GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
-            }
-            try {
+            val baseStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) System.nanoTime() else 0L
+            GlPassScope.runPass(
+                passName = "BaseVideoPassSlotA",
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                enableBlend = false,
+                enableScissor = needsScissor,
+                scissorRect = if (needsScissor) scissorRect else null
+            ) {
                 val adjustA = getClipColorAdjust(clipA.id)
                 packAdjust(adjustA, adjA0, adjA1, adjA2)
                 packAdjust(ClipColorAdjust.DEFAULT, adjB0, adjB1, adjB2)
@@ -1434,15 +1882,26 @@ class PreviewRenderer(
                 lastActiveCrop[0] = cropA[0]
                 lastActiveCrop[1] = cropA[1]
 
-                resolveFilterAndEffect(clipA.id, frame.tUs)
+                resolveFilterAndEffect(clipA, frame.tUs)
+                val drawCpuStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
+                PreviewEventLog.onVideoDrawn()
                 renderer.draw(drawSpec)
-            } catch (_: Exception) {
-            } finally {
-                if (needsScissor) {
-                    GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                    val drawCpuDur = System.nanoTime() - drawCpuStartNs
+                    framePerfDrawCpuTotalNs += drawCpuDur
+                    if (drawCpuDur > framePerfDrawCpuMaxNs) framePerfDrawCpuMaxNs = drawCpuDur
+                    framePerfDrawCpuCount++
                 }
             }
-            renderOverlays(frame.tUs)
+
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                val baseDur = System.nanoTime() - baseStartNs
+                passPerfBasePassTotalNs += baseDur
+                if (baseDur > passPerfBasePassMaxNs) passPerfBasePassMaxNs = baseDur
+                passPerfBasePassCount++
+            }
+
+            renderOverlaysStage(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
             val isCatchingUp = checkIsCatchingUp(frame, isTransition)
@@ -1451,11 +1910,16 @@ class PreviewRenderer(
                 // Only show loader spinner when paused (not during scrubbing/flinging)
                 if (playhead.mode == PlayMode.PAUSED) {
                     isWaitingForFrame = true
+                    val activelyCatchingUp = (frameSourceA?.isCatchingUpFromSeek == true) || (frameSourceB?.isCatchingUpFromSeek == true)
+                    if (activelyCatchingUp) {
+                        safeRequestRender()
+                    }
+                } else {
+                    safeRequestRender()
                 }
-                glSurfaceView?.requestRender()
-                onRenderRequested?.invoke()
             } else {
-                isWaitingForFrame = false
+                // No pending surface frame here. Do NOT clear isWaitingForFrame.
+                // Only onFrameAvailable and a successful updateTexImage may clear it.
             }
         } else {
             // --- Slot B is Primary (stB / texBId) ---
@@ -1470,6 +1934,7 @@ class PreviewRenderer(
                 if (activeFs != null && activeFs.clip.path == clipA.path && activeFs.canReuse(legacyClipA)) {
                     // Reuse active decoder across split clips sharing the same media path
                     activeFs.clip = legacyClipA
+                    PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 1, clipId = clipA.id, reason = "split_reuse")
                     currentClipIndexB = frame.clipAIndex
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
@@ -1482,13 +1947,17 @@ class PreviewRenderer(
                         } else {
                             !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
                         }
+                        android.util.Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts current=$currentPts paused=$isPaused scrubbing=$isScrubbing")
                         if (shouldSeek) {
+                            pendingSurfaceFramesB.set(0)
                             activeFs.seekTo(targetPts, fastKeyframeOnly = isScrubbing)
                         }
                     }
                 } else {
                     frameSourceB?.release(synchronous = true)
-                    frameSourceB = FrameSource(legacyClipA, stB)
+                    pendingSurfaceFramesB.set(0)
+                    frameSourceB = FrameSource(legacyClipA, stB).apply { slot = 1 }
+                    ResourceTracker.logAliveCounts("slot_recreated_B")
                     currentClipIndexB = frame.clipAIndex
                 }
             } else {
@@ -1496,12 +1965,16 @@ class PreviewRenderer(
                 val legacyClipA = toLegacyClip(clipA)
                 if (frameSourceB == null || frameSourceB?.clip?.path != clipA.path) {
                     frameSourceB?.release(synchronous = true)
-                    frameSourceB = FrameSource(legacyClipA, stB)
+                    pendingSurfaceFramesB.set(0)
+                    frameSourceB = FrameSource(legacyClipA, stB).apply { slot = 1 }
+                    ResourceTracker.logAliveCounts("slot_recreated_B")
                 } else {
+                    PreviewEventLog.log(PreviewEventType.FRAMESOURCE_REUSE, slot = 1, clipId = clipA.id, reason = "path_match_reuse")
                     frameSourceB?.clip = legacyClipA
                 }
             }
 
+            val fsWaitStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
             val fsB = frameSourceB
             if (fsB != null) {
                 fsB.playbackSpeed = speedA
@@ -1517,22 +1990,66 @@ class PreviewRenderer(
                 }
                 if (fsB.prewarmStage >= 3) {
                     val rendered = try {
-                        fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused)
-                    } catch (_: Exception) { false }
-                    if (!rendered && (fsB.isCatchingUpFromSeek || isWaitingForFrame)) {
-                        onRenderRequested?.invoke()
-                        glSurfaceView?.requestRender()
+                        fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = playhead.mode)
+                    } catch (e: Exception) {
+                        PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.fsB", e)
+                        false
+                    }
+                    if (!rendered && fsB.isCatchingUpFromSeek) {
+                        safeRequestRender()
+                    }
+                }
+            }
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                val fsWaitDur = System.nanoTime() - fsWaitStartNs
+                framePerfDecoderWaitTotalNs += fsWaitDur
+                if (fsWaitDur > framePerfDecoderWaitMaxNs) framePerfDecoderWaitMaxNs = fsWaitDur
+                framePerfDecoderWaitCount++
+                if (!framePerfLoggedPlaybackStart) {
+                    framePerfLoggedPlaybackStart = true
+                    logPlaybackStart(clipA, fsB)
+                }
+            }
+
+            if (playhead.mode == PlayMode.PLAYING && (fsB?.didReleaseOutputBuffer == true) && pendingSurfaceFramesB.get() == 0) {
+                synchronized(frameLockB) {
+                    if (pendingSurfaceFramesB.get() == 0) {
+                        try {
+                            frameLockB.wait(3L)
+                        } catch (_: InterruptedException) {}
                     }
                 }
             }
 
-            if (hasPendingSurfaceFrameB.getAndSet(false)) {
+            val pendingB = pendingSurfaceFramesB.getAndSet(0)
+            if (pendingB > 0) {
+                val updateStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
                 try {
-                    stB.updateTexImage()
+                    var drained = 0
+                    while (drained < pendingB) {
+                        stB.updateTexImage()
+                        drained++
+                    }
                     stB.getTransformMatrix(rawMatB)
                     isFirstFrameLatched = true
                     isWaitingForFrame = false
-                } catch (_: Exception) {}
+                    if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                        val ts = stB.timestamp
+                        if (ts != lastSeenTexTimestampB) {
+                            lastSeenTexTimestampB = ts
+                            showedNewFrame = true
+                            onNewFrameLatchedSlotB(ts)
+                        }
+                    }
+                } catch (e: Exception) {
+                    PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.stB", e)
+                }
+                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                    val updateDur = System.nanoTime() - updateStartNs
+                    framePerfUpdateTexTotalNs += updateDur
+                    if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
+                    framePerfUpdateTexCount++
+                }
             }
             val transformB = getClipTransform(clipA.id)
             System.arraycopy(rawMatB, 0, matB, 0, 16)
@@ -1557,7 +2074,9 @@ class PreviewRenderer(
                             frameSourceA?.clip?.path != nextClip.path ||
                             currentClipIndexA != m) {
                             frameSourceA?.release(synchronous = true)
-                            frameSourceA = FrameSource(toLegacyClip(nextClip), stA)
+                            pendingSurfaceFramesA.set(0)
+                            frameSourceA = FrameSource(toLegacyClip(nextClip), stA).apply { slot = 0 }
+                            ResourceTracker.logAliveCounts("slot_recreated_A")
                             currentClipIndexA = m
                         }
                         val fsA = frameSourceA
@@ -1567,11 +2086,20 @@ class PreviewRenderer(
                                 if (fsA.prewarmStage < 1) fsA.prepareExtractorOnly()
                                 if (fsA.prewarmStage < 2) fsA.startCodecAndSeek(nextClipInUs)
                                 if (fsA.prewarmStage < 3) fsA.stepPrewarmTo(nextClipInUs)
-                                if (hasPendingSurfaceFrameA.getAndSet(false) || fsA.prewarmStage >= 3) {
+                                if (pendingSurfaceFramesA.getAndSet(0) > 0 || fsA.prewarmStage >= 3) {
                                     try {
                                         stA.updateTexImage()
                                         stA.getTransformMatrix(rawMatA)
-                                    } catch (_: Exception) {}
+                                        if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                            val ts = stA.timestamp
+                                            if (ts != lastSeenTexTimestampA) {
+                                                lastSeenTexTimestampA = ts
+                                                onNewFrameLatchedSlotA(ts)
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.standby_stA", e)
+                                    }
                                     val nextTransform = getClipTransform(nextClip.id)
                                     System.arraycopy(rawMatA, 0, matA, 0, 16)
                                     applyTransformMatrix(matA, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
@@ -1584,21 +2112,28 @@ class PreviewRenderer(
                                 when (fsA.prewarmStage) {
                                     0 -> {
                                         fsA.prepareExtractorOnly()
-                                        onRenderRequested?.invoke()
-                                        glSurfaceView?.requestRender()
+                                        safeRequestRender()
                                     }
                                     1 -> {
                                         fsA.startCodecAndSeek(nextClipInUs)
-                                        onRenderRequested?.invoke()
-                                        glSurfaceView?.requestRender()
+                                        safeRequestRender()
                                     }
                                     2 -> {
                                         val ready = fsA.stepPrewarmTo(nextClipInUs)
-                                        if (ready || hasPendingSurfaceFrameA.getAndSet(false)) {
+                                        if (ready || pendingSurfaceFramesA.getAndSet(0) > 0) {
                                             try {
                                                 stA.updateTexImage()
                                                 stA.getTransformMatrix(rawMatA)
-                                            } catch (_: Exception) {}
+                                                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                                                    val ts = stA.timestamp
+                                                    if (ts != lastSeenTexTimestampA) {
+                                                        lastSeenTexTimestampA = ts
+                                                        onNewFrameLatchedSlotA(ts)
+                                                    }
+                                                }
+                                            } catch (e: Exception) {
+                                                PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.standby_stA", e)
+                                            }
                                             val nextTransform = getClipTransform(nextClip.id)
                                             System.arraycopy(rawMatA, 0, matA, 0, 16)
                                             applyTransformMatrix(matA, nextTransform, nextClip.displayWidth, nextClip.displayHeight)
@@ -1607,8 +2142,7 @@ class PreviewRenderer(
                                             standbyPreparedPath = nextClip.path
                                             standbyPreparedInUs = nextClipInUs
                                         } else {
-                                            onRenderRequested?.invoke()
-                                            glSurfaceView?.requestRender()
+                                            safeRequestRender()
                                         }
                                     }
                                 }
@@ -1646,11 +2180,15 @@ class PreviewRenderer(
 
             val needsScissor = (bgModeB == 0) &&
                 computeScissorRect(viewportWidth, viewportHeight, transformB, clipA.displayWidth, clipA.displayHeight, scissorRect)
-            if (needsScissor) {
-                GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
-                GLES30.glScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3])
-            }
-            try {
+            val baseStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) System.nanoTime() else 0L
+            GlPassScope.runPass(
+                passName = "BaseVideoPassSlotB",
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                enableBlend = false,
+                enableScissor = needsScissor,
+                scissorRect = if (needsScissor) scissorRect else null
+            ) {
                 packAdjust(ClipColorAdjust.DEFAULT, adjA0, adjA1, adjA2)
                 val adjustB = getClipColorAdjust(clipA.id)
                 packAdjust(adjustB, adjB0, adjB1, adjB2)
@@ -1686,15 +2224,26 @@ class PreviewRenderer(
                 lastActiveCrop[0] = cropB[0]
                 lastActiveCrop[1] = cropB[1]
 
-                resolveFilterAndEffect(clipA.id, frame.tUs)
+                resolveFilterAndEffect(clipA, frame.tUs)
+                val drawCpuStartNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) System.nanoTime() else 0L
+                PreviewEventLog.onVideoDrawn()
                 renderer.draw(drawSpec)
-            } catch (_: Exception) {
-            } finally {
-                if (needsScissor) {
-                    GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+                if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
+                    val drawCpuDur = System.nanoTime() - drawCpuStartNs
+                    framePerfDrawCpuTotalNs += drawCpuDur
+                    if (drawCpuDur > framePerfDrawCpuMaxNs) framePerfDrawCpuMaxNs = drawCpuDur
+                    framePerfDrawCpuCount++
                 }
             }
-            renderOverlays(frame.tUs)
+
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                val baseDur = System.nanoTime() - baseStartNs
+                passPerfBasePassTotalNs += baseDur
+                if (baseDur > passPerfBasePassMaxNs) passPerfBasePassMaxNs = baseDur
+                passPerfBasePassCount++
+            }
+
+            renderOverlaysStage(frame.tUs)
 
             val isTransition = frame.isTransition && frame.clipBIndex >= 0
             val isCatchingUp = checkIsCatchingUp(frame, isTransition)
@@ -1703,209 +2252,185 @@ class PreviewRenderer(
                 // Only show loader spinner when paused (not during scrubbing/flinging)
                 if (playhead.mode == PlayMode.PAUSED) {
                     isWaitingForFrame = true
+                    val activelyCatchingUp = (frameSourceA?.isCatchingUpFromSeek == true) || (frameSourceB?.isCatchingUpFromSeek == true)
+                    if (activelyCatchingUp) {
+                        safeRequestRender()
+                    }
+                } else {
+                    safeRequestRender()
                 }
-                glSurfaceView?.requestRender()
-                onRenderRequested?.invoke()
             } else {
-                isWaitingForFrame = false
+                // No pending surface frame here. Do NOT clear isWaitingForFrame.
+                // Only onFrameAvailable and a successful updateTexImage may clear it.
             }
         }
+        } catch (e: Throwable) {
+            PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame", e)
+            PreviewEventLog.onBlackoutClearBranch("exception_caught_onDrawFrame", e.javaClass.simpleName)
+            throw e
         } finally {
+            PreviewWatchdog.onDrawFrameEnd()
             val finalWaiting = isWaitingForFrame
+            val activelyCatchingUp = (frameSourceA?.isCatchingUpFromSeek == true) || (frameSourceB?.isCatchingUpFromSeek == true)
             if (wasWaitingInitial && !finalWaiting) {
-                onRenderRequested?.invoke()
-            } else if (finalWaiting) {
-                onRenderRequested?.invoke()
-                glSurfaceView?.requestRender()
+                safeRequestRender()
+            } else if (finalWaiting && (playhead.mode != PlayMode.PAUSED || activelyCatchingUp)) {
+                safeRequestRender()
             }
 
-            val durationUs = (System.nanoTime() - startNs) / 1000L
-            renderedFrames++
-            if (durationUs > 16_666L) {
-                lateFrames++
-            }
-            frameTimeSumUs += durationUs
-            if (durationUs > frameTimeMaxUs) {
-                frameTimeMaxUs = durationUs
-            }
-            frameCount++
-            if (frameCount >= 120) {
-                val avgMs = frameTimeSumUs.toDouble() / (frameCount * 1000.0)
-                val maxMs = frameTimeMaxUs.toDouble() / 1000.0
-                try {
-                    android.util.Log.d(
-                        "FlowCutPerf",
-                        "Render frame time (last 120): avg=${String.format(java.util.Locale.US, "%.2f", avgMs)}ms, max=${String.format(java.util.Locale.US, "%.2f", maxMs)}ms"
-                    )
-                } catch (_: Throwable) {}
-                frameTimeSumUs = 0L
-                frameTimeMaxUs = 0L
-                frameCount = 0
+            if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) {
+                val nowNs = System.nanoTime()
+                val isPlaying = playhead.mode == PlayMode.PLAYING
+                if (isPlaying) {
+                    val wholeDurNs = nowNs - startNs
+                    framePerfWholeDrawTotalNs += wholeDurNs
+                    if (wholeDurNs > framePerfWholeDrawMaxNs) framePerfWholeDrawMaxNs = wholeDurNs
+                    framePerfWholeDrawCount++
+
+                    if (showedNewFrame) {
+                        framePerfNewFramesCount++
+                    } else {
+                        framePerfRepeatedFramesCount++
+                    }
+
+                    if (lastFramePerfLogNs == 0L) {
+                        lastFramePerfLogNs = nowNs
+                    } else if (nowNs - lastFramePerfLogNs >= 2_000_000_000L) {
+                        val wholeAvgMs = if (framePerfWholeDrawCount > 0L) (framePerfWholeDrawTotalNs.toDouble() / framePerfWholeDrawCount) / 1_000_000.0 else 0.0
+                        val wholeMaxMs = framePerfWholeDrawMaxNs / 1_000_000.0
+                        val decAvgMs = if (framePerfDecoderWaitCount > 0L) (framePerfDecoderWaitTotalNs.toDouble() / framePerfDecoderWaitCount) / 1_000_000.0 else 0.0
+                        val decMaxMs = framePerfDecoderWaitMaxNs / 1_000_000.0
+                        val texAvgMs = if (framePerfUpdateTexCount > 0L) (framePerfUpdateTexTotalNs.toDouble() / framePerfUpdateTexCount) / 1_000_000.0 else 0.0
+                        val texMaxMs = framePerfUpdateTexMaxNs / 1_000_000.0
+                        val drawAvgMs = if (framePerfDrawCpuCount > 0L) (framePerfDrawCpuTotalNs.toDouble() / framePerfDrawCpuCount) / 1_000_000.0 else 0.0
+                        val drawMaxMs = framePerfDrawCpuMaxNs / 1_000_000.0
+                        val intervalAvgMs = if (framePerfIntervalCount > 0L) (framePerfIntervalTotalNs.toDouble() / framePerfIntervalCount) / 1_000_000.0 else 0.0
+                        val intervalMaxMs = framePerfIntervalMaxNs / 1_000_000.0
+
+                        // Definition: "new" frame count represents onDrawFrame calls that latched a new SurfaceTexture frame
+                        // (detected by SurfaceTexture.timestamp change after updateTexImage), whereas "repeated" draws re-rendered the previous frame.
+                        val activeFs = if (primarySlot == 0) frameSourceA else frameSourceB
+                        val clipFps = activeFs?.clip?.frameRate ?: (holder.current.project.clips.firstOrNull()?.frameRate ?: 30)
+                        val approxDisplayHz = if (intervalAvgMs > 5.0) 1000.0 / intervalAvgMs else 60.0
+                        val expectedNew = ((clipFps / approxDisplayHz) * framePerfWholeDrawCount).toLong().coerceIn(0L, framePerfWholeDrawCount)
+
+                        framePerfSb.setLength(0)
+                        framePerfSb.append("draws=").append(framePerfWholeDrawCount)
+                            .append(" (new=").append(framePerfNewFramesCount)
+                            .append(", repeated=").append(framePerfRepeatedFramesCount)
+                            .append(", expectedNew=").append(expectedNew)
+                            .append(") | whole: avg=").append(String.format(java.util.Locale.US, "%.2f", wholeAvgMs)).append("ms max=").append(String.format(java.util.Locale.US, "%.2f", wholeMaxMs)).append("ms")
+                            .append(" | decWait: avg=").append(String.format(java.util.Locale.US, "%.2f", decAvgMs)).append("ms max=").append(String.format(java.util.Locale.US, "%.2f", decMaxMs)).append("ms")
+                            .append(" | texUpdate: avg=").append(String.format(java.util.Locale.US, "%.2f", texAvgMs)).append("ms max=").append(String.format(java.util.Locale.US, "%.2f", texMaxMs)).append("ms")
+                            .append(" | drawCpu: avg=").append(String.format(java.util.Locale.US, "%.2f", drawAvgMs)).append("ms max=").append(String.format(java.util.Locale.US, "%.2f", drawMaxMs)).append("ms")
+                            .append(" | interval: avg=").append(String.format(java.util.Locale.US, "%.2f", intervalAvgMs)).append("ms max=").append(String.format(java.util.Locale.US, "%.2f", intervalMaxMs)).append("ms")
+                            .append(" (>20ms=").append(framePerfIntervalGt20ms)
+                            .append(", >33ms=").append(framePerfIntervalGt33ms).append(")")
+
+                        try {
+                            android.util.Log.d("FramePerf", framePerfSb.toString())
+                        } catch (_: Throwable) {
+                            println("[FramePerf] $framePerfSb")
+                        }
+
+                        framePerfDecoderWaitTotalNs = 0L
+                        framePerfDecoderWaitMaxNs = 0L
+                        framePerfDecoderWaitCount = 0L
+                        framePerfUpdateTexTotalNs = 0L
+                        framePerfUpdateTexMaxNs = 0L
+                        framePerfUpdateTexCount = 0L
+                        framePerfDrawCpuTotalNs = 0L
+                        framePerfDrawCpuMaxNs = 0L
+                        framePerfDrawCpuCount = 0L
+                        framePerfWholeDrawTotalNs = 0L
+                        framePerfWholeDrawMaxNs = 0L
+                        framePerfWholeDrawCount = 0L
+                        framePerfIntervalTotalNs = 0L
+                        framePerfIntervalMaxNs = 0L
+                        framePerfIntervalCount = 0L
+                        framePerfIntervalGt20ms = 0L
+                        framePerfIntervalGt33ms = 0L
+                        framePerfNewFramesCount = 0L
+                        framePerfRepeatedFramesCount = 0L
+                        lastFramePerfLogNs = nowNs
+                    }
+                } else {
+                    lastFramePerfLogNs = 0L
+                    framePerfLastFrameStartNs = 0L
+                    framePerfLoggedPlaybackStart = false
+                }
+
+                // PassPerf "late" counter definition (Rule R10 / Step A.4):
+                // Note: The existing `passPerfFramesLate` below is defined as DRAW EXECUTION DURATION
+                // of onDrawFrame() exceeding 16.666 ms (durationUs > 16_666L), measuring CPU/GPU submission
+                // time of a single frame. It does NOT measure pacing/cadence (intervals between frame starts).
+                // Cadence intervals are measured above in FramePerf (>20ms and >33ms).
+                val durationUs = (nowNs - startNs) / 1000L
+                passPerfFramesDrawn++
+                if (durationUs > 16_666L) {
+                    passPerfFramesLate++
+                }
+                if (lastPassPerfLogNs == 0L) {
+                    lastPassPerfLogNs = nowNs
+                } else if (nowNs - lastPassPerfLogNs >= 2_000_000_000L) {
+                    passPerfSb.setLength(0)
+                    val baseAvgMs = if (passPerfBasePassCount > 0L) (passPerfBasePassTotalNs.toDouble() / passPerfBasePassCount) / 1_000_000.0 else 0.0
+                    val baseMaxMs = passPerfBasePassMaxNs / 1_000_000.0
+                    passPerfSb.append("frames=").append(passPerfFramesDrawn)
+                        .append(", late=").append(passPerfFramesLate)
+                        .append(", base: avg=").append(String.format(java.util.Locale.US, "%.2f", baseAvgMs)).append("ms max=").append(String.format(java.util.Locale.US, "%.2f", baseMaxMs)).append("ms")
+                    overlayStagePass.appendDebugTimings(passPerfSb)
+                    try {
+                        android.util.Log.d("PassPerf", passPerfSb.toString())
+                    } catch (_: Throwable) {
+                        println("[PassPerf] $passPerfSb")
+                    }
+                    passPerfFramesDrawn = 0L
+                    passPerfFramesLate = 0L
+                    passPerfBasePassTotalNs = 0L
+                    passPerfBasePassMaxNs = 0L
+                    passPerfBasePassCount = 0L
+                    overlayStagePass.resetWindowTimings()
+                    lastPassPerfLogNs = nowNs
+                }
+                PacePerfTracker.maybeLog(nowNs, context, glSurfaceView?.display, playhead.mode)
             }
         }
     }
 
-    private fun resolveFilterAndEffect(clipId: String?, tUs: Long) {
-        val st = getClipFilterState(clipId)
-        var filterId = st.filterPresetId
-        var filterInt = st.filterIntensity
-        var effectId = st.effectPresetId
-        var effectInt = st.effectIntensity
-
-        val plan = currentLayerPlan
-        if (plan.segments.isNotEmpty()) {
-            val found = plan.resolveAt(tUs, activeLayerSet)
-            if (found && activeLayerSet.filterCount > 0) {
-                for (f in 0 until activeLayerSet.filterCount) {
-                    val idx = activeLayerSet.activeFilterIndices[f]
-                    val item = plan.items.getOrNull(idx) ?: continue
-                    if (item.type == LayerType.FILTER && item.filterPresetId > 0) {
-                        filterId = item.filterPresetId
-                        filterInt = item.filterIntensity
-                    }
-                    if (item.type == LayerType.EFFECT && item.effectPresetId > 0) {
-                        effectId = item.effectPresetId
-                        effectInt = item.effectIntensity
-                    }
-                }
-            }
-        }
-
-        drawSpec.filterPresetId = filterId
-        drawSpec.filterIntensity = filterInt
-        drawSpec.effectPresetId = effectId
-        drawSpec.effectIntensity = effectInt
+    internal fun resolveFilterAndEffect(clip: com.flowcut.app.core.model.Clip?, tUs: Long) {
+        // Note: Transition branch asymmetry currently resolves and applies clipA's filter across the entire transition pass (Step 15: intentionally preserved, to be addressed in a future task).
+        val resolved = resolveFilterAndEffectState(
+            clip = clip,
+            liveOverride = if (clip?.id != null && liveFilterOverrides.isNotEmpty()) liveFilterOverrides[clip.id] else null,
+            plan = currentLayerPlan,
+            tUs = tUs,
+            activeLayerSet = activeLayerSet
+        )
+        drawSpec.filterPresetId = resolved.filterPresetId
+        drawSpec.filterIntensity = resolved.filterIntensity
+        drawSpec.effectPresetId = resolved.effectPresetId
+        drawSpec.effectIntensity = resolved.effectIntensity
         drawSpec.timeSec = (tUs.toDouble() / 1_000_000.0).toFloat()
     }
 
-    private fun renderOverlays(tUs: Long) {
-        val plan = currentLayerPlan
-        if (plan.segments.isEmpty()) return
-        val found = plan.resolveAt(tUs, activeLayerSet)
-        if (!found || activeLayerSet.visualCount == 0) return
-
-        val selId = selectedOverlayIdForPreview
-        var selectedItemIndex = -1
-
-        // Pass 1: Render unselected items in normal z-order
-        for (i in 0 until activeLayerSet.visualCount) {
-            val itemIndex = activeLayerSet.activeVisualIndices[i]
-            val item = plan.items.getOrNull(itemIndex) ?: continue
-            if (selId != null && item.id == selId) {
-                selectedItemIndex = itemIndex
-                continue
-            }
-            val effTransform = animEvaluator.evaluate(item, tUs)
-            if (effTransform.opacity <= 0.001f) continue
-
-            if (item.type == LayerType.MOSAIC) {
-                val vTex = if (lastActiveVideoTexId > 0) lastActiveVideoTexId else renderer.textureIdA()
-                renderer.drawMosaicRegion(
-                    videoTexId = vTex,
-                    videoMat = lastActiveVideoMat,
-                    crop = lastActiveCrop,
-                    transform = effTransform,
-                    mosaicStyle = item.mosaicStyle,
-                    mosaicIntensity = item.mosaicIntensity,
-                    mosaicFeather = item.mosaicFeather,
-                    opacity = effTransform.opacity,
-                    displayWidth = viewportWidth,
-                    displayHeight = viewportHeight
-                )
-                continue
-            }
-
-            val cached = if (item.type == LayerType.VIDEO) {
-                overlayTextureCache.getOrUpdateVideoTexture(item, tUs, isSynchronous = false)
-            } else {
-                overlayTextureCache.getOrBakeTexture(item)
-            } ?: continue
-            if (cached.texId > 0) {
-                renderer.drawOverlayQuad(
-                    texId = cached.texId,
-                    texWidth = cached.width,
-                    texHeight = cached.height,
-                    transform = effTransform,
-                    opacity = effTransform.opacity,
-                    displayWidth = viewportWidth,
-                    displayHeight = viewportHeight,
-                    cropLeft = item.cropLeft,
-                    cropTop = item.cropTop,
-                    cropRight = item.cropRight,
-                    cropBottom = item.cropBottom,
-                    maskType = item.maskType,
-                    maskFeather = item.maskFeather,
-                    maskInvert = item.maskInvert,
-                    chromaEnabled = item.chromaEnabled,
-                    chromaColorArgb = item.chromaColorArgb,
-                    chromaThreshold = item.chromaThreshold,
-                    chromaBlend = item.chromaBlend,
-                    adjustBrightness = item.adjustBrightness,
-                    adjustContrast = item.adjustContrast,
-                    adjustSaturation = item.adjustSaturation
-                )
-            }
-        }
-
-        // Pass 2: Render selected visual overlay item last (topmost) without mutating stored zIndex (Rule R10)
-        if (selectedItemIndex >= 0) {
-            val item = plan.items.getOrNull(selectedItemIndex)
-            if (item != null) {
-                val effTransform = animEvaluator.evaluate(item, tUs)
-                if (effTransform.opacity > 0.001f) {
-                    if (item.type == LayerType.MOSAIC) {
-                        val vTex = if (lastActiveVideoTexId > 0) lastActiveVideoTexId else renderer.textureIdA()
-                        renderer.drawMosaicRegion(
-                            videoTexId = vTex,
-                            videoMat = lastActiveVideoMat,
-                            crop = lastActiveCrop,
-                            transform = effTransform,
-                            mosaicStyle = item.mosaicStyle,
-                            mosaicIntensity = item.mosaicIntensity,
-                            mosaicFeather = item.mosaicFeather,
-                            opacity = effTransform.opacity,
-                            displayWidth = viewportWidth,
-                            displayHeight = viewportHeight
-                        )
-                        return
-                    }
-                    val cached = if (item.type == LayerType.VIDEO) {
-                        overlayTextureCache.getOrUpdateVideoTexture(item, tUs, isSynchronous = false)
-                    } else {
-                        overlayTextureCache.getOrBakeTexture(item)
-                    }
-                    if (cached != null && cached.texId > 0) {
-                        renderer.drawOverlayQuad(
-                            texId = cached.texId,
-                            texWidth = cached.width,
-                            texHeight = cached.height,
-                            transform = effTransform,
-                            opacity = effTransform.opacity,
-                            displayWidth = viewportWidth,
-                            displayHeight = viewportHeight,
-                            cropLeft = item.cropLeft,
-                            cropTop = item.cropTop,
-                            cropRight = item.cropRight,
-                            cropBottom = item.cropBottom,
-                            maskType = item.maskType,
-                            maskFeather = item.maskFeather,
-                            maskInvert = item.maskInvert,
-                            chromaEnabled = item.chromaEnabled,
-                            chromaColorArgb = item.chromaColorArgb,
-                            chromaThreshold = item.chromaThreshold,
-                            chromaBlend = item.chromaBlend,
-                            adjustBrightness = item.adjustBrightness,
-                            adjustContrast = item.adjustContrast,
-                            adjustSaturation = item.adjustSaturation
-                        )
-                    }
-                }
-            }
-        }
+    private fun renderOverlaysStage(tUs: Long) {
+        val vTex = if (lastActiveVideoTexId > 0) lastActiveVideoTexId else renderer.textureIdA()
+        baseFrameInfo.update(vTex, lastActiveVideoMat, lastActiveCrop)
+        passCtx.tUs = tUs
+        passCtx.snapshot = holder.current
+        passCtx.activeSet = activeSet
+        passCtx.outputWidth = viewportWidth
+        passCtx.outputHeight = viewportHeight
+        passRegistry.drawAll(passCtx)
     }
+
+
 
     private fun releaseDecoders(synchronous: Boolean = false) {
         isFirstFrameLatched = false
+        pendingSurfaceFramesA.set(0)
+        pendingSurfaceFramesB.set(0)
         frameSourceA?.release(synchronous = synchronous)
         frameSourceA = null
         currentClipIndexA = -1
@@ -1924,6 +2449,7 @@ class PreviewRenderer(
         smoothedTransitionP = 0f
         Matrix.setIdentityM(rawMatA, 0)
         Matrix.setIdentityM(rawMatB, 0)
+        ResourceTracker.logAliveCounts("releaseDecoders")
     }
 
     fun invalidateDecoders() {
@@ -1973,12 +2499,15 @@ class PreviewRenderer(
         } catch (_: Throwable) {}
         surfaceTextureA?.setOnFrameAvailableListener(null)
         surfaceTextureA?.release()
+        ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
         surfaceTextureA = null
         surfaceTextureB?.setOnFrameAvailableListener(null)
         surfaceTextureB?.release()
+        ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
         surfaceTextureB = null
-        hasPendingSurfaceFrameA.set(false)
-        hasPendingSurfaceFrameB.set(false)
+        pendingSurfaceFramesA.set(0)
+        pendingSurfaceFramesB.set(0)
+        PreviewWatchdog.stop()
         try {
             overlayTextureCache.release()
         } catch (_: Throwable) {}
@@ -1990,6 +2519,23 @@ class PreviewRenderer(
                 c.release()
             } catch (_: Throwable) {}
         }
+        passRegistry.onGlDestroyed()
+    }
+
+    fun registerPass(pass: RenderPass) {
+        passRegistry.register(pass)
+    }
+
+    fun unregisterPass(passId: String) {
+        passRegistry.unregister(passId)
+    }
+
+    fun registerLayerRenderer(r: LayerRenderer) {
+        overlayStagePass.registerLayerRenderer(r)
+    }
+
+    fun unregisterLayerRenderer(id: String) {
+        overlayStagePass.unregisterLayerRenderer(id)
     }
 
     companion object {
@@ -2141,26 +2687,77 @@ class PreviewRenderer(
             clipBackgrounds.putAll(bgs)
         }
 
-        val clipFilterStates = ConcurrentHashMap<String, ClipFilterState>()
+        val liveFilterOverrides = ConcurrentHashMap<String, ClipFilterState>()
+
+        fun setLiveFilterOverride(clipId: String, filter: ClipFilterState) {
+            liveFilterOverrides[clipId] = filter
+        }
+
+        fun clearLiveFilterOverride(clipId: String? = null) {
+            if (clipId != null) {
+                liveFilterOverrides.remove(clipId)
+            } else {
+                liveFilterOverrides.clear()
+            }
+        }
 
         fun getClipFilterState(clipId: String?): ClipFilterState {
             if (clipId == null) return ClipFilterState.DEFAULT
-            return clipFilterStates[clipId] ?: ClipFilterState.DEFAULT
+            return liveFilterOverrides[clipId]
+                ?: activeInstance?.holder?.current?.project?.clips?.find { it.id == clipId }?.renderParams?.filter
+                ?: ClipFilterState.DEFAULT
         }
 
         fun setClipFilter(clipId: String, presetId: Int, intensity: Float) {
             val existing = getClipFilterState(clipId)
-            clipFilterStates[clipId] = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
+            liveFilterOverrides[clipId] = existing.copy(filterPresetId = presetId, filterIntensity = intensity)
         }
 
         fun setClipEffect(clipId: String, presetId: Int, intensity: Float) {
             val existing = getClipFilterState(clipId)
-            clipFilterStates[clipId] = existing.copy(effectPresetId = presetId, effectIntensity = intensity)
+            liveFilterOverrides[clipId] = existing.copy(effectPresetId = presetId, effectIntensity = intensity)
         }
 
-        fun syncFilterStates(states: Map<String, ClipFilterState>) {
-            clipFilterStates.clear()
-            clipFilterStates.putAll(states)
+        fun resolveFilterAndEffectState(
+            clip: com.flowcut.app.core.model.Clip?,
+            liveOverride: ClipFilterState? = null,
+            plan: CompiledLayerPlan? = null,
+            tUs: Long = 0L,
+            activeLayerSet: ActiveLayerSet? = null
+        ): ClipFilterState {
+            val clipId = clip?.id
+            val st = liveOverride
+                ?: (if (clipId != null && liveFilterOverrides.isNotEmpty()) liveFilterOverrides[clipId] else null)
+                ?: clip?.renderParams?.filter
+                ?: com.flowcut.app.core.model.ClipFilterParams.DEFAULT
+            var filterId = st.filterPresetId
+            var filterInt = st.filterIntensity
+            var effectId = st.effectPresetId
+            var effectInt = st.effectIntensity
+
+            if (plan != null && plan.segments.isNotEmpty() && activeLayerSet != null) {
+                val found = plan.resolveAt(tUs, activeLayerSet)
+                if (found && activeLayerSet.filterCount > 0) {
+                    for (f in 0 until activeLayerSet.filterCount) {
+                        val idx = activeLayerSet.activeFilterIndices[f]
+                        val item = plan.items.getOrNull(idx) ?: continue
+                        if (item.type == LayerType.FILTER && item.filterPresetId > 0) {
+                            filterId = item.filterPresetId
+                            filterInt = item.filterIntensity
+                        }
+                        if (item.type == LayerType.EFFECT && item.effectPresetId > 0) {
+                            effectId = item.effectPresetId
+                            effectInt = item.effectIntensity
+                        }
+                    }
+                }
+            }
+            return com.flowcut.app.core.model.ClipFilterParams(
+                filterPresetId = filterId,
+                filterIntensity = filterInt,
+                effectPresetId = effectId,
+                effectIntensity = effectInt
+            )
         }
 
         val junctionTransitionTypes = ConcurrentHashMap<Int, Int>()
@@ -2169,7 +2766,7 @@ class PreviewRenderer(
             clipTransforms.clear()
             clipColorAdjusts.clear()
             clipBackgrounds.clear()
-            clipFilterStates.clear()
+            clearLiveFilterOverride()
             junctionTransitionTypes.clear()
             clearOverlayTextures()
             setLayerPlan(CompiledLayerPlan.EMPTY)

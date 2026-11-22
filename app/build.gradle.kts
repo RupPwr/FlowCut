@@ -20,6 +20,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "PERF_TELEMETRY", "true")
+        }
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.getByName("debug")
@@ -27,6 +30,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            buildConfigField("boolean", "PERF_TELEMETRY", "false")
+        }
+        create("perf") {
+            initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+            isDebuggable = false
+            isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("debug")
+            buildConfigField("boolean", "PERF_TELEMETRY", "true")
         }
     }
 

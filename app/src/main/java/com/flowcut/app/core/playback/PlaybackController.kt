@@ -20,6 +20,12 @@ class PlaybackController(
         private const val MAX_DT_SECONDS = 0.05
     }
 
+    interface SeekEventListener {
+        fun onSeekEvent(source: String, targetUs: Long, playheadUs: Long, coalesced: Boolean)
+    }
+
+    var seekEventListener: SeekEventListener? = null
+
     private class MutablePlayhead : PlayheadReader {
         @Volatile override var timeUs: Long = 0L
         @Volatile override var mode: PlayMode = PlayMode.PAUSED
@@ -61,7 +67,12 @@ class PlaybackController(
     }
 
     fun seekTo(us: Long) {
+        val prevPending = pendingSeekUs
+        if (prevPending != null) {
+            seekEventListener?.onSeekEvent("seekTo_coalesced", prevPending, state.timeUs, true)
+        }
         pendingSeekUs = us
+        seekEventListener?.onSeekEvent("seekTo", us, state.timeUs, false)
         if (state.mode == PlayMode.FLINGING) {
             state.mode = PlayMode.PAUSED
             state.generation++
@@ -82,6 +93,7 @@ class PlaybackController(
         flingVelocityUsPerSec = 0.0
         lastFlingFrameNanos = 0L
         flingRemainderUs = 0.0
+        seekEventListener?.onSeekEvent("beginScrub", state.timeUs, state.timeUs, false)
     }
 
     fun scrubBy(deltaUs: Long) {
@@ -89,6 +101,7 @@ class PlaybackController(
     }
 
     fun endScrub(velocityUsPerSec: Double, pxPerUs: Double = 1.0) {
+        seekEventListener?.onSeekEvent("endScrub", state.timeUs, state.timeUs, false)
         if (abs(velocityUsPerSec) * pxPerUs >= MIN_FLING_VELOCITY_PX_PER_SEC) {
             flingVelocityUsPerSec = velocityUsPerSec
             flingPxPerUs = pxPerUs
@@ -121,6 +134,7 @@ class PlaybackController(
         if (seek != null) {
             pendingSeekUs = null
             val clampedSeek = seek.coerceIn(0L, currentTotal)
+            seekEventListener?.onSeekEvent("tickCommit", clampedSeek, state.timeUs, false)
             state.timeUs = clampedSeek
             state.generation++
             if (state.mode == PlayMode.PLAYING) {

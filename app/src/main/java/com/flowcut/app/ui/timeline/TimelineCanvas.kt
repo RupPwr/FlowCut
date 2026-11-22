@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.getValue
@@ -340,6 +341,8 @@ fun TimelineCanvas(
     onToast: (String) -> Unit = {},
     customCoverBitmap: ImageBitmap? = null,
     onScrollingStateChanged: (Boolean) -> Unit = {},
+    onThumbnailGeneratingChanged: (Boolean) -> Unit = {},
+    onWaveformGeneratingChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current.density
@@ -381,6 +384,8 @@ fun TimelineCanvas(
     val currentCustomCoverBitmap by rememberUpdatedState(customCoverBitmap)
     val currentIsLoaderActive by rememberUpdatedState(isLoaderActive)
     val currentOnScrollingStateChanged by rememberUpdatedState(onScrollingStateChanged)
+    val currentOnThumbnailGeneratingChanged by rememberUpdatedState(onThumbnailGeneratingChanged)
+    val currentOnWaveformGeneratingChanged by rememberUpdatedState(onWaveformGeneratingChanged)
 
     val clipNaturalDurationCache = remember { mutableMapOf<String, Long>() }
     val draggedOverlayId = remember { mutableStateOf<String?>(null) }
@@ -597,8 +602,31 @@ fun TimelineCanvas(
     val pipThumbLoader = remember(coroutineScope) { PipThumbLoader(coroutineScope, maxEntries = 256) }
 
     val context = LocalContext.current
-    val thumbnailService = remember(context, coroutineScope) { ThumbnailService(context, coroutineScope) }
+    val thumbnailService = remember(context, coroutineScope) {
+        ThumbnailService(context, coroutineScope).apply {
+            isPaused = {
+                playhead.mode == PlayMode.SCRUBBING ||
+                playhead.mode == PlayMode.FLINGING ||
+                controller.playhead.mode == PlayMode.SCRUBBING ||
+                controller.playhead.mode == PlayMode.FLINGING ||
+                isLoaderActive
+            }
+        }
+    }
     val waveformService = remember(context, coroutineScope) { WaveformService(context, coroutineScope) }
+
+    DisposableEffect(thumbnailService, waveformService) {
+        thumbnailService.onGeneratingChanged = { isGen ->
+            currentOnThumbnailGeneratingChanged(isGen)
+        }
+        waveformService.onGeneratingChanged = { isGen ->
+            currentOnWaveformGeneratingChanged(isGen)
+        }
+        onDispose {
+            thumbnailService.onGeneratingChanged = null
+            waveformService.onGeneratingChanged = null
+        }
+    }
 
     // Waveform collection for all media paths (Clips + Audio Overlays + Video Overlays)
     val allWaveformPaths = remember(holder.current.project.clips, overlayItems) {

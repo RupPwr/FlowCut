@@ -15,7 +15,8 @@ data class Clip(
     val height: Int,
     val rotation: Int,
     val frameRate: Int = 30,
-    val timeMap: TimeMap? = null
+    val timeMap: TimeMap? = null,
+    val renderParams: ClipRenderParams = ClipRenderParams.DEFAULT
 ) {
     val displayWidth: Int
         get() = if (rotation == 90 || rotation == 270) height else width

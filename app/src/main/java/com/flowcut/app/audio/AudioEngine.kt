@@ -8,6 +8,7 @@ import android.os.Process
 import com.flowcut.app.core.feature.DefaultFeatureRegistry
 import com.flowcut.app.core.playback.Clock
 import com.flowcut.app.core.time.usToAudioFrames
+import com.flowcut.app.engine.perf.ResourceTracker
 
 /**
  * High-performance hardware audio playback engine & frame-accurate audio clock.
@@ -78,6 +79,7 @@ class AudioEngine(
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
+        ResourceTracker.onCreated(ResourceTracker.ResourceType.AUDIO_TRACK, "AudioEngine")
 
         audioThread = Thread({ runAudioLoop() }, "FlowCut-Audio").apply {
             start()
@@ -161,6 +163,7 @@ class AudioEngine(
 
         try {
             audioTrack.release()
+            ResourceTracker.onReleased(ResourceTracker.ResourceType.AUDIO_TRACK, "AudioEngine")
         } catch (_: Exception) {}
     }
 

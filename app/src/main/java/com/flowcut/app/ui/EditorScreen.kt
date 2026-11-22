@@ -8,12 +8,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
@@ -68,6 +62,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -157,6 +152,9 @@ import com.flowcut.app.model.AUTO_PLAY_MARGIN_MS
 import com.flowcut.app.model.ProgramTimeline
 import com.flowcut.app.model.Project
 import com.flowcut.app.model.Transition
+import com.flowcut.app.editor.LoadingSources
+import com.flowcut.app.editor.LoadingStateManager
+import com.flowcut.app.ui.loader.FlowCutLoadingIndicator
 import com.flowcut.app.model.TransitionType
 import com.flowcut.app.ui.timeline.TimelineCanvas
 import com.flowcut.app.ui.timeline.TimelineFocusState
@@ -313,7 +311,8 @@ fun EditorScreen(
                 height = it.height,
                 rotation = it.rotation,
                 frameRate = it.frameRate,
-                timeMap = existingTimeMap
+                timeMap = existingTimeMap,
+                renderParams = it.renderParams
             )
         }
         val coreTransitions = timeline.project.transitions.map {
@@ -350,7 +349,18 @@ fun EditorScreen(
     }
 
     val playbackController = remember(audioEngine, snapshotHolder) {
-        PlaybackController(clock = audioEngine.clock, holder = snapshotHolder)
+        PlaybackController(clock = audioEngine.clock, holder = snapshotHolder).apply {
+            seekEventListener = object : PlaybackController.SeekEventListener {
+                override fun onSeekEvent(source: String, targetUs: Long, playheadUs: Long, coalesced: Boolean) {
+                    com.flowcut.app.engine.perf.PreviewEventLog.log(
+                        eventType = com.flowcut.app.engine.perf.PreviewEventType.SEEK_ENTER,
+                        arg0 = targetUs,
+                        arg1 = playheadUs,
+                        reason = if (coalesced) "${source}_coalesced" else source
+                    )
+                }
+            }
+        }
     }
     val zoomState = remember { TimelineZoomState() }
     val frameTick = remember { mutableLongStateOf(0L) }
@@ -370,7 +380,8 @@ fun EditorScreen(
         PreviewRenderer(
             holder = snapshotHolder,
             playhead = playbackController.playhead,
-            context = context
+            context = context,
+            featureRegistry = featureRegistry
         ).apply {
             onRenderRequested = {
                 stateDirtyCounter.incrementAndGet()
@@ -440,6 +451,12 @@ fun EditorScreen(
                     lastRequestedTimeUs = tUs
                     lastRequestedMode = mode
                     lastRenderDirtyVersion = currentDirtyVersion
+                    if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && mode == PlayMode.PLAYING) {
+                        com.flowcut.app.engine.PacePerfTracker.onRequestRender(
+                            com.flowcut.app.engine.RenderRequestCaller.FRAME_DRIVER_TICK,
+                            mode
+                        )
+                    }
                     if (previewRenderer.glSurfaceView != null) {
                         previewRenderer.glSurfaceView.requestRender()
                     } else {
@@ -449,6 +466,7 @@ fun EditorScreen(
             }
         )
     }
+    frameDriver.keepAlive = { previewRenderer.owesFrame }
 
     val stopTimelineScrollNow = {
         playbackController.pause()
@@ -460,8 +478,9 @@ fun EditorScreen(
     val currentStopTimelineScrollNow by rememberUpdatedState(stopTimelineScrollNow)
 
     LaunchedEffect(coreProject) {
+        com.flowcut.app.engine.perf.PreviewEventLog.log(com.flowcut.app.engine.perf.PreviewEventType.SEEK_ENTER, reason = "coreProject_edit")
         snapshotHolder.current = TimelineSnapshot(System.nanoTime(), coreProject)
-        previewRenderer.requestRender()
+        previewRenderer.requestRender(com.flowcut.app.engine.RenderRequestCaller.LAUNCHED_EFFECT_PROJECT)
         frameDriver.wake()
     }
 
@@ -1008,57 +1027,26 @@ fun EditorScreen(
     val isMainTrackMuted = vmUiState?.isMainTrackMuted ?: false
     val currentFocus = vmUiState?.focusMode ?: com.flowcut.app.ui.timeline.TimelineFocusState.S0_NONE
 
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    var isWaitingForFrameState by remember { mutableStateOf(previewRenderer.isWaitingForFrame) }
-    var showPreviewLoader by remember { mutableStateOf(false) }
-    var lastSafetyDismissWallMs by remember { mutableLongStateOf(0L) }
+    val localLoadingManager = remember(coroutineScope) {
+        resolvedViewModel?.loadingManager ?: LoadingStateManager(coroutineScope)
+    }
+    val isLoaderVisible by localLoadingManager.isLoadingVisible.collectAsState()
+    val currentLoadingMessage by localLoadingManager.loadingMessage.collectAsState()
 
+    // 1. Scrubbing: when timeline is scrolling, mark scrubbing as active
+    LaunchedEffect(isTimelineScrolling) {
+        localLoadingManager.setLoading(LoadingSources.SCRUBBING, isTimelineScrolling, "Processing...")
+    }
+
+    // 2. Seeking / Frame catchup: notify when renderer is waiting for accurate seek frame
     DisposableEffect(previewRenderer) {
         previewRenderer.onWaitingForFrameChanged = { waiting ->
-            mainHandler.post {
-                val now = android.os.SystemClock.uptimeMillis()
-                if (waiting && (now - lastSafetyDismissWallMs < 500L)) {
-                    return@post
-                }
-                isWaitingForFrameState = waiting
-            }
+            localLoadingManager.setLoading(LoadingSources.SEEKING, waiting, "Processing...")
         }
         onDispose {
             previewRenderer.onWaitingForFrameChanged = null
+            localLoadingManager.setLoading(LoadingSources.SEEKING, false)
         }
-    }
-
-    val isImporting = vmUiState?.isImporting == true
-    val isProcessingEdit = vmUiState?.isProcessingEdit == true
-    val isProcessing = vmUiState?.isProcessing == true || isImporting || isProcessingEdit
-    val isWaitingForFrame = if (android.os.SystemClock.uptimeMillis() - lastSafetyDismissWallMs < 500L) {
-        false
-    } else {
-        isWaitingForFrameState || previewRenderer.isWaitingForFrame
-    }
-    val isBusy = isWaitingForFrame || isProcessing
-
-    LaunchedEffect(isBusy) {
-        if (!isBusy) {
-            showPreviewLoader = false
-            return@LaunchedEffect
-        }
-
-        // Grace threshold: only show loader if operation takes >= 100ms (prevents flicker on fast frames)
-        delay(100L)
-        showPreviewLoader = true
-
-        if (previewRenderer.isWaitingForFrame) {
-            previewRenderer.glSurfaceView?.requestRender()
-        }
-
-        // Hard safety timeout: auto-dismiss after 500ms (max total 600ms) so touches can NEVER stay blocked forever
-        delay(500L)
-        lastSafetyDismissWallMs = android.os.SystemClock.uptimeMillis()
-        showPreviewLoader = false
-        isWaitingForFrameState = false
-        previewRenderer.isWaitingForFrame = false
-        resolvedViewModel?.setProcessingEdit(false)
     }
 
     LaunchedEffect(currentFocus) {
@@ -1279,7 +1267,7 @@ fun EditorScreen(
                 // 1. Top bar: 48 dp (Left: [←  My reel 01], Right: [Ratio] [Export])
                 EditorTopBar(
                     hasClips = hasClips,
-                    showPreviewLoader = showPreviewLoader,
+                    isLoaderActive = isLoaderVisible,
                     colors = colors,
                     aspectRatioLabel = currentRatioLabel,
                     onRatioClick = openAspectRatioSheet,
@@ -1315,10 +1303,11 @@ fun EditorScreen(
                         targetCanvasAspect = targetCanvasAspect
                     )
 
-                    // Center three-dots preview loader (96.dp x 36.dp sequential wave pulse)
-                    PreviewThreeDotsLoader(
-                        showLoader = showPreviewLoader,
-                        modifier = Modifier.align(Alignment.Center)
+                    // Android Default Native Loader (CircularProgressIndicator + "Processing...")
+                    FlowCutLoadingIndicator(
+                        modifier = Modifier.align(Alignment.Center),
+                        message = currentLoadingMessage,
+                        isVisible = isLoaderVisible
                     )
 
                     val activeOverlayId = vmUiState?.selectedOverlayId
@@ -2216,7 +2205,7 @@ fun EditorScreen(
                     }
 
                     // Touch blocker over preview area while loader is active
-                    TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
+                    TouchBlocker(blocked = isLoaderVisible, modifier = Modifier.matchParentSize())
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -2256,7 +2245,7 @@ fun EditorScreen(
                             playPauseBoundsInRoot = bounds
                         }
                     )
-                    TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
+                    TouchBlocker(blocked = isLoaderVisible, modifier = Modifier.matchParentSize())
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -2271,7 +2260,7 @@ fun EditorScreen(
                         selection = selection,
                         currentFocus = currentFocus,
                         layerItems = resolvedViewModel?.layerItems ?: emptyList(),
-                        showPreviewLoader = showPreviewLoader,
+                        isLoaderActive = isLoaderVisible,
                         customCoverBitmap = customCoverBitmap,
                         selectedClipIndex = selectedClipIndex,
                         timelineTransitions = timeline.project.transitions,
@@ -2281,6 +2270,12 @@ fun EditorScreen(
                         isMainTrackMuted = isMainTrackMuted,
                         onPositionTimeline = { timelineBoundsInRoot = it },
                         onScrollingStateChanged = { isTimelineScrolling = it },
+                        onThumbnailGeneratingChanged = { isGen ->
+                            localLoadingManager.setLoading(LoadingSources.THUMBNAIL_GEN, isGen, "Processing...")
+                        },
+                        onWaveformGeneratingChanged = { isGen ->
+                            localLoadingManager.setLoading(LoadingSources.WAVEFORM_GEN, isGen, "Processing...")
+                        },
                         onSelectClip = onSelectClip,
                         onSelectJunction = onSelectJunction,
                         onDeselectAll = onDeselectAll,
@@ -2904,7 +2899,7 @@ fun EditorScreen(
                     isEffectSheetVisible = true
                 }
             )
-            TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
+            TouchBlocker(blocked = isLoaderVisible, modifier = Modifier.matchParentSize())
         }
     }
 
@@ -3394,7 +3389,7 @@ private fun EditorTimelineCanvasHost(
     selection: TimelineSelection,
     currentFocus: TimelineFocusState,
     layerItems: List<com.flowcut.app.engine.OverlayItem>,
-    showPreviewLoader: Boolean,
+    isLoaderActive: Boolean = false,
     customCoverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
     selectedClipIndex: Int?,
     timelineTransitions: List<com.flowcut.app.model.Transition>,
@@ -3404,6 +3399,8 @@ private fun EditorTimelineCanvasHost(
     isMainTrackMuted: Boolean,
     onPositionTimeline: (androidx.compose.ui.geometry.Rect) -> Unit,
     onScrollingStateChanged: (Boolean) -> Unit,
+    onThumbnailGeneratingChanged: (Boolean) -> Unit = {},
+    onWaveformGeneratingChanged: (Boolean) -> Unit = {},
     onSelectClip: (Int) -> Unit,
     onSelectJunction: (Int) -> Unit,
     onDeselectAll: () -> Unit,
@@ -3444,12 +3441,14 @@ private fun EditorTimelineCanvasHost(
             selection = selection,
             focusMode = currentFocus,
             overlayItems = layerItems,
-            isLoaderActive = showPreviewLoader,
+            isLoaderActive = isLoaderActive,
             customCoverBitmap = customCoverBitmap,
             onScrollingStateChanged = { scrolling ->
                 if (scrolling) showOverlayTrimMenu = false
                 onScrollingStateChanged(scrolling)
             },
+            onThumbnailGeneratingChanged = onThumbnailGeneratingChanged,
+            onWaveformGeneratingChanged = onWaveformGeneratingChanged,
             onOverlayTrimHandleTap = { id, isRight, offset ->
                 trimMenuTargetOverlayId = id
                 trimMenuIsRightHandle = isRight
@@ -6742,70 +6741,6 @@ private fun TransitionSheetHost(
 }
 
 /**
- * Ultra-lightweight Three-Dots Center Preview Loader (• ● •).
- * Rendered exclusively inside the preview box at Alignment.Center.
- * Size: 96.dp x 36.dp with smooth sequential wave bounce & scale pulse animation.
- * Consumes 0% CPU/GPU when showLoader is false.
- */
-@Composable
-private fun PreviewThreeDotsLoader(
-    showLoader: Boolean,
-    modifier: Modifier = Modifier
-) {
-    if (!showLoader) return
-
-    val infiniteTransition = rememberInfiniteTransition(label = "PreviewThreeDotsTransition")
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 750, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "PreviewThreeDotsPhase"
-    )
-
-    Canvas(
-        modifier = modifier
-            .size(width = 96.dp, height = 36.dp)
-    ) {
-        val centerX = size.width / 2f
-        val centerY = size.height / 2f
-        val spacingPx = 24.dp.toPx()
-        val baseRadiusPx = 5.5.dp.toPx()
-        val peakRadiusPx = 9.0.dp.toPx()
-        val maxBouncePx = 6.0.dp.toPx()
-        val haloExtraPx = 1.5.dp.toPx()
-
-        for (i in 0 until 3) {
-            val dotCenterX = centerX + (i - 1) * spacingPx
-            val dotPhase = (phase - i * 0.22f + 1f) % 1f
-            val pulse = kotlin.math.sin(dotPhase * kotlin.math.PI.toFloat()).coerceAtLeast(0f)
-
-            val currentRadius = baseRadiusPx + (peakRadiusPx - baseRadiusPx) * pulse
-            val offsetY = -maxBouncePx * pulse
-            val dotCenterY = centerY + offsetY
-            val dotCenter = Offset(dotCenterX, dotCenterY)
-
-            // Subtle dark halo circle behind dot for crisp contrast on bright videos
-            drawCircle(
-                color = Color.Black.copy(alpha = 0.25f),
-                radius = currentRadius + haloExtraPx,
-                center = dotCenter
-            )
-
-            // Dot color transitions from Color.White.copy(alpha = 0.40f) to bright pure Color.White (alpha = 1.0f)
-            val currentAlpha = 0.40f + 0.60f * pulse
-            drawCircle(
-                color = Color.White.copy(alpha = currentAlpha),
-                radius = currentRadius,
-                center = dotCenter
-            )
-        }
-    }
-}
-
-/**
  * Transparent touch-consuming barrier that intercepts all pointer events
  * when [blocked] is true. Emits nothing when [blocked] is false.
  */
@@ -6835,7 +6770,7 @@ private fun TouchBlocker(
 @Composable
 private fun EditorTopBar(
     hasClips: Boolean,
-    showPreviewLoader: Boolean,
+    isLoaderActive: Boolean = false,
     colors: FlowCutColors,
     aspectRatioLabel: String = "9:16",
     onRatioClick: () -> Unit = {},
@@ -6912,7 +6847,7 @@ private fun EditorTopBar(
                 )
             }
         }
-        TouchBlocker(blocked = showPreviewLoader, modifier = Modifier.matchParentSize())
+        TouchBlocker(blocked = isLoaderActive, modifier = Modifier.matchParentSize())
     }
 }
 

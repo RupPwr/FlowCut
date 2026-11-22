@@ -1,5 +1,6 @@
 package com.flowcut.app.engine
 
+import com.flowcut.app.core.feature.LayerItem
 import java.util.TreeSet
 
 /**
@@ -21,7 +22,7 @@ enum class LayerType(val maxCap: Int) {
  * Minimum duration is 200,000 microseconds (200ms).
  */
 data class OverlayItem(
-    val id: String,
+    override val id: String,
     val type: LayerType,
     val laneIndex: Int,
     val zIndex: Int, // Deterministic back-to-front rendering order
@@ -89,7 +90,9 @@ data class OverlayItem(
     val mosaicStyle: Int = 0, // 0 = Pixelate Grid, 1 = Frost/Box Blur, 2 = Halftone/Dot Matrix, 3 = Solid Blackout Censor Bar
     val mosaicIntensity: Float = 0.5f, // 0.1f..1.0f controlling pixel block size / blur radius
     val mosaicFeather: Float = 0.05f // 0.0f..0.3f soft edge blending
-) {
+) : LayerItem {
+    override val kind: String get() = type.name
+
     companion object {
         const val MIN_DURATION_US: Long = 200_000L
     }

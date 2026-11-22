@@ -2,6 +2,7 @@ package com.flowcut.app.engine
 
 import android.opengl.GLES11Ext
 import android.opengl.GLES30
+import com.flowcut.app.core.model.ClipFilterParams
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.TransitionType
 import java.io.File
@@ -9,16 +10,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
-data class ClipFilterState(
-    val filterPresetId: Int = 0,
-    val filterIntensity: Float = 0.8f,
-    val effectPresetId: Int = 0,
-    val effectIntensity: Float = 0.7f
-) {
-    companion object {
-        val DEFAULT = ClipFilterState()
-    }
-}
+typealias ClipFilterState = ClipFilterParams
 
 data class DrawSpec(
     var type: TransitionType = TransitionType.NONE,
@@ -59,7 +51,7 @@ data class DrawSpec(
     var clipVignette: Float = 0f
 )
 
-class TransitionRenderer(private val cacheDir: File? = null) {
+class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, MosaicDrawer {
 
     private var vaoId = 0
     private var vboId = 0
@@ -181,7 +173,7 @@ class TransitionRenderer(private val cacheDir: File? = null) {
     // Pre-allocated fallback arrays for zero allocations (Rule R10)
     private val defaultAdj = FloatArray(4)
     private val defaultTexelSize = floatArrayOf(1f / 720f, 1f / 1280f)
-    private val defaultIdentityMat = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
+    private val defaultIdentityMat = FloatArray(16).apply { this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f }
     private val defaultBgParams = FloatArray(4)
 
     private val vertexShaderSource = """
@@ -1431,28 +1423,28 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         GLES30.glUseProgram(0)
     }
 
-    fun drawOverlayQuad(
+    override fun drawOverlayQuad(
         texId: Int,
         texWidth: Int,
         texHeight: Int,
         transform: ClipTransform,
-        opacity: Float = 1.0f,
-        displayWidth: Int = 1080,
-        displayHeight: Int = 1920,
-        cropLeft: Float = 0.0f,
-        cropTop: Float = 0.0f,
-        cropRight: Float = 1.0f,
-        cropBottom: Float = 1.0f,
-        maskType: Int = 0,
-        maskFeather: Float = 0.05f,
-        maskInvert: Boolean = false,
-        chromaEnabled: Boolean = false,
-        chromaColorArgb: Int = 0xFF00FF00.toInt(),
-        chromaThreshold: Float = 0.25f,
-        chromaBlend: Float = 0.10f,
-        adjustBrightness: Float = 0.0f,
-        adjustContrast: Float = 1.0f,
-        adjustSaturation: Float = 1.0f
+        opacity: Float,
+        displayWidth: Int,
+        displayHeight: Int,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float,
+        maskType: Int,
+        maskFeather: Float,
+        maskInvert: Boolean,
+        chromaEnabled: Boolean,
+        chromaColorArgb: Int,
+        chromaThreshold: Float,
+        chromaBlend: Float,
+        adjustBrightness: Float,
+        adjustContrast: Float,
+        adjustSaturation: Float
     ) {
         if (texId <= 0) return
         val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
@@ -1513,17 +1505,17 @@ class TransitionRenderer(private val cacheDir: File? = null) {
         drawOverlayQuad(texId, 1, 1, transform, opacity, displayWidth, displayHeight)
     }
 
-    fun drawMosaicRegion(
+    override fun drawMosaicRegion(
         videoTexId: Int,
         videoMat: FloatArray,
-        crop: FloatArray = defaultCrop,
+        crop: FloatArray,
         transform: ClipTransform,
-        mosaicStyle: Int = 0,
-        mosaicIntensity: Float = 0.5f,
-        mosaicFeather: Float = 0.05f,
-        opacity: Float = 1.0f,
-        displayWidth: Int = 1080,
-        displayHeight: Int = 1920
+        mosaicStyle: Int,
+        mosaicIntensity: Float,
+        mosaicFeather: Float,
+        opacity: Float,
+        displayWidth: Int,
+        displayHeight: Int
     ) {
         val effectiveOpacity = (transform.opacity * opacity).coerceIn(0f, 1f)
         if (effectiveOpacity <= 0.001f) return

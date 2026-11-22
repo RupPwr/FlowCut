@@ -16,6 +16,18 @@ class DefaultFeatureRegistry : FeatureRegistry {
     private val audioContributors = mutableListOf<AudioContributor>()
     private val prefetchers = mutableListOf<Prefetcher>()
     private val clipTools = mutableListOf<ClipTool>()
+    private val renderPasses = mutableListOf<RenderPass>()
+    private val layerRenderers = mutableListOf<LayerRenderer>()
+
+    /**
+     * Listener invoked when a render pass is registered.
+     */
+    var onRenderPassAdded: ((RenderPass) -> Unit)? = null
+
+    /**
+     * Listener invoked when a layer renderer is registered.
+     */
+    var onLayerRendererAdded: ((LayerRenderer) -> Unit)? = null
 
     /**
      * Hook invoked when an item type is encountered that is not registered.
@@ -56,6 +68,21 @@ class DefaultFeatureRegistry : FeatureRegistry {
         }
     }
 
+    override fun renderPass(p: RenderPass) {
+        if (!renderPasses.contains(p)) {
+            renderPasses.add(p)
+            renderPasses.sortBy { it.order }
+            onRenderPassAdded?.invoke(p)
+        }
+    }
+
+    override fun layerRenderer(r: LayerRenderer) {
+        if (!layerRenderers.contains(r)) {
+            layerRenderers.add(r)
+            onLayerRendererAdded?.invoke(r)
+        }
+    }
+
     fun isItemTypeRegistered(kind: String): Boolean = itemTypes.contains(kind)
 
     fun handleUnknownItem(kind: String, itemId: String) {
@@ -72,6 +99,10 @@ class DefaultFeatureRegistry : FeatureRegistry {
 
     fun getClipTools(): List<ClipTool> = clipTools
 
+    fun getRenderPasses(): List<RenderPass> = renderPasses
+
+    fun getLayerRenderers(): List<LayerRenderer> = layerRenderers
+
     fun clear() {
         itemTypes.clear()
         lanePainters.clear()
@@ -79,6 +110,8 @@ class DefaultFeatureRegistry : FeatureRegistry {
         audioContributors.clear()
         prefetchers.clear()
         clipTools.clear()
+        renderPasses.clear()
+        layerRenderers.clear()
     }
 
     /**

@@ -2054,9 +2054,7 @@ fun FilterSheet(
 
     val handleClose = {
         if (!isCommitted) {
-            for ((id, orig) in originalAllStates) {
-                PreviewRenderer.setClipFilter(id, orig.filterPresetId, orig.filterIntensity)
-            }
+            PreviewRenderer.clearLiveFilterOverride()
             previewRenderer.requestRender()
             onWakeFrameDriver()
         }
@@ -2065,6 +2063,7 @@ fun FilterSheet(
 
     val handleDone = {
         isCommitted = true
+        PreviewRenderer.clearLiveFilterOverride()
         if (isApplyToAll) {
             onCommitApplyAllFilter(selectedPresetId, currentIntensity)
         } else {
@@ -2078,9 +2077,7 @@ fun FilterSheet(
     DisposableEffect(Unit) {
         onDispose {
             if (!isCommitted) {
-                for ((id, orig) in originalAllStates) {
-                    PreviewRenderer.setClipFilter(id, orig.filterPresetId, orig.filterIntensity)
-                }
+                PreviewRenderer.clearLiveFilterOverride()
                 previewRenderer.requestRender()
                 onWakeFrameDriver()
             }
@@ -2334,7 +2331,7 @@ fun EffectSheet(
 
     val handleClose = {
         if (!isCommitted) {
-            PreviewRenderer.setClipEffect(clip.id, originalClipFilter.effectPresetId, originalClipFilter.effectIntensity)
+            PreviewRenderer.clearLiveFilterOverride(clip.id)
             previewRenderer.requestRender()
             onWakeFrameDriver()
         }
@@ -2343,6 +2340,7 @@ fun EffectSheet(
 
     val handleDone = {
         isCommitted = true
+        PreviewRenderer.clearLiveFilterOverride(clip.id)
         onCommitSingleEffect(targetClipIndex, selectedPresetId, currentIntensity)
         onDismiss()
     }
@@ -2352,7 +2350,7 @@ fun EffectSheet(
     DisposableEffect(Unit) {
         onDispose {
             if (!isCommitted) {
-                PreviewRenderer.setClipEffect(clip.id, originalClipFilter.effectPresetId, originalClipFilter.effectIntensity)
+                PreviewRenderer.clearLiveFilterOverride(clip.id)
                 previewRenderer.requestRender()
                 onWakeFrameDriver()
             }

@@ -48,6 +48,10 @@ import com.flowcut.app.engine.TransitionRenderer
 import com.flowcut.app.model.MAX_CLIPS
 import com.flowcut.app.ui.EditorScreen
 import com.flowcut.app.engine.perf.SessionGuard
+import com.flowcut.app.engine.perf.PreviewEventLog
+import com.flowcut.app.engine.perf.PreviewEventType
+import com.flowcut.app.engine.perf.PreviewWatchdog
+import com.flowcut.app.engine.perf.ResourceTracker
 import com.flowcut.app.ui.ExportState
 import com.flowcut.app.ui.FlowCutTheme
 import com.flowcut.app.ui.HomeScreen
@@ -362,21 +366,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        PreviewEventLog.log(PreviewEventType.ACTIVITY_LIFECYCLE, reason = "onStart")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        PreviewEventLog.log(PreviewEventType.ACTIVITY_LIFECYCLE, reason = "onResume")
+        jankStats?.isTrackingEnabled = true
+        viewModel.onAppResume()
+    }
+
     override fun onPause() {
         super.onPause()
+        PreviewEventLog.log(PreviewEventType.ACTIVITY_LIFECYCLE, reason = "onPause")
+        PreviewWatchdog.onActivityPauseOrStop("MainActivity.onPause")
         jankStats?.isTrackingEnabled = false
         viewModel.onAppBackground()
     }
 
     override fun onStop() {
         super.onStop()
+        PreviewEventLog.log(PreviewEventType.ACTIVITY_LIFECYCLE, reason = "onStop")
+        PreviewWatchdog.onActivityPauseOrStop("MainActivity.onStop")
+        ResourceTracker.logAliveCounts("MainActivity.onStop")
         viewModel.onAppStop()
     }
 
-    override fun onResume() {
-        super.onResume()
-        jankStats?.isTrackingEnabled = true
-        viewModel.onAppResume()
+    override fun onDestroy() {
+        super.onDestroy()
+        PreviewEventLog.log(PreviewEventType.ACTIVITY_LIFECYCLE, reason = "onDestroy")
+        ResourceTracker.logAliveCounts("MainActivity.onDestroy")
     }
 
     private fun testShaderWarmup() {

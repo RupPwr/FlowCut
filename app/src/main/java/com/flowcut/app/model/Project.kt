@@ -1,5 +1,6 @@
 package com.flowcut.app.model
 
+import com.flowcut.app.core.model.ClipRenderParams
 import kotlinx.serialization.Serializable
 
 const val CURRENT_PROJECT_SCHEMA = 1
@@ -26,7 +27,8 @@ data class Clip(
     val width: Int,
     val height: Int,
     val rotation: Int,
-    val frameRate: Int = 30
+    val frameRate: Int = 30,
+    val renderParams: ClipRenderParams = ClipRenderParams.DEFAULT
 ) {
     val displayWidth: Int
         get() = if (rotation == 90 || rotation == 270) height else width
