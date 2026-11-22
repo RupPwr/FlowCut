@@ -1610,7 +1610,9 @@ class PreviewRenderer(
                         android.util.Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts current=$currentPts paused=$isPaused scrubbing=$isScrubbing")
                         if (shouldSeek) {
                             pendingSurfaceFramesA.set(0)
-                            activeFs.seekTo(targetPts, fastKeyframeOnly = isScrubbing)
+                            val useFast = isScrubbing &&
+                                activeFs.keyframeIntervalUs in 1..1_500_000L
+                            activeFs.seekTo(targetPts, fastKeyframeOnly = useFast)
                         }
                     }
                 } else {
@@ -1950,7 +1952,9 @@ class PreviewRenderer(
                         android.util.Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts current=$currentPts paused=$isPaused scrubbing=$isScrubbing")
                         if (shouldSeek) {
                             pendingSurfaceFramesB.set(0)
-                            activeFs.seekTo(targetPts, fastKeyframeOnly = isScrubbing)
+                            val useFast = isScrubbing &&
+                                activeFs.keyframeIntervalUs in 1..1_500_000L
+                            activeFs.seekTo(targetPts, fastKeyframeOnly = useFast)
                         }
                     }
                 } else {

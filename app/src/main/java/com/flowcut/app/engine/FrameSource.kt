@@ -16,6 +16,7 @@ import com.flowcut.app.engine.perf.ResourceTracker
 import com.flowcut.app.model.Clip
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 /**
  * FrameSource (Section 19.6 & 19.7):
@@ -69,6 +70,8 @@ class FrameSource(
                 // New clip file: reset all stale state so the replaced clip starts fresh
                 mediaDurationUs = -1L
                 cachedKeyframes = null
+                keyframeIntervalUs = -1L
+                acceptedTargetUs = -1L
                 lastRenderedPtsUs = -1L
                 lastFastSeekKeyframeUs = -1L
                 lastVideoPtsUs = -1L
@@ -154,6 +157,9 @@ class FrameSource(
     private var lastRenderedLocalUs: Long = -1L
     var isAccuratePausedFrameLatched: Boolean = false
         internal set
+    var keyframeIntervalUs: Long = -1L
+        private set
+    private var acceptedTargetUs: Long = -1L
     var seekState: SeekState = SeekState()
         internal set
     private var seekConsecutiveNoProgress: Int = 0
@@ -302,6 +308,33 @@ class FrameSource(
             ext.selectTrack(track)
             extractor = ext
             videoTrackIndex = track
+
+            val keyframes = getKeyframes()
+            if (keyframes != null && keyframes.size >= 2) {
+                keyframeIntervalUs = (keyframes[1] - keyframes[0]) * 1000L
+            } else {
+                try {
+                    ext.seekTo(0L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                    val first = ext.sampleTime
+                    ext.seekTo(if (first >= 0L) first + 1L else 1L, MediaExtractor.SEEK_TO_NEXT_SYNC)
+                    var second = ext.sampleTime
+                    if (second <= first) {
+                        var count = 0
+                        while (ext.advance() && count < 300) {
+                            count++
+                            if ((ext.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                                second = ext.sampleTime
+                                break
+                            }
+                        }
+                    }
+                    if (first >= 0L && second > first) {
+                        keyframeIntervalUs = second - first
+                    }
+                    ext.seekTo(0L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                } catch (_: Exception) {}
+            }
+            Log.w("SEEKTRACE", "GOP clip=${clip.id} intervalUs=$keyframeIntervalUs")
 
             val rawMime = format.getString(MediaFormat.KEY_MIME) ?: ""
             // MediaTek MT6833 / Codec2 Dolby Vision Fallback:
@@ -715,6 +748,7 @@ class FrameSource(
     val currentPath: String get() = clip.path
 
     fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false, isExport: Boolean = false): Boolean {
+        acceptedTargetUs = -1L
         android.util.Log.w("SEEKTRACE", "ENTER target=$localUs fast=$fastKeyframeOnly lastVideoPts=$lastVideoPtsUs lastRendered=$lastRenderedPtsUs eos=$outputEos")
         checkCatchUpTimeout()
         stopFast()
@@ -759,8 +793,12 @@ class FrameSource(
                     seekTimeUs = closestKeyframeMs * 1000L
                 }
                 if (lastFastSeekKeyframeUs == seekTimeUs) {
-                    android.util.Log.w("SEEKTRACE", "EXIT-4 rendered=true target=$localUs")
-                    return true   // this keyframe is already on screen; no flush needed
+                    val isInvalid = lastRenderedPtsUs <= 0L && localUs > 1_000_000L
+                    val withinTolerance = abs(lastRenderedPtsUs - localUs) <= maxOf(250_000L, frameDurationUs * 15)
+                    if (!isInvalid && withinTolerance) {
+                        android.util.Log.w("SEEKTRACE", "EXIT-4 rendered=true target=$localUs")
+                        return true   // this keyframe is already on screen; no flush needed
+                    }
                 }
                 lastFastSeekKeyframeUs = seekTimeUs
                 // Only skip the seek if the frame was accurately latched at this keyframe.
@@ -1493,17 +1531,20 @@ class FrameSource(
             when (decision.action) {
                 SeekAction.ACCEPT_CURRENT -> {
                     if (decision.reason == "no_progress_guard_tripped") {
-                        android.util.Log.w("PreviewErr", "seek accepted last available frame")
-                        seekState = seekState.copy(
-                            lastTargetUs = localUs,
-                            lastFast = false,
-                            outcome = SeekOutcome.BEST_EFFORT,
-                            lastRenderedPtsUs = lastRenderedPtsUs
-                        )
-                        isCatchingUpFromSeek = false
-                        isAccuratePausedFrameLatched = true
-                        isWaitingForFrame = false
-                        onSeekAcceptedLastFrame?.invoke()
+                        if (acceptedTargetUs != localUs) {
+                            acceptedTargetUs = localUs
+                            android.util.Log.w("PreviewErr", "seek accepted last available frame")
+                            seekState = seekState.copy(
+                                lastTargetUs = localUs,
+                                lastFast = false,
+                                outcome = SeekOutcome.BEST_EFFORT,
+                                lastRenderedPtsUs = lastRenderedPtsUs
+                            )
+                            isCatchingUpFromSeek = false
+                            isAccuratePausedFrameLatched = true
+                            isWaitingForFrame = false
+                            onSeekAcceptedLastFrame?.invoke()
+                        }
                     } else if (isPaused) {
                         isAccuratePausedFrameLatched = true
                     }
