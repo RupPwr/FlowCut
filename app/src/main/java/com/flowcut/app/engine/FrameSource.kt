@@ -127,6 +127,10 @@ class FrameSource(
     var onSeekAcceptedLastFrame: (() -> Unit)? = null
     val lastDecodedPtsUs: Long get() = if (lastRenderedPtsUs != -1L) lastRenderedPtsUs else currentPtsUs
     val currentDecoderPtsUs: Long get() = currentPtsUs
+    val isAtEndOfMedia: Boolean
+        get() = outputEos && lastRenderedPtsUs > 0L
+    val lastAvailablePtsUs: Long
+        get() = lastRenderedPtsUs
     val codecName: String? get() = try { codec?.name } catch (_: Throwable) { null }
     val currentMimeType: String get() = currentMime
     @Volatile var didReleaseOutputBuffer: Boolean = false
@@ -589,6 +593,7 @@ class FrameSource(
                     val pts = bufferInfo.presentationTimeUs
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                         outputEos = true
+                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                     }
                     val atClipEnd = outputEos ||
                         (clipDurationUs > 0L && pts >= clipDurationUs - 85_000L)
@@ -617,6 +622,7 @@ class FrameSource(
                     }
                 } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
                     outputEos = true
+                    if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                     break
                 } else {
                     break
@@ -873,6 +879,7 @@ class FrameSource(
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     if (isEos) {
                         outputEos = true
+                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                         if (pts > lastVideoPtsUs) {
                             lastVideoPtsUs = pts
                         }
@@ -945,6 +952,7 @@ class FrameSource(
                     }
                 } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
                     outputEos = true
+                    if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                     break
                 }
 
@@ -1037,6 +1045,7 @@ class FrameSource(
                         break
                     } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
                         outputEos = true
+                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                         break
                     }
                 }
@@ -1223,13 +1232,17 @@ class FrameSource(
                     if (outIdx < 0) {
                         if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
                             outputEos = true
+                            if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                         }
                         break
                     }
 
                     val pts = info.presentationTimeUs
                     val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    if (isEos) outputEos = true
+                    if (isEos) {
+                        outputEos = true
+                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
+                    }
                     val atEnd = outputEos || (clipDurationUs > 0L && pts >= clipDurationUs - 85_000L)
                     currentPtsUs = pts
 
@@ -1327,6 +1340,7 @@ class FrameSource(
                             tryAgainCount++
                             if (inputEos) {
                                 outputEos = true
+                                if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                             }
                         }
                         break
@@ -1334,7 +1348,10 @@ class FrameSource(
 
                     decodedCount++
                     val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    if (isEos) outputEos = true
+                    if (isEos) {
+                        outputEos = true
+                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
+                    }
                     if (isEos && info.size == 0) {
                         dec.releaseOutputBuffer(outIdx, false)
                         droppedCount++
@@ -1667,6 +1684,7 @@ class FrameSource(
                     val pts = bufferInfo.presentationTimeUs
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                         outputEos = true
+                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                     }
 
                     if (pts >= localUs - 18_000L || outputEos) {

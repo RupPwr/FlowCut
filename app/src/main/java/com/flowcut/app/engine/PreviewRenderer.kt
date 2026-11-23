@@ -8,6 +8,7 @@ import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import android.util.Log
 import com.flowcut.app.core.feature.FeatureRegistry
 import com.flowcut.app.core.feature.FrameCtx
 import com.flowcut.app.core.feature.LayerRenderer
@@ -1599,20 +1600,24 @@ class PreviewRenderer(
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
                         val targetPts = frame.clipASourceUs
+                        val effectiveTargetPts =
+                            if (activeFs.isAtEndOfMedia)
+                                minOf(targetPts, activeFs.lastAvailablePtsUs)
+                            else targetPts
                         val fwdLimit = maxOf(600_000L, (400_000L * speedA).toLong())
                         val isContinuous = (currentPts != -1L) &&
-                            (targetPts >= currentPts - 100_000L && targetPts <= currentPts + fwdLimit)
+                            (effectiveTargetPts >= currentPts - 100_000L && effectiveTargetPts <= currentPts + fwdLimit)
                         val shouldSeek = if (!isPaused && !isScrubbing) {
-                            currentPts != -1L && (targetPts < currentPts - 100_000L || targetPts > currentPts + fwdLimit)
+                            currentPts != -1L && (effectiveTargetPts < currentPts - 100_000L || effectiveTargetPts > currentPts + fwdLimit)
                         } else {
-                            !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
+                            !isContinuous && (currentPts == -1L || kotlin.math.abs(effectiveTargetPts - currentPts) > 60_000L)
                         }
-                        android.util.Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts current=$currentPts paused=$isPaused scrubbing=$isScrubbing")
+                        Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts eff=$effectiveTargetPts atEnd=${activeFs.isAtEndOfMedia}")
                         if (shouldSeek) {
                             pendingSurfaceFramesA.set(0)
                             val useFast = isScrubbing &&
                                 activeFs.keyframeIntervalUs in 1..1_500_000L
-                            activeFs.seekTo(targetPts, fastKeyframeOnly = useFast)
+                            activeFs.seekTo(effectiveTargetPts, fastKeyframeOnly = useFast)
                         }
                     }
                 } else {
@@ -1941,20 +1946,24 @@ class PreviewRenderer(
                     if (activeFs.prewarmStage >= 3) {
                         val currentPts = activeFs.lastDecodedPtsUs
                         val targetPts = frame.clipASourceUs
+                        val effectiveTargetPts =
+                            if (activeFs.isAtEndOfMedia)
+                                minOf(targetPts, activeFs.lastAvailablePtsUs)
+                            else targetPts
                         val fwdLimit = maxOf(600_000L, (400_000L * speedA).toLong())
                         val isContinuous = (currentPts != -1L) &&
-                            (targetPts >= currentPts - 100_000L && targetPts <= currentPts + fwdLimit)
+                            (effectiveTargetPts >= currentPts - 100_000L && effectiveTargetPts <= currentPts + fwdLimit)
                         val shouldSeek = if (!isPaused && !isScrubbing) {
-                            currentPts != -1L && (targetPts < currentPts - 100_000L || targetPts > currentPts + fwdLimit)
+                            currentPts != -1L && (effectiveTargetPts < currentPts - 100_000L || effectiveTargetPts > currentPts + fwdLimit)
                         } else {
-                            !isContinuous && (currentPts == -1L || kotlin.math.abs(targetPts - currentPts) > 60_000L)
+                            !isContinuous && (currentPts == -1L || kotlin.math.abs(effectiveTargetPts - currentPts) > 60_000L)
                         }
-                        android.util.Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts current=$currentPts paused=$isPaused scrubbing=$isScrubbing")
+                        Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts eff=$effectiveTargetPts atEnd=${activeFs.isAtEndOfMedia}")
                         if (shouldSeek) {
                             pendingSurfaceFramesB.set(0)
                             val useFast = isScrubbing &&
                                 activeFs.keyframeIntervalUs in 1..1_500_000L
-                            activeFs.seekTo(targetPts, fastKeyframeOnly = useFast)
+                            activeFs.seekTo(effectiveTargetPts, fastKeyframeOnly = useFast)
                         }
                     }
                 } else {
