@@ -374,8 +374,10 @@ class PreviewRenderer(
         }
     }
 
-    private val stCallbackThread = HandlerThread("FlowCut-ST-Frames").apply { start() }
-    private val stCallbackHandler = Handler(stCallbackThread.looper)
+    private val stCallbackThread: HandlerThread? = context?.let {
+        HandlerThread("FlowCut-ST-Frames").apply { start() }
+    }
+    private val stCallbackHandler: Handler? = stCallbackThread?.let { Handler(it.looper) }
 
     @Volatile
     var isFirstFrameLatched: Boolean = false
@@ -653,8 +655,6 @@ class PreviewRenderer(
     fun requestAccurateSeek() {
         forceAccurateSeekPending = true
         isWaitingForFrame = true
-        pendingSurfaceFramesA.set(0)
-        pendingSurfaceFramesB.set(0)
         PreviewEventLog.log(PreviewEventType.SEEK_ENTER, reason = "requestAccurateSeek")
         PreviewWatchdog.onRequestRender()
         if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && playhead.mode == PlayMode.PLAYING) {
@@ -805,20 +805,13 @@ class PreviewRenderer(
         passRegistry.onGlCreated()
     }
 
-    private fun recreateSurfaceTextures() {
+    private fun recreateSurfaceTextureA(): SurfaceTexture {
         if (surfaceTextureA != null) {
             surfaceTextureA?.setOnFrameAvailableListener(null)
             surfaceTextureA?.release()
             ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
         }
-        if (surfaceTextureB != null) {
-            surfaceTextureB?.setOnFrameAvailableListener(null)
-            surfaceTextureB?.release()
-            ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
-        }
         pendingSurfaceFramesA.set(0)
-        pendingSurfaceFramesB.set(0)
-
         val stA = SurfaceTexture(renderer.textureIdA()).apply {
             ResourceTracker.onCreated(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
@@ -836,6 +829,17 @@ class PreviewRenderer(
                 }
             }, stCallbackHandler)
         }
+        surfaceTextureA = stA
+        return stA
+    }
+
+    private fun recreateSurfaceTextureB(): SurfaceTexture {
+        if (surfaceTextureB != null) {
+            surfaceTextureB?.setOnFrameAvailableListener(null)
+            surfaceTextureB?.release()
+            ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
+        }
+        pendingSurfaceFramesB.set(0)
         val stB = SurfaceTexture(renderer.textureIdB()).apply {
             ResourceTracker.onCreated(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
@@ -853,9 +857,13 @@ class PreviewRenderer(
                 }
             }, stCallbackHandler)
         }
-
-        surfaceTextureA = stA
         surfaceTextureB = stB
+        return stB
+    }
+
+    private fun recreateSurfaceTextures() {
+        recreateSurfaceTextureA()
+        recreateSurfaceTextureB()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -890,7 +898,9 @@ class PreviewRenderer(
     private fun checkIsCatchingUp(frame: ResolvedFrame, isTransition: Boolean): Boolean {
         // During active scrubbing/flinging: fast keyframe preview is shown, no loader needed.
         // Only signal catching-up (loader) when truly paused and waiting for accurate frame.
-        val isScrubOrFling = playhead.mode == PlayMode.SCRUBBING || playhead.mode == PlayMode.FLINGING
+        val isScrubOrFling = (trimPreviewTimeUs >= 0L) ||
+                playhead.mode == PlayMode.SCRUBBING ||
+                playhead.mode == PlayMode.FLINGING
         if (isScrubOrFling) {
             lastPausedTargetUs = -1L
             pausedCatchUpAttempts = 0
@@ -998,10 +1008,12 @@ class PreviewRenderer(
                 return
             }
 
-            val stA = surfaceTextureA
-            val stB = surfaceTextureB
-            if (stA == null || stB == null) {
-                PreviewEventLog.onBlackoutClearBranch("surface_textures_null", "stA=${stA != null}, stB=${stB != null}")
+            var stA = surfaceTextureA ?: run {
+                PreviewEventLog.onBlackoutClearBranch("surface_textures_null", "stA=false, stB=${surfaceTextureB != null}")
+                return
+            }
+            var stB = surfaceTextureB ?: run {
+                PreviewEventLog.onBlackoutClearBranch("surface_textures_null", "stA=true, stB=false")
                 return
             }
             val clipA = s.project.clips.getOrNull(frame.clipAIndex)
@@ -1019,14 +1031,16 @@ class PreviewRenderer(
                 tm.speedNum.toFloat() / tm.speedDen.coerceAtLeast(1).toFloat()
             } ?: 1.0f
 
-            val isAccurateSeek = forceAccurateSeekPending && playhead.mode == PlayMode.PAUSED
+            val isTrimPreview = trimPreviewTimeUs >= 0L
+            val isAccurateSeek = forceAccurateSeekPending && playhead.mode == PlayMode.PAUSED && !isTrimPreview
             if (isAccurateSeek) {
                 forceAccurateSeekPending = false
             }
-            val isPaused = playhead.mode == PlayMode.PAUSED
-            val isScrubbing = !isAccurateSeek && ((trimPreviewTimeUs >= 0L) ||
+            val isPaused = playhead.mode == PlayMode.PAUSED && !isTrimPreview
+            val isScrubbing = !isAccurateSeek && (isTrimPreview ||
                     playhead.mode == PlayMode.SCRUBBING ||
                     playhead.mode == PlayMode.FLINGING)
+            val effectiveMode = if (isTrimPreview) PlayMode.SCRUBBING else playhead.mode
 
             if (isScrubbing) {
                 standbySlotReadyForClipId = null
@@ -1051,7 +1065,13 @@ class PreviewRenderer(
                                 frameSourceB?.clip?.id != clipA.id ||
                                 frameSourceB?.clip?.path != clipA.path
                         if (clipAChanged) {
+                            val oldPathB = frameSourceB?.clip?.path
                             frameSourceB?.release(synchronous = true)
+                            if (oldPathB != null && oldPathB != clipA.path) {
+                                stB = recreateSurfaceTextureB()
+                            } else {
+                                pendingSurfaceFramesB.set(0)
+                            }
                             frameSourceB = FrameSource(toLegacyClip(clipA), stB).apply { slot = 1 }
                             ResourceTracker.logAliveCounts("slot_recreated_B")
                             currentClipIndexB = frame.clipAIndex
@@ -1066,7 +1086,7 @@ class PreviewRenderer(
                             fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
                         val renderedA = try {
-                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
+                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode) ?: false
                         } catch (e: Exception) {
                             PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsOutgoing_B", e)
                             false
@@ -1114,7 +1134,13 @@ class PreviewRenderer(
                                 frameSourceA?.clip?.id != clipB.id ||
                                 frameSourceA?.clip?.path != clipB.path
                         if (clipBChanged) {
+                            val oldPathA = frameSourceA?.clip?.path
                             frameSourceA?.release(synchronous = true)
+                            if (oldPathA != null && oldPathA != clipB.path) {
+                                stA = recreateSurfaceTextureA()
+                            } else {
+                                pendingSurfaceFramesA.set(0)
+                            }
                             frameSourceA = FrameSource(toLegacyClip(clipB), stA).apply { slot = 0 }
                             ResourceTracker.logAliveCounts("slot_recreated_A")
                             currentClipIndexA = frame.clipBIndex
@@ -1128,7 +1154,7 @@ class PreviewRenderer(
                             fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
                         }
                         val renderedB = try {
-                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
+                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode) ?: false
                         } catch (e: Exception) {
                             PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsIncoming_A", e)
                             false
@@ -1198,7 +1224,13 @@ class PreviewRenderer(
                                 frameSourceA?.clip?.id != clipA.id ||
                                 frameSourceA?.clip?.path != clipA.path
                         if (clipAChanged) {
+                            val oldPathA = frameSourceA?.clip?.path
                             frameSourceA?.release(synchronous = true)
+                            if (oldPathA != null && oldPathA != clipA.path) {
+                                stA = recreateSurfaceTextureA()
+                            } else {
+                                pendingSurfaceFramesA.set(0)
+                            }
                             frameSourceA = FrameSource(toLegacyClip(clipA), stA).apply { slot = 0 }
                             ResourceTracker.logAliveCounts("slot_recreated_A")
                             currentClipIndexA = frame.clipAIndex
@@ -1213,7 +1245,7 @@ class PreviewRenderer(
                             fsOutgoing.ensureDecodedAt(frame.clipASourceUs)
                         }
                         val renderedA = try {
-                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
+                            fsOutgoing?.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode) ?: false
                         } catch (e: Exception) {
                             PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsOutgoing_A", e)
                             false
@@ -1261,7 +1293,13 @@ class PreviewRenderer(
                                 frameSourceB?.clip?.id != clipB.id ||
                                 frameSourceB?.clip?.path != clipB.path
                         if (clipBChanged) {
+                            val oldPathB = frameSourceB?.clip?.path
                             frameSourceB?.release(synchronous = true)
+                            if (oldPathB != null && oldPathB != clipB.path) {
+                                stB = recreateSurfaceTextureB()
+                            } else {
+                                pendingSurfaceFramesB.set(0)
+                            }
                             frameSourceB = FrameSource(toLegacyClip(clipB), stB).apply { slot = 1 }
                             ResourceTracker.logAliveCounts("slot_recreated_B")
                             currentClipIndexB = frame.clipBIndex
@@ -1275,7 +1313,7 @@ class PreviewRenderer(
                             fsIncoming.ensureDecodedAt(frame.clipBSourceUs)
                         }
                         val renderedB = try {
-                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused) ?: false
+                            fsIncoming?.frameAt(frame.clipBSourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode) ?: false
                         } catch (e: Exception) {
                             PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.case1_fsIncoming_B", e)
                             false
@@ -1621,8 +1659,13 @@ class PreviewRenderer(
                         }
                     }
                 } else {
+                    val oldPathA = frameSourceA?.clip?.path
                     frameSourceA?.release(synchronous = true)
-                    pendingSurfaceFramesA.set(0)
+                    if (oldPathA != null && oldPathA != clipA.path) {
+                        stA = recreateSurfaceTextureA()
+                    } else {
+                        pendingSurfaceFramesA.set(0)
+                    }
                     frameSourceA = FrameSource(legacyClipA, stA).apply { slot = 0 }
                     ResourceTracker.logAliveCounts("slot_recreated_A")
                     currentClipIndexA = frame.clipAIndex
@@ -1631,8 +1674,13 @@ class PreviewRenderer(
                 currentClipIndexA = frame.clipAIndex
                 val legacyClipA = toLegacyClip(clipA)
                 if (frameSourceA == null || frameSourceA?.clip?.path != clipA.path) {
+                    val oldPathA = frameSourceA?.clip?.path
                     frameSourceA?.release(synchronous = true)
-                    pendingSurfaceFramesA.set(0)
+                    if (oldPathA != null && oldPathA != clipA.path) {
+                        stA = recreateSurfaceTextureA()
+                    } else {
+                        pendingSurfaceFramesA.set(0)
+                    }
                     frameSourceA = FrameSource(legacyClipA, stA).apply { slot = 0 }
                     ResourceTracker.logAliveCounts("slot_recreated_A")
                 } else {
@@ -1655,7 +1703,7 @@ class PreviewRenderer(
                 }
                 if (fsA.prewarmStage >= 3) {
                     val rendered = try {
-                        fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = playhead.mode)
+                        fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode)
                     } catch (e: Exception) {
                         PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.fsA", e)
                         false
@@ -1676,7 +1724,7 @@ class PreviewRenderer(
                 }
             }
 
-            if (playhead.mode == PlayMode.PLAYING && (fsA?.didReleaseOutputBuffer == true) && pendingSurfaceFramesA.get() == 0) {
+            if ((fsA?.didReleaseOutputBuffer == true) && pendingSurfaceFramesA.get() == 0) {
                 synchronized(frameLockA) {
                     if (pendingSurfaceFramesA.get() == 0) {
                         try {
@@ -1738,8 +1786,13 @@ class PreviewRenderer(
                             frameSourceB?.clip?.id != nextClip.id ||
                             frameSourceB?.clip?.path != nextClip.path ||
                             currentClipIndexB != m) {
+                            val oldPathB = frameSourceB?.clip?.path
                             frameSourceB?.release(synchronous = true)
-                            pendingSurfaceFramesB.set(0)
+                            if (oldPathB != null && oldPathB != nextClip.path) {
+                                stB = recreateSurfaceTextureB()
+                            } else {
+                                pendingSurfaceFramesB.set(0)
+                            }
                             frameSourceB = FrameSource(toLegacyClip(nextClip), stB).apply { slot = 1 }
                             ResourceTracker.logAliveCounts("slot_recreated_B")
                             currentClipIndexB = m
@@ -1967,8 +2020,13 @@ class PreviewRenderer(
                         }
                     }
                 } else {
+                    val oldPathB = frameSourceB?.clip?.path
                     frameSourceB?.release(synchronous = true)
-                    pendingSurfaceFramesB.set(0)
+                    if (oldPathB != null && oldPathB != clipA.path) {
+                        stB = recreateSurfaceTextureB()
+                    } else {
+                        pendingSurfaceFramesB.set(0)
+                    }
                     frameSourceB = FrameSource(legacyClipA, stB).apply { slot = 1 }
                     ResourceTracker.logAliveCounts("slot_recreated_B")
                     currentClipIndexB = frame.clipAIndex
@@ -1977,8 +2035,13 @@ class PreviewRenderer(
                 currentClipIndexB = frame.clipAIndex
                 val legacyClipA = toLegacyClip(clipA)
                 if (frameSourceB == null || frameSourceB?.clip?.path != clipA.path) {
+                    val oldPathB = frameSourceB?.clip?.path
                     frameSourceB?.release(synchronous = true)
-                    pendingSurfaceFramesB.set(0)
+                    if (oldPathB != null && oldPathB != clipA.path) {
+                        stB = recreateSurfaceTextureB()
+                    } else {
+                        pendingSurfaceFramesB.set(0)
+                    }
                     frameSourceB = FrameSource(legacyClipA, stB).apply { slot = 1 }
                     ResourceTracker.logAliveCounts("slot_recreated_B")
                 } else {
@@ -2003,7 +2066,7 @@ class PreviewRenderer(
                 }
                 if (fsB.prewarmStage >= 3) {
                     val rendered = try {
-                        fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = playhead.mode)
+                        fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode)
                     } catch (e: Exception) {
                         PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.fsB", e)
                         false
@@ -2024,7 +2087,7 @@ class PreviewRenderer(
                 }
             }
 
-            if (playhead.mode == PlayMode.PLAYING && (fsB?.didReleaseOutputBuffer == true) && pendingSurfaceFramesB.get() == 0) {
+            if ((fsB?.didReleaseOutputBuffer == true) && pendingSurfaceFramesB.get() == 0) {
                 synchronized(frameLockB) {
                     if (pendingSurfaceFramesB.get() == 0) {
                         try {
@@ -2086,8 +2149,13 @@ class PreviewRenderer(
                             frameSourceA?.clip?.id != nextClip.id ||
                             frameSourceA?.clip?.path != nextClip.path ||
                             currentClipIndexA != m) {
+                            val oldPathA = frameSourceA?.clip?.path
                             frameSourceA?.release(synchronous = true)
-                            pendingSurfaceFramesA.set(0)
+                            if (oldPathA != null && oldPathA != nextClip.path) {
+                                stA = recreateSurfaceTextureA()
+                            } else {
+                                pendingSurfaceFramesA.set(0)
+                            }
                             frameSourceA = FrameSource(toLegacyClip(nextClip), stA).apply { slot = 0 }
                             ResourceTracker.logAliveCounts("slot_recreated_A")
                             currentClipIndexA = m
@@ -2287,7 +2355,7 @@ class PreviewRenderer(
             val activelyCatchingUp = (frameSourceA?.isCatchingUpFromSeek == true) || (frameSourceB?.isCatchingUpFromSeek == true)
             if (wasWaitingInitial && !finalWaiting) {
                 safeRequestRender()
-            } else if (finalWaiting && (playhead.mode != PlayMode.PAUSED || activelyCatchingUp)) {
+            } else if (finalWaiting && (playhead.mode != PlayMode.PAUSED || trimPreviewTimeUs >= 0L || activelyCatchingUp)) {
                 safeRequestRender()
             }
 
@@ -2442,6 +2510,8 @@ class PreviewRenderer(
 
     private fun releaseDecoders(synchronous: Boolean = false) {
         isFirstFrameLatched = false
+        lastPausedTargetUs = -1L
+        pausedCatchUpAttempts = 0
         pendingSurfaceFramesA.set(0)
         pendingSurfaceFramesB.set(0)
         frameSourceA?.release(synchronous = synchronous)
@@ -2460,12 +2530,17 @@ class PreviewRenderer(
         lastTransitionIncomingClipIndex = -1
         lastRenderedTransitionJunction = -1
         smoothedTransitionP = 0f
-        Matrix.setIdentityM(rawMatA, 0)
-        Matrix.setIdentityM(rawMatB, 0)
+        if (context != null) {
+            Matrix.setIdentityM(rawMatA, 0)
+            Matrix.setIdentityM(rawMatB, 0)
+        }
         ResourceTracker.logAliveCounts("releaseDecoders")
     }
 
     fun invalidateDecoders() {
+        trimPreviewTimeUs = -1L
+        forceAccurateSeekPending = false
+        isWaitingForFrame = true
         val gl = glSurfaceView
         if (gl != null) {
             gl.queueEvent {
@@ -2476,7 +2551,9 @@ class PreviewRenderer(
             }
         } else {
             releaseDecoders(synchronous = true)
-            recreateSurfaceTextures()
+            if (surfaceTextureA != null || surfaceTextureB != null) {
+                recreateSurfaceTextures()
+            }
             glSurfaceView?.requestRender()
             onRenderRequested?.invoke()
         }
@@ -2508,7 +2585,7 @@ class PreviewRenderer(
         stopPrefetch()
         releaseDecoders(synchronous = true)
         try {
-            stCallbackThread.quitSafely()
+            stCallbackThread?.quitSafely()
         } catch (_: Throwable) {}
         surfaceTextureA?.setOnFrameAvailableListener(null)
         surfaceTextureA?.release()

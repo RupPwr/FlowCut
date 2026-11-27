@@ -899,15 +899,21 @@ fun TimelineCanvas(
                     var currentOverlayEndUs = initialOverlayEndUs
 
                     val untrimmedDurationUs = if (isTrimCandidate && curClip != null) {
-                        clipNaturalDurationCache.getOrPut(curClip.id) {
-                            val reported = currentGetClipNaturalDurationUs(selectedClipIndex)
-                            maxOf(reported, initialOutUs, msToUs(curClip.durationMs))
-                        }
+                        val reported = currentGetClipNaturalDurationUs(selectedClipIndex)
+                        val resolved = maxOf(
+                            clipNaturalDurationCache[curClip.id] ?: 0L,
+                            reported,
+                            initialOutUs,
+                            msToUs(curClip.durationMs)
+                        )
+                        clipNaturalDurationCache[curClip.id] = resolved
+                        resolved
                     } else 0L
                     val maxSourceUs = maxOf(initialOutUs, untrimmedDurationUs, curClip?.let { msToUs(it.durationMs) } ?: 0L)
 
                     var currentInUs = initialInUs
                     var currentOutUs = initialOutUs
+                    var didStartTrimPreview = false
                     var currentFingerX = down.position.x
                     var accumulatedAutoScrollUs = 0L
                     var autoScrollJob: Job? = null
@@ -972,6 +978,7 @@ fun TimelineCanvas(
                             val startMs = holder.current.main.startMs[selectedClipIndex]
                             maxOf(msToUs(startMs), msToUs(endMs) - 1_000L)
                         }
+                        didStartTrimPreview = true
                         currentOnTrimPreview(trimmedEdgeUs)
                         currentOnWakeFrameDriver()
                     }
@@ -1103,6 +1110,10 @@ fun TimelineCanvas(
                                 autoScrollJob?.cancel()
                                 autoScrollJob = null
                                 activeTrimPlayheadUs.longValue = Long.MIN_VALUE
+                                if (didStartTrimPreview) {
+                                    didStartTrimPreview = false
+                                    currentOnTrimPreview(-1L)
+                                }
                                 isZooming = true
                                 val zoomFactor = event.calculateZoom()
                                 if (!currentIsLoaderActive && zoomFactor != 1f) {
@@ -1436,6 +1447,10 @@ fun TimelineCanvas(
                         autoScrollJob?.cancel()
                         activeTrimPlayheadUs.longValue = Long.MIN_VALUE
                         draggedOverlayId.value = null
+                        if (didStartTrimPreview) {
+                            didStartTrimPreview = false
+                            currentOnTrimPreview(-1L)
+                        }
                         if (isDragging && playhead.mode != PlayMode.FLINGING) {
                             currentOnScrollingStateChanged(false)
                         }

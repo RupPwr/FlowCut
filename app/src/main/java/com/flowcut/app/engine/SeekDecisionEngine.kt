@@ -39,12 +39,14 @@ object SeekDecisionEngine {
         isPaused: Boolean,
         isCatchingUpFromSeek: Boolean,
         syncFramePtsUs: Long? = null,
-        maxCatchUpDistanceUs: Long = 600_000L
+        maxCatchUpDistanceUs: Long = 600_000L,
+        isEos: Boolean = false
     ): SeekDecision {
         val halfFrameUs = (frameDurationUs / 2L).coerceAtLeast(16_000L)
 
         // 1. Guard against infinite retry loops with no progress (Step B.5)
-        if (state.consecutiveNoProgressAttempts >= 3) {
+        // Never silently accept when no frame has ever been rendered during active scrub.
+        if (state.consecutiveNoProgressAttempts >= 3 && !(isScrubbing && lastRenderedPtsUs == -1L)) {
             return SeekDecision(
                 SeekAction.ACCEPT_CURRENT,
                 targetUs,
@@ -54,7 +56,7 @@ object SeekDecisionEngine {
 
         // 2. Fast Scrub: during active scrub, render single nearest sync frame and stop (Step B.4)
         if (isScrubbing) {
-            if (syncFramePtsUs != null && lastRenderedPtsUs != -1L &&
+            if (!isEos && syncFramePtsUs != null && lastRenderedPtsUs != -1L &&
                 kotlin.math.abs(syncFramePtsUs - lastRenderedPtsUs) <= halfFrameUs
             ) {
                 return SeekDecision(
@@ -96,6 +98,7 @@ object SeekDecisionEngine {
         }
 
         // 5. Resumable catch-up: forward progress within same GOP or within catch-up window (Step B.2 & B.3)
+        // If decoder already reached EOS, RESUME_CATCHUP cannot advance and must flush & re-seek.
         val isForward = currentPtsUs != -1L && targetUs >= currentPtsUs - halfFrameUs
         val inSameGop = if (syncFramePtsUs != null) {
             syncFramePtsUs <= currentPtsUs
@@ -103,7 +106,7 @@ object SeekDecisionEngine {
             targetUs - currentPtsUs <= maxCatchUpDistanceUs
         }
 
-        if (isForward && inSameGop && (isCatchingUpFromSeek || targetUs - currentPtsUs <= maxCatchUpDistanceUs)) {
+        if (!isEos && isForward && inSameGop && (isCatchingUpFromSeek || targetUs - currentPtsUs <= maxCatchUpDistanceUs)) {
             return SeekDecision(
                 SeekAction.RESUME_CATCHUP,
                 targetUs,
@@ -111,8 +114,9 @@ object SeekDecisionEngine {
             )
         }
 
-        // 6. Backward jump, initial seek, discontinuous, or beyond GOP: flush and seek
+        // 6. Backward jump, initial seek, EOS, discontinuous, or beyond GOP: flush and seek
         val reason = when {
+            isEos -> "eos_reseek"
             currentPtsUs == -1L -> "initial_seek"
             targetUs < currentPtsUs - halfFrameUs -> "backward_jump"
             else -> "beyond_gop"

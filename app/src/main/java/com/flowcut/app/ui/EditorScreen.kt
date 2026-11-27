@@ -374,6 +374,7 @@ fun EditorScreen(
         var lastReportedSec = -1L
         var lastReportedMode = PlayMode.PAUSED
         var lastRequestedTimeUs = -1L
+        var lastRequestedTrimPreviewUs = -1L
         var lastRequestedMode = PlayMode.PAUSED
         var lastRenderDirtyVersion = -1L
 
@@ -415,6 +416,8 @@ fun EditorScreen(
                 // 3. Skip redundant renders when paused, but never drop renders while waiting for a frame
                 val currentDirtyVersion = stateDirtyCounter.get()
                 val isDirty = currentDirtyVersion != lastRenderDirtyVersion
+                val currentTrimPreviewUs = previewRenderer.trimPreviewTimeUs
+                val trimPreviewChanged = currentTrimPreviewUs != lastRequestedTrimPreviewUs
                 val isPausedJump = (mode == PlayMode.PAUSED || mode == PlayMode.SCRUBBING) &&
                         lastRequestedTimeUs != -1L &&
                         kotlin.math.abs(tUs - lastRequestedTimeUs) > 80_000L
@@ -423,12 +426,14 @@ fun EditorScreen(
                 }
                 val shouldRender = (mode != PlayMode.PAUSED) ||
                         (tUs != lastRequestedTimeUs) ||
+                        trimPreviewChanged ||
                         (mode != lastRequestedMode) ||
                         previewRenderer.isWaitingForFrame ||
                         isDirty
 
                 if (shouldRender) {
                     lastRequestedTimeUs = tUs
+                    lastRequestedTrimPreviewUs = currentTrimPreviewUs
                     lastRequestedMode = mode
                     lastRenderDirtyVersion = currentDirtyVersion
                     if (com.flowcut.app.BuildConfig.PERF_TELEMETRY && mode == PlayMode.PLAYING) {
@@ -528,35 +533,40 @@ fun EditorScreen(
         }
     }
 
-    val replacePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null && selectedClipIndex != null) {
-            resolvedViewModel?.replaceSelectedClipUri(selectedClipIndex, uri) {
+    val currentSelectedClipIndex by rememberUpdatedState(selectedClipIndex)
+    val handleReplaceClipUri: (android.net.Uri) -> Unit = { uri ->
+        val clipIdx = currentSelectedClipIndex
+        if (clipIdx != null) {
+            resolvedViewModel?.replaceSelectedClipUri(clipIdx, uri) {
+                previewRenderer.trimPreviewTimeUs = -1L
                 if (USE_NEW_CORE) {
                     resolvedViewModel?.let { vm ->
                         snapshotHolder.current = vm.getSnapshot()
                     }
                 }
-                previewRenderer.requestRender()
+                val maxTimelineUs = msToUs(snapshotHolder.current.totalMs).coerceAtLeast(0L)
+                val clampedPlayheadUs = playbackController.playhead.timeUs.coerceIn(0L, maxTimelineUs)
+                playbackController.seekTo(clampedPlayheadUs)
+                previewRenderer.invalidateDecoders()
+                previewRenderer.requestAccurateSeek()
                 frameDriver.wake()
             }
+        }
+    }
+
+    val replacePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            handleReplaceClipUri(uri)
         }
     }
 
     val replaceFallbackLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
-        if (uri != null && selectedClipIndex != null) {
-            resolvedViewModel?.replaceSelectedClipUri(selectedClipIndex, uri) {
-                if (USE_NEW_CORE) {
-                    resolvedViewModel?.let { vm ->
-                        snapshotHolder.current = vm.getSnapshot()
-                    }
-                }
-                previewRenderer.requestRender()
-                frameDriver.wake()
-            }
+        if (uri != null) {
+            handleReplaceClipUri(uri)
         }
     }
 
@@ -3588,8 +3598,16 @@ private fun EditorTimelineCanvasHost(
                 }
             },
             onCommitTrim = { k, inUs, outUs, durMs ->
+                previewRenderer.trimPreviewTimeUs = -1L
                 resolvedViewModel?.commitClipTrim(k, inUs, outUs, durMs)
+                if (USE_NEW_CORE) {
+                    resolvedViewModel?.let { vm ->
+                        snapshotHolder.current = vm.getSnapshot()
+                    }
+                }
                 onCommitTrim(k, inUs, outUs, durMs)
+                previewRenderer.requestAccurateSeek()
+                frameDriver.wake()
             },
             onCommitOverlayTrim = { id, startUs, endUs ->
                 resolvedViewModel?.commitOverlayTrim(id, startUs, endUs)
@@ -3612,7 +3630,15 @@ private fun EditorTimelineCanvasHost(
                 frameDriver.wake()
             },
             onTrimPreview = { previewUs ->
+                val prev = previewRenderer.trimPreviewTimeUs
                 previewRenderer.trimPreviewTimeUs = previewUs
+                if (previewUs >= 0L) {
+                    if (previewUs != prev) {
+                        previewRenderer.requestRender()
+                    }
+                } else if (prev >= 0L) {
+                    previewRenderer.requestAccurateSeek()
+                }
                 frameDriver.wake()
             },
             getClipNaturalDurationUs = { k ->
