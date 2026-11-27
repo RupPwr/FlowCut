@@ -20,5 +20,8 @@ data class QualityBudget(
     val pipDecodeThreads: Int,
     val overlayTexBudgetMb: Int,
     val pipUpdateFps: Int,
-    val autoProxy: Boolean
+    val autoProxy: Boolean,
+    val thumbnailMemEntries: Int = 256,
+    val recommendedExportResolution: Int = 1080,
+    val recommendedExportFps: Int = 30
 )

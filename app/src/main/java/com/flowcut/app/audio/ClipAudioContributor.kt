@@ -10,6 +10,7 @@ import com.flowcut.app.core.timeline.SnapshotHolder
 import com.flowcut.app.engine.LayerType
 import com.flowcut.app.engine.OverlayItem
 import com.flowcut.app.engine.PreviewRenderer
+import com.flowcut.app.engine.RenderStateStore
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
@@ -59,12 +60,18 @@ class ClipAudioContributor(
         const val LOOKAHEAD_PREWARM_US = 1_000_000L // 1 second lookahead
         const val MAX_SCRATCH_SAMPLES = 19200 // 9600 frames * 2 channels (200 ms at 48 kHz)
 
-        // Shared lock-free state for audio volume & track mute
-        @Volatile var isMainTrackMuted: Boolean = false
-        val clipVolumes = ConcurrentHashMap<String, Float>()
+        // Shared lock-free state delegated to unified RenderStateStore
+        var isMainTrackMuted: Boolean
+            get() = RenderStateStore.isMainTrackMuted
+            set(value) { RenderStateStore.isMainTrackMuted = value }
 
-        // Active overlay audio items across 4 audio rows (updated by EditorViewModel / PreviewRenderer)
-        @Volatile var activeAudioOverlays: List<OverlayItem> = emptyList()
+        val clipVolumes: ConcurrentHashMap<String, Float>
+            get() = RenderStateStore.clipVolumes
+
+        // Active overlay audio items across 4 audio rows
+        var activeAudioOverlays: List<OverlayItem>
+            get() = RenderStateStore.activeAudioOverlays
+            set(value) { RenderStateStore.activeAudioOverlays = value }
 
         // Shared thread-safe decoder cache for audio overlay items
         val sharedOverlayDecoders = ConcurrentHashMap<String, ClipAudioDecoder>()
@@ -121,20 +128,11 @@ class ClipAudioContributor(
             } catch (_: Throwable) {}
         }
 
-        fun getClipVolume(clipId: String): Float = clipVolumes[clipId] ?: 1.0f
+        fun getClipVolume(clipId: String): Float = RenderStateStore.getClipVolume(clipId)
 
-        fun setClipVolume(clipId: String, volume: Float) {
-            val clamped = volume.coerceIn(0.0f, 2.0f)
-            clipVolumes[clipId] = clamped
-            if (clamped > 0.0001f) {
-                isMainTrackMuted = false
-            }
-        }
+        fun setClipVolume(clipId: String, volume: Float) = RenderStateStore.setClipVolume(clipId, volume)
 
-        fun syncVolumes(volumes: Map<String, Float>) {
-            clipVolumes.clear()
-            clipVolumes.putAll(volumes)
-        }
+        fun syncVolumes(volumes: Map<String, Float>) = RenderStateStore.syncVolumes(volumes)
 
         /**
          * Maps slider volume (0.0f..2.0f) to effective perceptual gain:
@@ -160,6 +158,20 @@ class ClipAudioContributor(
             val sign = if (x >= 0f) 1f else -1f
             val diff = absX - 0.6f
             return sign * (0.6f + 0.39f * (diff / (0.39f + diff)))
+        }
+
+        /**
+         * Equal-power crossfade gains (cos^2 + sin^2 = 1.0) so transitions maintain
+         * steady loudness without the -3 dB midpoint dip of linear crossfades.
+         */
+        fun equalPowerGainA(progress: Float): Float {
+            val p = progress.coerceIn(0f, 1f)
+            return kotlin.math.cos(p.toDouble() * (Math.PI * 0.5)).toFloat()
+        }
+
+        fun equalPowerGainB(progress: Float): Float {
+            val p = progress.coerceIn(0f, 1f)
+            return kotlin.math.sin(p.toDouble() * (Math.PI * 0.5)).toFloat()
         }
     }
 
@@ -306,8 +318,8 @@ class ClipAudioContributor(
                             val clipB = clips[bIndex]
                             val volA = computeEffectiveGain(getClipVolume(clipA.id))
                             val volB = computeEffectiveGain(getClipVolume(clipB.id))
-                            val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
-                            val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
+                            val gainA = equalPowerGainA(activeSet.linearP) * volA
+                            val gainB = equalPowerGainB(activeSet.linearP) * volB
 
                             val mapA = clipA.map()
                             if (mapA.speedNum > 0) {
@@ -463,8 +475,8 @@ class ClipAudioContributor(
                             val clipB = clips[bIndex]
                             val volA = computeEffectiveGain(getClipVolume(clipA.id))
                             val volB = computeEffectiveGain(getClipVolume(clipB.id))
-                            val gainA = (1.0f - activeSet.linearP).coerceIn(0f, 1f) * volA
-                            val gainB = activeSet.linearP.coerceIn(0f, 1f) * volB
+                            val gainA = equalPowerGainA(activeSet.linearP) * volA
+                            val gainB = equalPowerGainB(activeSet.linearP) * volB
 
                             val mapA = clipA.map()
                             if (mapA.speedNum > 0) {

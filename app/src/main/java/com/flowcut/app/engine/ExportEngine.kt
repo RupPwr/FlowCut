@@ -561,9 +561,15 @@ class ExportEngine(private val context: Context) {
             fun feedAudioInput(data: ByteArray, isEos: Boolean, ptsUs: Long) {
                 var offset = 0
                 var remaining = data.size
-                while (remaining > 0 || isEos) {
+                var eosQueued = !isEos
+                var stalledRetries = 0
+                while (remaining > 0 || !eosQueued) {
+                    if (isCancelled.get()) {
+                        throw CancellationException("Export cancelled by user")
+                    }
                     val inIndex = aEnc.dequeueInputBuffer(10_000L)
                     if (inIndex >= 0) {
+                        stalledRetries = 0
                         val inBuf = aEnc.getInputBuffer(inIndex)
                         if (inBuf != null) {
                             inBuf.clear()
@@ -573,10 +579,26 @@ class ExportEngine(private val context: Context) {
                                 offset += toWrite
                                 remaining -= toWrite
                             }
-                            val flags = if (isEos && remaining == 0) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
+                            val sendEos = isEos && remaining == 0
+                            val flags = if (sendEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
                             aEnc.queueInputBuffer(inIndex, 0, toWrite, ptsUs, flags)
+                            if (sendEos) eosQueued = true
+                        } else {
+                            // Defensive fallback: return buffer to codec and avoid spinning forever
+                            val sendEos = isEos && remaining == 0
+                            val flags = if (sendEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
+                            aEnc.queueInputBuffer(inIndex, 0, 0, ptsUs, flags)
+                            if (sendEos) eosQueued = true
+                            break
                         }
-                        if (remaining == 0) break
+                        if (remaining == 0 && eosQueued) break
+                    } else {
+                        // Drain encoded audio output so the codec can recycle input buffers
+                        drainAudio(false)
+                        stalledRetries++
+                        if (stalledRetries > 200) {
+                            throw IllegalStateException("Audio encoder input buffer stalled during export")
+                        }
                     }
                 }
             }
@@ -791,42 +813,29 @@ class ExportEngine(private val context: Context) {
                 drawSpec.aspectRatio = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
 
                 val timeSec = (res.tUs.toDouble() / 1_000_000.0).toFloat()
-                val st = clipA.renderParams.filter
-                var filterId = st.filterPresetId
-                var filterInt = st.filterIntensity
-                var effectId = st.effectPresetId
-                var effectInt = st.effectIntensity
-
                 val plan = PreviewRenderer.currentLayerPlan
-                if (plan.segments.isNotEmpty()) {
-                    val found = plan.resolveAt(res.tUs, activeLayerSet)
-                    if (found && activeLayerSet.filterCount > 0) {
-                        for (f in 0 until activeLayerSet.filterCount) {
-                            val idx = activeLayerSet.activeFilterIndices[f]
-                            val item = plan.items.getOrNull(idx) ?: continue
-                            if (item.type == LayerType.FILTER && item.filterPresetId > 0) {
-                                filterId = item.filterPresetId
-                                filterInt = item.filterIntensity
-                            }
-                            if (item.type == LayerType.EFFECT && item.effectPresetId > 0) {
-                                effectId = item.effectPresetId
-                                effectInt = item.effectIntensity
-                            }
-                        }
-                    }
-                }
+                val resolvedFilter = PreviewRenderer.resolveFilterAndEffectState(
+                    clip = clipA,
+                    liveOverride = if (PreviewRenderer.liveFilterOverrides.isNotEmpty()) {
+                        PreviewRenderer.liveFilterOverrides[clipA.id]
+                    } else null,
+                    plan = plan,
+                    tUs = res.tUs,
+                    activeLayerSet = activeLayerSet
+                )
 
-                drawSpec.filterPresetId = filterId
-                drawSpec.filterIntensity = filterInt
-                drawSpec.effectPresetId = effectId
-                drawSpec.effectIntensity = effectInt
+                drawSpec.filterPresetId = resolvedFilter.filterPresetId
+                drawSpec.filterIntensity = resolvedFilter.filterIntensity
+                drawSpec.effectPresetId = resolvedFilter.effectPresetId
+                drawSpec.effectIntensity = resolvedFilter.effectIntensity
                 drawSpec.timeSec = timeSec
 
+                // Match PreviewRenderer exactly: disable scissor whenever bgMode auto-fills blur/color/gradient
                 val needsScissor = if (isTransition) {
-                    (bgA.type == BackgroundType.NONE && bgB.type == BackgroundType.NONE) &&
+                    (bgModeA == 0 && bgModeB == 0) &&
                         PreviewRenderer.computeScissorRect(width, height, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 } else {
-                    (bgA.type == BackgroundType.NONE) &&
+                    (bgModeA == 0) &&
                         PreviewRenderer.computeScissorRect(width, height, transformA, clipA.displayWidth, clipA.displayHeight, scissorRect)
                 }
                 if (needsScissor) {
@@ -843,10 +852,8 @@ class ExportEngine(private val context: Context) {
                 Matrix.multiplyMM(matA, 0, rawMatA, 0, fgNormMatA, 0)
 
                 // Overlay compositor hook: render active overlay layers for this timestamp
-                if (plan.segments.isNotEmpty()) {
-                    val found = plan.resolveAt(res.tUs, activeLayerSet)
-                    if (found && activeLayerSet.visualCount > 0) {
-                        for (v in 0 until activeLayerSet.visualCount) {
+                if (plan.segments.isNotEmpty() && activeLayerSet.visualCount > 0) {
+                    for (v in 0 until activeLayerSet.visualCount) {
                             val itemIndex = activeLayerSet.activeVisualIndices[v]
                             val item = plan.items.getOrNull(itemIndex) ?: continue
                             val effTransform = animEvaluator.evaluate(item, res.tUs)
@@ -898,7 +905,6 @@ class ExportEngine(private val context: Context) {
                                     adjustSaturation = item.adjustSaturation
                                 )
                             }
-                        }
                     }
                 }
 

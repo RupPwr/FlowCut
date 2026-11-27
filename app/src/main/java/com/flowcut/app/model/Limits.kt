@@ -41,8 +41,8 @@ const val TRANSITION_STEP_MS = 100L
 const val TRANSITION_DEFAULT_MS = 800L
 const val MIN_SOLO_MS = 200L
 const val UNDO_LIMIT = 30
-const val PREVIEW_W = 540
-const val PREVIEW_H = 960
+const val PREVIEW_W = 720
+const val PREVIEW_H = 1280
 @Deprecated("Use OutputSpec instead")
 const val EXPORT_W = 1080
 @Deprecated("Use OutputSpec instead")

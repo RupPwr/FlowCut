@@ -35,13 +35,13 @@ import java.util.concurrent.ConcurrentHashMap
 class ThumbnailService(
     val diskDir: File,
     private val scope: CoroutineScope,
-    private val maxMemEntries: Int = 256,
+    @Volatile private var maxMemEntries: Int = defaultMaxMemEntries,
     private val maxDiskBytes: Long = DEFAULT_MAX_DISK_BYTES
 ) {
     constructor(
         context: Context,
         scope: CoroutineScope,
-        maxMemEntries: Int = 256,
+        maxMemEntries: Int = defaultMaxMemEntries,
         maxDiskBytes: Long = DEFAULT_MAX_DISK_BYTES
     ) : this(
         context.noBackupFilesDir.resolve("main_thumbnails"),
@@ -115,6 +115,7 @@ class ThumbnailService(
     }
 
     init {
+        activeInstance = this
         try {
             if (!diskDir.exists()) {
                 diskDir.mkdirs()
@@ -210,7 +211,30 @@ class ThumbnailService(
         }
         retrieverCache.clear()
         ready = emptyMap()
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         checkGeneratingState()
+    }
+
+    /**
+     * Dynamically shrinks in-memory filmstrip bitmap cache under low-RAM or thermal pressure
+     * without wiping the most recently used tiles currently visible on screen.
+     */
+    @Synchronized
+    fun trimMemory(maxKeepEntries: Int) {
+        val target = maxKeepEntries.coerceAtLeast(0)
+        if (ready.size <= target) return
+        if (target == 0) {
+            ready = emptyMap()
+            return
+        }
+        val next = LinkedHashMap(ready)
+        while (next.size > target) {
+            val oldest = next.keys.firstOrNull() ?: break
+            next.remove(oldest)
+        }
+        ready = next
     }
 
     /**
@@ -335,6 +359,16 @@ class ThumbnailService(
         const val TILE_WIDTH_PX = 80
         const val TILE_HEIGHT_PX = 80
         const val DEFAULT_MAX_DISK_BYTES = 100L * 1024L * 1024L // 100 MB
+
+        @Volatile
+        var defaultMaxMemEntries: Int = 256
+
+        @Volatile
+        var activeInstance: ThumbnailService? = null
+
+        fun trimActiveMemory(maxKeepEntries: Int) {
+            activeInstance?.trimMemory(maxKeepEntries)
+        }
 
         /**
          * Quantizes timestamp to nearest bucket so timeline scrub hits cached keyframes.

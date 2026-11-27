@@ -34,32 +34,32 @@ data class ClipColorScheme(
 
 val LightColors = FlowCutColors(
     surface0 = Color(0xFFFFFFFF),
-    surface1 = Color(0xFFF5F4EF),
-    surface2 = Color(0xFFFFFFFF),
-    textPrimary = Color(0xFF141413),
-    textSecondary = Color(0xFF5F5E5A),
-    textMuted = Color(0xFF888780),
-    border = Color(0x26141413),
-    borderStrong = Color(0x40141413),
-    accent = Color(0xFF185FA5),
+    surface1 = Color(0xFFF5F4F7),
+    surface2 = Color(0xFFEBEAEF),
+    textPrimary = Color(0xFF141416),
+    textSecondary = Color(0xFF5F5E66),
+    textMuted = Color(0xFF8C8B94),
+    border = Color(0x26141416),
+    borderStrong = Color(0x40141416),
+    accent = Color(0xFFFF2D55),
     onAccent = Color(0xFFFFFFFF),
-    bgAccent = Color(0xFFE6F1FB),
-    danger = Color(0xFFA32D2D)
+    bgAccent = Color(0xFFFFE5EB),
+    danger = Color(0xFFDC2626)
 )
 
 val DarkColors = FlowCutColors(
-    surface0 = Color(0xFF141413),
-    surface1 = Color(0xFF262624),
-    surface2 = Color(0xFF30302E),
-    textPrimary = Color(0xFFF5F4EF),
-    textSecondary = Color(0xFFB4B2A9),
-    textMuted = Color(0xFF888780),
-    border = Color(0x26FFFFFF),
-    borderStrong = Color(0x40FFFFFF),
-    accent = Color(0xFF85B7EB),
-    onAccent = Color(0xFF042C53),
-    bgAccent = Color(0xFF0C447C),
-    danger = Color(0xFFF09595)
+    surface0 = Color(0xFF0E0E10),
+    surface1 = Color(0xFF18181C),
+    surface2 = Color(0xFF24242A),
+    textPrimary = Color(0xFFF7F7FA),
+    textSecondary = Color(0xFFA1A1AA),
+    textMuted = Color(0xFF71717A),
+    border = Color(0x24FFFFFF),
+    borderStrong = Color(0x3DFFFFFF),
+    accent = Color(0xFFFF2D55),
+    onAccent = Color(0xFFFFFFFF),
+    bgAccent = Color(0x2EFF2D55),
+    danger = Color(0xFFEF4444)
 )
 
 fun getClipColors(colorIndex: Int, isDark: Boolean): ClipColorScheme {
@@ -82,7 +82,7 @@ fun getClipColors(colorIndex: Int, isDark: Boolean): ClipColorScheme {
     }
 }
 
-val LocalFlowCutColors = staticCompositionLocalOf { LightColors }
+val LocalFlowCutColors = staticCompositionLocalOf { DarkColors }
 
 object FlowCutTheme {
     val colors: FlowCutColors
@@ -92,7 +92,7 @@ object FlowCutTheme {
 
 @Composable
 fun FlowCutTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val flowCutColors = if (darkTheme) DarkColors else LightColors

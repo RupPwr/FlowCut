@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 fun TopBar(
     onBackClick: () -> Unit,
     onExportClick: () -> Unit,
+    title: String = "Project 1",
     modifier: Modifier = Modifier
 ) {
     val colors = FlowCutTheme.colors
@@ -49,9 +50,9 @@ fun TopBar(
             )
         }
 
-        // Center: "My reel 01", 14 sp medium
+        // Center: Project Title
         Text(
-            text = "My reel 01",
+            text = title,
             color = colors.textPrimary,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium,

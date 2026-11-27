@@ -43,23 +43,21 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.flowcut.app.editor.AppScreen
 import com.flowcut.app.editor.EditorViewModel
-import com.flowcut.app.engine.PreviewEngine
 import com.flowcut.app.engine.TransitionRenderer
 import com.flowcut.app.model.MAX_CLIPS
+import com.flowcut.app.shared.ExportState
 import com.flowcut.app.ui.EditorScreen
 import com.flowcut.app.engine.perf.SessionGuard
 import com.flowcut.app.engine.perf.PreviewEventLog
 import com.flowcut.app.engine.perf.PreviewEventType
 import com.flowcut.app.engine.perf.PreviewWatchdog
 import com.flowcut.app.engine.perf.ResourceTracker
-import com.flowcut.app.ui.ExportState
 import com.flowcut.app.ui.FlowCutTheme
 import com.flowcut.app.ui.HomeScreen
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: EditorViewModel by viewModels()
-    private var previewEngine: PreviewEngine? = null
     private var jankStats: androidx.metrics.performance.JankStats? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,17 +82,6 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             // Best effort
         }
-
-        val engine = if (!com.flowcut.app.engine.USE_NEW_CORE) {
-            PreviewEngine(
-                context = this,
-                onPlayheadUpdate = { ms -> viewModel.onPlayheadUpdate(ms) },
-                onPlaybackStateChange = { playing -> viewModel.onPlaybackStateChange(playing) }
-            ).also {
-                previewEngine = it
-                viewModel.initPreviewEngine(it)
-            }
-        } else null
 
         val importUriString = intent?.getStringExtra("import_uri")
         if (importUriString != null) {
@@ -252,13 +239,18 @@ class MainActivity : ComponentActivity() {
                     AppScreen.HOME -> {
                         HomeScreen(
                             currentProject = uiState.project,
+                            drafts = uiState.savedDrafts,
                             onNewProjectClick = openNewProjectPicker,
                             onResumeProjectClick = { viewModel.openExistingProject() },
                             onResetAndNewProjectClick = {
                                 viewModel.resetProject {
                                     openNewProjectPicker()
                                 }
-                            }
+                            },
+                            onOpenDraft = { draftId -> viewModel.openDraft(draftId) },
+                            onRenameDraft = { draftId, title -> viewModel.renameDraft(draftId, title) },
+                            onDuplicateDraft = { draftId -> viewModel.duplicateDraft(draftId) },
+                            onDeleteDraft = { draftId -> viewModel.deleteDraft(draftId) }
                         )
                     }
 
@@ -271,7 +263,7 @@ class MainActivity : ComponentActivity() {
                             canRedo = uiState.canRedo,
                             selectedClipIndex = uiState.selectedClipIndex,
                             selectedJunctionIndex = uiState.selectedJunctionIndex,
-                            glSurfaceView = engine?.glSurfaceView,
+                            glSurfaceView = null,
                             exportSheetVisible = uiState.exportSheetVisible,
                             durationSheetVisible = uiState.durationSheetVisible,
                             exportState = uiState.exportState,

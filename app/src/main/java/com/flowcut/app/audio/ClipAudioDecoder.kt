@@ -9,6 +9,7 @@ import com.flowcut.app.core.time.AUDIO_FRAMES_PER_MS
 import com.flowcut.app.core.time.US_PER_MS
 import com.flowcut.app.core.time.usToAudioFrames
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.locks.ReentrantLock
@@ -54,9 +55,16 @@ class ClipAudioDecoder(val filePath: String) {
     private var srcChannels: Int = TARGET_CHANNELS
     private var srcPcmEncoding: Int = AudioFormat.ENCODING_PCM_16BIT
 
-    // Fast-path in-memory PCM data for WAV files (zero latency, zero allocations on audio thread)
+    // Fast-path in-memory PCM data for small WAV files (<= 4 MB, zero allocations on audio thread)
     private var wavPcmData: FloatArray? = null
     private var wavTotalFrames: Int = 0
+
+    // Bounded streaming path for large WAV files (> 4 MB) into pcmBuffer ring buffer (prevents OOM)
+    private var wavStreamRaf: RandomAccessFile? = null
+    private var wavMeta: WavMetadata? = null
+    private var wavRemainingBytes: Long = 0L
+    private var wavChunkBytes: ByteArray? = null
+    private var wavChunkBuf: ByteBuffer? = null
 
     // Sample-continuous tracking to eliminate click/pop artifacts across split audio segments
     @Volatile var lastReadEndSourceFrame: Long = -1L
@@ -155,118 +163,52 @@ class ClipAudioDecoder(val filePath: String) {
     }
 
     private fun prepareWav(file: File): Boolean {
+        var raf: RandomAccessFile? = null
         try {
-            val bytes = file.readBytes()
-            if (bytes.size < 44) return false
-            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            raf = RandomAccessFile(file, "r")
+            val meta = WavHeaderParser.parse(raf) ?: return false
 
-            val riff = ByteArray(4)
-            buf.get(riff)
-            if (String(riff, Charsets.US_ASCII) != "RIFF") return false
-            buf.getInt() // total file size - 8
-            val wave = ByteArray(4)
-            buf.get(wave)
-            if (String(wave, Charsets.US_ASCII) != "WAVE") return false
+            srcSampleRate = meta.sampleRate
+            srcChannels = meta.channels
+            srcPcmEncoding = AudioFormat.ENCODING_PCM_16BIT
 
-            var channels = 2
-            var sampleRate = TARGET_SAMPLE_RATE
-            var bitsPerSample = 16
-            var dataOffset = -1
-            var dataSize = 0
-
-            while (buf.remaining() >= 8) {
-                val chunkIdBytes = ByteArray(4)
-                buf.get(chunkIdBytes)
-                val chunkId = String(chunkIdBytes, Charsets.US_ASCII)
-                val chunkSize = buf.getInt()
-
-                if (chunkId == "fmt ") {
-                    val fmtStart = buf.position()
-                    if (chunkSize >= 16) {
-                        buf.getShort() // audioFormat (1 = PCM)
-                        channels = buf.getShort().toInt() and 0xFFFF
-                        sampleRate = buf.getInt()
-                        buf.getInt() // byteRate
-                        buf.getShort() // blockAlign
-                        bitsPerSample = buf.getShort().toInt() and 0xFFFF
-                    }
-                    val nextPos = fmtStart + chunkSize
-                    if (nextPos in 0..buf.limit()) {
-                        buf.position(nextPos)
-                    } else {
-                        break
-                    }
-                } else if (chunkId == "data") {
-                    dataOffset = buf.position()
-                    dataSize = minOf(chunkSize, buf.remaining())
-                    break
-                } else {
-                    val nextPos = buf.position() + chunkSize
-                    if (nextPos in 0..buf.limit()) {
-                        buf.position(nextPos)
-                    } else {
-                        break
-                    }
-                }
-            }
-
-            if (dataOffset < 0 || dataSize <= 0 || channels <= 0 || sampleRate <= 0) return false
-
-            buf.position(dataOffset)
-            if (bitsPerSample == 16) {
-                val bytesPerFrame = channels * 2
-                val srcFrames = dataSize / bytesPerFrame
-                if (srcFrames <= 0) return false
-
-                val srcFloats = FloatArray(srcFrames * channels)
-                var sIdx = 0
-                for (f in 0 until srcFrames) {
-                    for (c in 0 until channels) {
-                        val s16 = buf.getShort().toInt()
-                        srcFloats[sIdx++] = (s16 / 32768.0f).coerceIn(-1.0f, 1.0f)
-                    }
-                }
-
-                val targetFrames = if (sampleRate == TARGET_SAMPLE_RATE) {
-                    srcFrames
-                } else {
-                    ((srcFrames.toLong() * TARGET_SAMPLE_RATE) / sampleRate).toInt()
-                }
-
-                val pcm = FloatArray(targetFrames * TARGET_CHANNELS)
-                val rateRatio = sampleRate.toDouble() / TARGET_SAMPLE_RATE.toDouble()
-
-                for (f in 0 until targetFrames) {
-                    val exactSrc = f.toDouble() * rateRatio
-                    val f0 = exactSrc.toInt().coerceIn(0, srcFrames - 1)
-                    val f1 = (f0 + 1).coerceIn(0, srcFrames - 1)
-                    val frac = (exactSrc - f0.toDouble()).toFloat()
-
-                    val dstIdx = f shl 1
-                    if (channels == 1) {
-                        val s0 = srcFloats[f0]
-                        val s1 = srcFloats[f1]
-                        val s = s0 * (1f - frac) + s1 * frac
-                        pcm[dstIdx] = s
-                        pcm[dstIdx + 1] = s
-                    } else {
-                        val s0L = srcFloats[f0 * channels]
-                        val s0R = srcFloats[f0 * channels + 1]
-                        val s1L = srcFloats[f1 * channels]
-                        val s1R = srcFloats[f1 * channels + 1]
-                        pcm[dstIdx] = s0L * (1f - frac) + s1L * frac
-                        pcm[dstIdx + 1] = s0R * (1f - frac) + s1R * frac
-                    }
-                }
-
+            if (meta.dataSize <= WavHeaderParser.MAX_IN_MEMORY_WAV_BYTES) {
+                val pcm = WavHeaderParser.decodeSmallWavToStereo48k(raf, meta, TARGET_SAMPLE_RATE) ?: return false
+                try { raf.close() } catch (_: Throwable) {}
+                raf = null
                 wavPcmData = pcm
-                wavTotalFrames = targetFrames
+                wavTotalFrames = pcm.size / TARGET_CHANNELS
                 hasAudio = true
                 isPrepared = true
                 return true
             }
+
+            // Large WAV (> 4 MB): stream via RandomAccessFile into the bounded 1.1 MB ring buffer
+            val framesPerChunk = (16384 / meta.bytesPerSrcFrame).coerceAtLeast(1)
+            val chunkBytes = ByteArray(framesPerChunk * meta.bytesPerSrcFrame)
+            wavStreamRaf = raf
+            wavMeta = meta
+            wavChunkBytes = chunkBytes
+            wavChunkBuf = ByteBuffer.wrap(chunkBytes).order(ByteOrder.LITTLE_ENDIAN)
+            wavRemainingBytes = meta.dataSize
+            raf.seek(meta.dataOffset)
+            raf = null // ownership transferred to wavStreamRaf
+
+            hasAudio = true
+            isPrepared = true
+            internalSeekToFrame(0L, maxIterations = 12, targetMinFrames = PREFILL_FRAMES / 2)
+            return true
         } catch (_: Throwable) {
             // Fall back to MediaExtractor if parsing fails
+            try { raf?.close() } catch (_: Throwable) {}
+            try { wavStreamRaf?.close() } catch (_: Throwable) {}
+            wavStreamRaf = null
+            wavMeta = null
+            wavChunkBytes = null
+            wavChunkBuf = null
+            wavRemainingBytes = 0L
+        } finally {
+            try { raf?.close() } catch (_: Throwable) {}
         }
         return false
     }
@@ -284,6 +226,44 @@ class ClipAudioDecoder(val filePath: String) {
 
     private fun internalSeekToFrame(targetFrame: Long, maxIterations: Int = 40, targetMinFrames: Int = PREFILL_FRAMES) {
         if (!hasAudio || !isPrepared) return
+
+        // Streaming large-WAV seek path (O(1) file seek, zero codec flush overhead)
+        val raf = wavStreamRaf
+        val meta = wavMeta
+        if (raf != null && meta != null) {
+            try {
+                lastReadEndSourceFrame = -1L
+                val clampedTargetFrame = maxOf(0L, targetFrame)
+                val srcFrame = if (meta.sampleRate == TARGET_SAMPLE_RATE) {
+                    clampedTargetFrame
+                } else {
+                    (clampedTargetFrame * meta.sampleRate.toLong()) / TARGET_SAMPLE_RATE.toLong()
+                }.coerceIn(0L, meta.totalSrcFrames)
+
+                val byteOffset = srcFrame * meta.bytesPerSrcFrame.toLong()
+                raf.seek(meta.dataOffset + byteOffset)
+                wavRemainingBytes = (meta.dataSize - byteOffset).coerceAtLeast(0L)
+
+                inputEos = wavRemainingBytes <= 0L
+                outputEos = wavRemainingBytes <= 0L
+                bufferStartFrame = clampedTargetFrame
+                writeFrame = clampedTargetFrame
+                bufferedFrames = 0
+                resamplePhase = 0.0
+                prevSrcSampleL = 0f
+                prevSrcSampleR = 0f
+
+                var iterations = 0
+                while (bufferedFrames < targetMinFrames && !outputEos && iterations < maxIterations) {
+                    if (!internalDecodeChunk()) break
+                    iterations++
+                }
+            } catch (_: Throwable) {
+                outputEos = true
+            }
+            return
+        }
+
         val ext = extractor ?: return
         val dec = codec ?: return
 
@@ -669,6 +649,51 @@ class ClipAudioDecoder(val filePath: String) {
     }
 
     private fun internalDecodeChunk(timeoutUs: Long = DECODE_TIMEOUT_US): Boolean {
+        val raf = wavStreamRaf
+        val meta = wavMeta
+        val chunkBytes = wavChunkBytes
+        val chunkBuf = wavChunkBuf
+        if (raf != null && meta != null && chunkBytes != null && chunkBuf != null) {
+            if (wavRemainingBytes <= 0L) {
+                inputEos = true
+                outputEos = true
+                return false
+            }
+            return try {
+                val maxRead = minOf(chunkBytes.size.toLong(), wavRemainingBytes).toInt()
+                val alignedMax = (maxRead / meta.bytesPerSrcFrame) * meta.bytesPerSrcFrame
+                if (alignedMax <= 0) {
+                    inputEos = true
+                    outputEos = true
+                    return false
+                }
+                val read = raf.read(chunkBytes, 0, alignedMax)
+                if (read <= 0) {
+                    wavRemainingBytes = 0L
+                    inputEos = true
+                    outputEos = true
+                    return false
+                }
+                val usable = (read / meta.bytesPerSrcFrame) * meta.bytesPerSrcFrame
+                wavRemainingBytes = (wavRemainingBytes - read).coerceAtLeast(0L)
+                if (wavRemainingBytes <= 0L) {
+                    inputEos = true
+                    outputEos = true
+                }
+                if (usable > 0) {
+                    chunkBuf.position(0)
+                    chunkBuf.limit(usable)
+                    appendPcm(chunkBuf)
+                    true
+                } else {
+                    false
+                }
+            } catch (_: Throwable) {
+                outputEos = true
+                false
+            }
+        }
+
         val ext = extractor ?: return false
         val dec = codec ?: return false
 
@@ -790,18 +815,40 @@ class ClipAudioDecoder(val filePath: String) {
                 srcIndex++
             }
         } else {
-            // Float PCM path
+            // Float PCM path (with full resampling support when srcSampleRate != TARGET_SAMPLE_RATE)
             val floatBuf = byteBuf.asFloatBuffer()
             val totalSrcFrames = floatBuf.remaining() / channels
             if (totalSrcFrames <= 0) return
 
+            if (srcSampleRate == TARGET_SAMPLE_RATE) {
+                for (f in 0 until totalSrcFrames) {
+                    val sL = floatBuf.get()
+                    val sR = if (channels > 1) floatBuf.get() else sL
+                    for (c in 2 until channels) {
+                        floatBuf.get()
+                    }
+                    writeSampleToRing(sL, sR)
+                }
+                return
+            }
+
+            val step = srcSampleRate.toDouble() / TARGET_SAMPLE_RATE.toDouble()
             for (f in 0 until totalSrcFrames) {
                 val sL = floatBuf.get()
                 val sR = if (channels > 1) floatBuf.get() else sL
                 for (c in 2 until channels) {
                     floatBuf.get()
                 }
-                writeSampleToRing(sL, sR)
+                while (resamplePhase < 1.0) {
+                    val frac = resamplePhase.toFloat()
+                    val outL = prevSrcSampleL * (1f - frac) + sL * frac
+                    val outR = prevSrcSampleR * (1f - frac) + sR * frac
+                    writeSampleToRing(outL, outR)
+                    resamplePhase += step
+                }
+                resamplePhase -= 1.0
+                prevSrcSampleL = sL
+                prevSrcSampleR = sR
             }
         }
     }
@@ -841,6 +888,15 @@ class ClipAudioDecoder(val filePath: String) {
             extractor?.release()
         } catch (_: Throwable) {}
         extractor = null
+
+        try {
+            wavStreamRaf?.close()
+        } catch (_: Throwable) {}
+        wavStreamRaf = null
+        wavMeta = null
+        wavChunkBytes = null
+        wavChunkBuf = null
+        wavRemainingBytes = 0L
 
         hasAudio = false
         isPrepared = false

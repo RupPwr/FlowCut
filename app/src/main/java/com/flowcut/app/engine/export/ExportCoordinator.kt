@@ -9,7 +9,7 @@ import com.flowcut.app.core.timeline.TimelineSnapshot
 import com.flowcut.app.engine.ExportEngine
 import com.flowcut.app.engine.PreviewRenderer
 import com.flowcut.app.engine.perf.SessionGuard
-import com.flowcut.app.ui.ExportState
+import com.flowcut.app.shared.ExportState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

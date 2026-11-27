@@ -2566,87 +2566,43 @@ class PreviewRenderer(
         fun activeLateFrames(): Long = activeInstance?.lateFrames ?: 0L
         fun activeRenderedFrames(): Long = activeInstance?.renderedFrames ?: 0L
 
-        @Volatile
-        private var _canvasAspectRatio: Float = 9f / 16f
-        val canvasAspectRatio: Float get() = _canvasAspectRatio
+        val canvasAspectRatio: Float get() = RenderStateStore.canvasAspectRatio
 
-        @Volatile
-        var currentAspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16
+        var currentAspectRatioMode: AspectRatioMode
+            get() = RenderStateStore.currentAspectRatioMode
+            set(value) { RenderStateStore.currentAspectRatioMode = value }
 
-        fun resolveEffectiveAspect(mode: AspectRatioMode, firstClip: Any? = null): Float {
-            if (mode == AspectRatioMode.ORIGINAL) {
-                if (firstClip != null) {
-                    val (w, h) = when (firstClip) {
-                        is com.flowcut.app.model.Clip -> {
-                            val rot = firstClip.rotation
-                            val w = if (rot == 90 || rot == 270) firstClip.height else firstClip.width
-                            val h = if (rot == 90 || rot == 270) firstClip.width else firstClip.height
-                            w to h
-                        }
-                        is com.flowcut.app.core.model.Clip -> {
-                            val rot = firstClip.rotation
-                            val w = if (rot == 90 || rot == 270) firstClip.height else firstClip.width
-                            val h = if (rot == 90 || rot == 270) firstClip.width else firstClip.height
-                            w to h
-                        }
-                        else -> 0 to 0
-                    }
-                    if (w > 0 && h > 0) {
-                        return w.toFloat() / h.toFloat()
-                    }
-                }
-                return 9f / 16f
-            }
-            return if (mode.ratioWidth > 0 && mode.ratioHeight > 0) {
-                mode.ratioWidth.toFloat() / mode.ratioHeight.toFloat()
-            } else if (mode.aspect > 0f) {
-                mode.aspect
-            } else {
-                9f / 16f
-            }
-        }
+        fun resolveEffectiveAspect(mode: AspectRatioMode, firstClip: Any? = null): Float =
+            RenderStateStore.resolveEffectiveAspect(mode, firstClip)
 
-        fun setAspectRatioMode(mode: AspectRatioMode, firstClip: Any? = null) {
-            currentAspectRatioMode = mode
-            val effective = resolveEffectiveAspect(mode, firstClip)
-            setCanvasAspectRatio(effective)
-        }
+        fun setAspectRatioMode(mode: AspectRatioMode, firstClip: Any? = null) =
+            RenderStateStore.setAspectRatioMode(mode, firstClip)
 
-        fun setCanvasAspectRatio(aspect: Float) {
-            if (aspect > 0f) {
-                _canvasAspectRatio = aspect
-                TransitionRenderer.canvasAspect = aspect
-            }
-        }
+        fun setCanvasAspectRatio(aspect: Float) =
+            RenderStateStore.setCanvasAspectRatio(aspect)
 
-        @Volatile
-        var currentLayerPlan: CompiledLayerPlan = CompiledLayerPlan.EMPTY
+        var currentLayerPlan: CompiledLayerPlan
+            get() = RenderStateStore.currentLayerPlan
+            set(value) { RenderStateStore.currentLayerPlan = value }
 
-        fun setLayerPlan(plan: CompiledLayerPlan) {
-            currentLayerPlan = plan
-        }
+        fun setLayerPlan(plan: CompiledLayerPlan) =
+            RenderStateStore.setLayerPlan(plan)
 
-        private val overlayTextures = ConcurrentHashMap<String, Int>()
+        fun setOverlayTextureId(itemId: String, texId: Int) =
+            RenderStateStore.setOverlayTextureId(itemId, texId)
 
-        fun setOverlayTextureId(itemId: String, texId: Int) {
-            if (texId > 0) {
-                overlayTextures[itemId] = texId
-            } else {
-                overlayTextures.remove(itemId)
-            }
-        }
+        fun getOverlayTextureId(itemId: String): Int =
+            RenderStateStore.getOverlayTextureId(itemId)
 
-        fun getOverlayTextureId(itemId: String): Int {
-            return overlayTextures[itemId] ?: 0
-        }
+        fun clearOverlayTextures() =
+            RenderStateStore.clearOverlayTextures()
 
-        fun clearOverlayTextures() {
-            overlayTextures.clear()
-        }
-
-        val clipTransforms = ConcurrentHashMap<String, ClipTransform>()
-        val clipColorAdjusts = ConcurrentHashMap<String, ClipColorAdjust>()
-        val clipBackgrounds = ConcurrentHashMap<String, ClipBackground>()
+        val clipTransforms: ConcurrentHashMap<String, ClipTransform>
+            get() = RenderStateStore.clipTransforms
+        val clipColorAdjusts: ConcurrentHashMap<String, ClipColorAdjust>
+            get() = RenderStateStore.clipColorAdjusts
+        val clipBackgrounds: ConcurrentHashMap<String, ClipBackground>
+            get() = RenderStateStore.clipBackgrounds
 
         fun getClipOpacity(clipId: String?): Float {
             if (clipId == null) return 1.0f
@@ -2658,61 +2614,41 @@ class PreviewRenderer(
             setClipTransform(clipId, t.copy(opacity = opacity.coerceIn(0f, 1f)))
         }
 
-        fun getClipTransform(clipId: String?): ClipTransform {
-            if (clipId == null) return ClipTransform.DEFAULT
-            return clipTransforms[clipId] ?: ClipTransform.DEFAULT
-        }
+        fun getClipTransform(clipId: String?): ClipTransform =
+            RenderStateStore.getClipTransform(clipId)
 
-        fun setClipTransform(clipId: String, transform: ClipTransform) {
-            clipTransforms[clipId] = transform
-        }
+        fun setClipTransform(clipId: String, transform: ClipTransform) =
+            RenderStateStore.setClipTransform(clipId, transform)
 
-        fun syncTransforms(transforms: Map<String, ClipTransform>) {
-            clipTransforms.clear()
-            clipTransforms.putAll(transforms)
-        }
+        fun syncTransforms(transforms: Map<String, ClipTransform>) =
+            RenderStateStore.syncTransforms(transforms)
 
-        fun getClipColorAdjust(clipId: String?): ClipColorAdjust {
-            if (clipId == null) return ClipColorAdjust.DEFAULT
-            return clipColorAdjusts[clipId] ?: ClipColorAdjust.DEFAULT
-        }
+        fun getClipColorAdjust(clipId: String?): ClipColorAdjust =
+            RenderStateStore.getClipColorAdjust(clipId)
 
-        fun setClipColorAdjust(clipId: String, adjust: ClipColorAdjust) {
-            clipColorAdjusts[clipId] = adjust
-        }
+        fun setClipColorAdjust(clipId: String, adjust: ClipColorAdjust) =
+            RenderStateStore.setClipColorAdjust(clipId, adjust)
 
-        fun syncColorAdjusts(adjusts: Map<String, ClipColorAdjust>) {
-            clipColorAdjusts.clear()
-            clipColorAdjusts.putAll(adjusts)
-        }
+        fun syncColorAdjusts(adjusts: Map<String, ClipColorAdjust>) =
+            RenderStateStore.syncColorAdjusts(adjusts)
 
-        fun getClipBackground(clipId: String?): ClipBackground {
-            if (clipId == null) return ClipBackground.DEFAULT
-            return clipBackgrounds[clipId] ?: ClipBackground.DEFAULT
-        }
+        fun getClipBackground(clipId: String?): ClipBackground =
+            RenderStateStore.getClipBackground(clipId)
 
-        fun setClipBackground(clipId: String, bg: ClipBackground) {
-            clipBackgrounds[clipId] = bg
-        }
+        fun setClipBackground(clipId: String, bg: ClipBackground) =
+            RenderStateStore.setClipBackground(clipId, bg)
 
-        fun syncBackgrounds(bgs: Map<String, ClipBackground>) {
-            clipBackgrounds.clear()
-            clipBackgrounds.putAll(bgs)
-        }
+        fun syncBackgrounds(bgs: Map<String, ClipBackground>) =
+            RenderStateStore.syncBackgrounds(bgs)
 
-        val liveFilterOverrides = ConcurrentHashMap<String, ClipFilterState>()
+        val liveFilterOverrides: ConcurrentHashMap<String, ClipFilterState>
+            get() = RenderStateStore.liveFilterOverrides
 
-        fun setLiveFilterOverride(clipId: String, filter: ClipFilterState) {
-            liveFilterOverrides[clipId] = filter
-        }
+        fun setLiveFilterOverride(clipId: String, filter: ClipFilterState) =
+            RenderStateStore.setLiveFilterOverride(clipId, filter)
 
-        fun clearLiveFilterOverride(clipId: String? = null) {
-            if (clipId != null) {
-                liveFilterOverrides.remove(clipId)
-            } else {
-                liveFilterOverrides.clear()
-            }
-        }
+        fun clearLiveFilterOverride(clipId: String? = null) =
+            RenderStateStore.clearLiveFilterOverride(clipId)
 
         fun getClipFilterState(clipId: String?): ClipFilterState {
             if (clipId == null) return ClipFilterState.DEFAULT
@@ -2773,34 +2709,19 @@ class PreviewRenderer(
             )
         }
 
-        val junctionTransitionTypes = ConcurrentHashMap<Int, Int>()
+        val junctionTransitionTypes: ConcurrentHashMap<Int, Int>
+            get() = RenderStateStore.junctionTransitionTypes
 
-        fun resetAll() {
-            clipTransforms.clear()
-            clipColorAdjusts.clear()
-            clipBackgrounds.clear()
-            clearLiveFilterOverride()
-            junctionTransitionTypes.clear()
-            clearOverlayTextures()
-            setLayerPlan(CompiledLayerPlan.EMPTY)
-            setAspectRatioMode(AspectRatioMode.RATIO_9_16)
-        }
+        fun resetAll() = RenderStateStore.resetAll()
 
         fun getJunctionTransitionType(junctionIndex: Int): Int =
-            junctionTransitionTypes[junctionIndex] ?: -1
+            RenderStateStore.getJunctionTransitionType(junctionIndex)
 
-        fun setJunctionTransitionType(junctionIndex: Int, type: Int) {
-            if (type <= 0) {
-                junctionTransitionTypes.remove(junctionIndex)
-            } else {
-                junctionTransitionTypes[junctionIndex] = type
-            }
-        }
+        fun setJunctionTransitionType(junctionIndex: Int, type: Int) =
+            RenderStateStore.setJunctionTransitionType(junctionIndex, type)
 
-        fun syncJunctionTransitions(types: Map<Int, Int>) {
-            junctionTransitionTypes.clear()
-            junctionTransitionTypes.putAll(types)
-        }
+        fun syncJunctionTransitions(types: Map<Int, Int>) =
+            RenderStateStore.syncJunctionTransitions(types)
 
         fun packBackground(bg: ClipBackground, outParams: FloatArray): Int {
             if (bg.gradientIndex in 0..5) {

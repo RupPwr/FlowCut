@@ -261,25 +261,30 @@ private fun buildStackedCapPath(
 /**
  * Safely renders text on Canvas with softWrap and maxLines support (Bug 5).
  */
-private fun DrawScope.drawTextSafe(
+private fun DrawScope.drawTextSafeImpl(
     textMeasurer: TextMeasurer,
     text: String,
     x: Float,
     y: Float,
     style: TextStyle,
-    maxLines: Int = 1
+    maxLines: Int = 1,
+    cache: TimelineTextLayoutCache? = null
 ) {
     if (size.width <= 4f || size.height <= 4f) return
     if (x >= size.width - 4f || y >= size.height - 4f) return
     if (x < -200f || y < -50f) return
 
-    val textLayoutResult = textMeasurer.measure(
-        text = text,
-        style = style,
-        constraints = Constraints(maxWidth = 1000),
-        softWrap = (maxLines > 1),
-        maxLines = maxLines
-    )
+    val textLayoutResult = if (cache != null) {
+        cache.getOrMeasure(textMeasurer, text, style, maxLines)
+    } else {
+        textMeasurer.measure(
+            text = text,
+            style = style,
+            constraints = Constraints(maxWidth = 1000),
+            softWrap = (maxLines > 1),
+            maxLines = maxLines
+        )
+    }
     if (x < 0f || y < 0f) {
         val shiftX = if (x < 0f) x else 0f
         val shiftY = if (y < 0f) y else 0f
@@ -347,6 +352,26 @@ fun TimelineCanvas(
 ) {
     val density = LocalDensity.current.density
     val textMeasurer = rememberTextMeasurer(cacheSize = 200)
+    val textLayoutCache = remember(textMeasurer) { TimelineTextLayoutCache(maxEntriesPerStyle = 96) }
+
+    fun DrawScope.drawTextSafe(
+        textMeasurer: TextMeasurer,
+        text: String,
+        x: Float,
+        y: Float,
+        style: TextStyle,
+        maxLines: Int = 1
+    ) {
+        drawTextSafeImpl(
+            textMeasurer = textMeasurer,
+            text = text,
+            x = x,
+            y = y,
+            style = style,
+            maxLines = maxLines,
+            cache = textLayoutCache
+        )
+    }
     val coroutineScope = rememberCoroutineScope()
     val hapticFeedback = LocalHapticFeedback.current
 
@@ -2992,7 +3017,7 @@ fun TimelineCanvas(
                                 text = text,
                                 x = x,
                                 y = textY,
-                                style = TextStyle(fontSize = fontSizeSp.sp, color = Color(colorArgb))
+                                style = textLayoutCache.getDynamicStyle(fontSizeSp, colorArgb)
                             )
                         }
                     }

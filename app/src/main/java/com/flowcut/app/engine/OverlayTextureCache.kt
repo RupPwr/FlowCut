@@ -500,9 +500,9 @@ class OverlayTextureCache(
     /**
      * Computes target dimensions for PIP video frame extraction capped at max 640px.
      */
-    private fun computePipTargetDimensions(item: OverlayItem): Pair<Int, Int> {
-        val inW = if (item.intrinsicWidth > 0) item.intrinsicWidth else 640
-        val inH = if (item.intrinsicHeight > 0) item.intrinsicHeight else 360
+    private fun computePipTargetDimensions(intrinsicWidth: Int, intrinsicHeight: Int): Pair<Int, Int> {
+        val inW = if (intrinsicWidth > 0) intrinsicWidth else 640
+        val inH = if (intrinsicHeight > 0) intrinsicHeight else 360
         val maxDim = 640
         val targetW: Int
         val targetH: Int
@@ -517,56 +517,57 @@ class OverlayTextureCache(
     }
 
     /**
-     * Extracts a scaled video frame from the bounded retriever pool.
+     * Extracts a scaled video frame from the thread-safe bounded retriever pool.
      * Prefers 640px all-intra proxy when available, falling back to original media.
+     * When [preferKeyframeFastPath] is true (live unproxied preview during scrub or slow decode),
+     * uses OPTION_CLOSEST_SYNC to keep low-end devices responsive without starving the decode pool.
      */
     private fun extractScaledVideoFrame(
         path: String,
         targetSourceUs: Long,
         targetW: Int,
-        targetH: Int
+        targetH: Int,
+        preferKeyframeFastPath: Boolean
     ): Bitmap? {
         if (path.isEmpty()) return null
         val store = proxyStore ?: defaultProxyStore
         val proxyPath = store?.getReadyProxyPath(path)
         val effectivePath = proxyPath ?: path
-
-        fun decodeFrom(targetPath: String): Bitmap? {
-            val retriever = retrieverPool.getRetriever(targetPath) ?: return null
-            return try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    retriever.getScaledFrameAtTime(
-                        targetSourceUs.coerceAtLeast(0L),
-                        MediaMetadataRetriever.OPTION_CLOSEST,
-                        targetW,
-                        targetH
-                    ) ?: retriever.getFrameAtTime(
-                        targetSourceUs.coerceAtLeast(0L),
-                        MediaMetadataRetriever.OPTION_CLOSEST
-                    )
-                } else {
-                    retriever.getFrameAtTime(
-                        targetSourceUs.coerceAtLeast(0L),
-                        MediaMetadataRetriever.OPTION_CLOSEST
-                    )
-                }
-            } catch (_: Throwable) {
-                null
-            }
+        val effectiveOption = if (proxyPath == null && preferKeyframeFastPath) {
+            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+        } else {
+            MediaMetadataRetriever.OPTION_CLOSEST
         }
 
-        var bmp = decodeFrom(effectivePath)
+        var bmp = retrieverPool.decodeFrame(
+            path = effectivePath,
+            targetSourceUs = targetSourceUs.coerceAtLeast(0L),
+            option = effectiveOption,
+            targetW = targetW,
+            targetH = targetH
+        )
         if (bmp == null && effectivePath != path) {
             // Seamless fallback to original source media if proxy failed to decode
-            bmp = decodeFrom(path)
+            val fallbackOption = if (preferKeyframeFastPath) {
+                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            } else {
+                MediaMetadataRetriever.OPTION_CLOSEST
+            }
+            bmp = retrieverPool.decodeFrame(
+                path = path,
+                targetSourceUs = targetSourceUs.coerceAtLeast(0L),
+                option = fallbackOption,
+                targetW = targetW,
+                targetH = targetH
+            )
         }
         return bmp
     }
 
     /**
      * Dynamic frame-accurate video overlay texture retrieval.
-     * - Quantizes to 30fps buckets (33_333 us) so texture only updates when frame advances.
-     * - Offline Export: Synchronously extracts frame at targetSourceUs and updates GL texture.
+     * - Quantizes to effectiveFps buckets so texture only updates when frame advances.
+     * - Offline Export: Synchronously extracts exact frame at targetSourceUs (OPTION_CLOSEST).
      * - Live Preview: Non-blocking background decode on pipDecodeExecutor with zero GL thread allocations (Rule R10).
      */
     fun getOrUpdateVideoTexture(
@@ -583,11 +584,18 @@ class OverlayTextureCache(
         val frameBucket = targetSourceUs / bucketStepUs
 
         if (isSynchronous) {
-            // Offline Export: frame-accurate synchronous decode
+            // Offline Export: 100% frame-accurate synchronous decode
             val state = videoStates.getOrPut(item.id) { VideoPipState(item.id) }
-            if (state.currentBucket != frameBucket || state.texEntry.texId == 0) {
-                val (targetW, targetH) = computePipTargetDimensions(item)
-                val bmp = extractScaledVideoFrame(item.mediaPath, targetSourceUs, targetW, targetH)
+            if (state.currentBucket != frameBucket || state.texEntry.texId == 0 || state.mediaPath != item.mediaPath) {
+                state.mediaPath = item.mediaPath
+                val (targetW, targetH) = computePipTargetDimensions(item.intrinsicWidth, item.intrinsicHeight)
+                val bmp = extractScaledVideoFrame(
+                    path = item.mediaPath,
+                    targetSourceUs = targetSourceUs,
+                    targetW = targetW,
+                    targetH = targetH,
+                    preferKeyframeFastPath = false
+                )
                 if (bmp != null && !bmp.isRecycled) {
                     val w = bmp.width
                     val h = bmp.height
@@ -625,18 +633,36 @@ class OverlayTextureCache(
         if (state == null) {
             val newState = VideoPipState(item.id)
             newState.decodeTask = Runnable {
-                val (dstW, dstH) = computePipTargetDimensions(item)
-                val decoded = extractScaledVideoFrame(item.mediaPath, newState.targetSourceUs, dstW, dstH)
+                val path = newState.mediaPath
+                val decodeBucket = newState.targetBucket
+                val decodeSourceUs = newState.targetSourceUs
+                val fastKeyframe = newState.useKeyframeFastPath
+                val (dstW, dstH) = computePipTargetDimensions(newState.intrinsicWidth, newState.intrinsicHeight)
+                val t0 = System.nanoTime()
+                val decoded = extractScaledVideoFrame(
+                    path = path,
+                    targetSourceUs = decodeSourceUs,
+                    targetW = dstW,
+                    targetH = dstH,
+                    preferKeyframeFastPath = fastKeyframe
+                )
+                val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
+                newState.lastDecodeDurationMs = elapsedMs
                 if (decoded != null && !decoded.isRecycled) {
                     synchronized(newState.lock) {
                         val old = newState.backBitmap
                         newState.backBitmap = decoded
+                        newState.pendingDecodedBucket = decodeBucket
                         newState.hasDirtyBitmap = true
                         if (old != null && old != decoded && !old.isRecycled) {
                             old.recycle()
                         }
                     }
+                    newState.lastFailedBucket = -1L
                     onFrameReady?.invoke()
+                } else {
+                    newState.lastFailedBucket = decodeBucket
+                    newState.lastFailedAtMs = System.currentTimeMillis()
                 }
                 newState.isDecoding = false
             }
@@ -644,11 +670,23 @@ class OverlayTextureCache(
             state = newState
         }
 
+        // Keep live PiP metadata up to date even if the user replaces or edits the item
+        if (state.mediaPath != item.mediaPath) {
+            state.mediaPath = item.mediaPath
+            state.currentBucket = -1L
+            state.lastFailedBucket = -1L
+            state.lastDecodeDurationMs = 0L
+        }
+        state.intrinsicWidth = item.intrinsicWidth
+        state.intrinsicHeight = item.intrinsicHeight
+
         // Upload ready decoded frame on GL thread
         if (state.hasDirtyBitmap) {
             var bmpToUpload: Bitmap? = null
+            var uploadedBucket = state.currentBucket
             synchronized(state.lock) {
                 bmpToUpload = state.backBitmap
+                uploadedBucket = state.pendingDecodedBucket
                 state.backBitmap = null
                 state.hasDirtyBitmap = false
             }
@@ -674,12 +712,28 @@ class OverlayTextureCache(
                 state.texEntry.texId = targetTexId
                 state.texEntry.width = w
                 state.texEntry.height = h
-                state.currentBucket = state.targetBucket
+                state.currentBucket = uploadedBucket
             }
         }
 
-        // Trigger background decoding if timestamp bucket advanced
-        if (state.currentBucket != frameBucket && !state.isDecoding) {
+        // Trigger background decoding if timestamp bucket advanced (and not cooling down after a decode failure)
+        val nowMs = System.currentTimeMillis()
+        val skipFailed = PipDecodePolicy.shouldSkipFailedBucket(
+            failedBucket = state.lastFailedBucket,
+            targetBucket = frameBucket,
+            lastFailedAtMs = state.lastFailedAtMs,
+            nowMs = nowMs
+        )
+        if (state.currentBucket != frameBucket && !state.isDecoding && !skipFailed) {
+            val store = proxyStore ?: defaultProxyStore
+            val hasProxy = store?.getReadyProxyPath(item.mediaPath) != null
+            state.useKeyframeFastPath = PipDecodePolicy.shouldUseKeyframeFastPath(
+                isSynchronousExport = false,
+                hasReadyProxy = hasProxy,
+                lastBucket = state.currentBucket,
+                targetBucket = frameBucket,
+                lastDecodeDurationMs = state.lastDecodeDurationMs
+            )
             state.targetBucket = frameBucket
             state.targetSourceUs = targetSourceUs
             state.isDecoding = true
@@ -797,9 +851,17 @@ class OverlayTextureCache(
 private class VideoPipState(
     val itemId: String,
     val texEntry: CachedOverlayTex = CachedOverlayTex(),
+    @Volatile var mediaPath: String = "",
+    @Volatile var intrinsicWidth: Int = 640,
+    @Volatile var intrinsicHeight: Int = 360,
     var currentBucket: Long = -1L,
+    var pendingDecodedBucket: Long = -1L,
     @Volatile var targetBucket: Long = -1L,
     @Volatile var targetSourceUs: Long = 0L,
+    @Volatile var useKeyframeFastPath: Boolean = false,
+    @Volatile var lastDecodeDurationMs: Long = 0L,
+    @Volatile var lastFailedBucket: Long = -1L,
+    @Volatile var lastFailedAtMs: Long = 0L,
     @Volatile var isDecoding: Boolean = false,
     @Volatile var hasDirtyBitmap: Boolean = false,
     var backBitmap: Bitmap? = null,
@@ -810,58 +872,93 @@ private class VideoPipState(
 
 private class RetrieverPool(private val maxEntries: Int = 4) {
     private val entries = ArrayList<RetrieverEntry>(maxEntries)
+    @Volatile
+    private var released = false
 
     class RetrieverEntry(
         var path: String = "",
         val retriever: MediaMetadataRetriever = MediaMetadataRetriever().also {
             ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
         },
-        var lastUsedTime: Long = 0L
+        var lastUsedTime: Long = 0L,
+        val lock: Any = Any()
     )
 
     @Synchronized
-    fun getRetriever(path: String): MediaMetadataRetriever? {
-        if (path.isEmpty()) return null
+    private fun acquireEntry(path: String): RetrieverEntry? {
+        if (released || path.isEmpty()) return null
         val now = System.currentTimeMillis()
         val existing = entries.firstOrNull { it.path == path }
         if (existing != null) {
             existing.lastUsedTime = now
-            return existing.retriever
+            return existing
         }
         if (entries.size < maxEntries) {
             val entry = RetrieverEntry(path, MediaMetadataRetriever().also {
                 ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
             }, now)
-            try {
+            return try {
                 entry.retriever.setDataSource(path)
                 entries.add(entry)
-                return entry.retriever
+                entry
             } catch (_: Throwable) {
                 try {
                     entry.retriever.release()
                     ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
                 } catch (_: Throwable) {}
-                return null
+                null
             }
         }
         val lru = entries.minByOrNull { it.lastUsedTime } ?: entries[0]
-        try {
-            lru.retriever.setDataSource(path)
-            lru.path = path
-            lru.lastUsedTime = now
-            return lru.retriever
-        } catch (_: Throwable) {
-            return null
+        synchronized(lru.lock) {
+            return try {
+                lru.retriever.setDataSource(path)
+                lru.path = path
+                lru.lastUsedTime = now
+                lru
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    }
+
+    /**
+     * Thread-safely decodes a scaled frame using a per-entry lock so concurrent
+     * pipDecodeExecutor threads never invoke JNI on the same MediaMetadataRetriever simultaneously.
+     */
+    fun decodeFrame(
+        path: String,
+        targetSourceUs: Long,
+        option: Int,
+        targetW: Int,
+        targetH: Int
+    ): Bitmap? {
+        val entry = acquireEntry(path) ?: return null
+        synchronized(entry.lock) {
+            if (released || entry.path != path) return null
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    entry.retriever.getScaledFrameAtTime(targetSourceUs, option, targetW, targetH)
+                        ?: entry.retriever.getFrameAtTime(targetSourceUs, option)
+                } else {
+                    entry.retriever.getFrameAtTime(targetSourceUs, option)
+                }
+            } catch (_: Throwable) {
+                null
+            }
         }
     }
 
     @Synchronized
     fun release() {
+        released = true
         for (e in entries) {
-            try {
-                e.retriever.release()
-                ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
-            } catch (_: Throwable) {}
+            synchronized(e.lock) {
+                try {
+                    e.retriever.release()
+                    ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_METADATA_RETRIEVER, "RetrieverPool")
+                } catch (_: Throwable) {}
+            }
         }
         entries.clear()
     }

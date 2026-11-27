@@ -207,17 +207,27 @@ class WaveformService(
             var outputEos = false
 
             val framesPerBucket = sampleRate.toDouble() / samplesPerSec.toDouble()
-            val accumulatedPeaks = mutableListOf<Float>()
+            var peaksBuf = FloatArray(1024)
+            var peaksCount = 0
+            fun appendPeak(v: Float) {
+                if (peaksCount == peaksBuf.size) {
+                    peaksBuf = peaksBuf.copyOf(peaksBuf.size * 2)
+                }
+                peaksBuf[peaksCount++] = v
+            }
             var currentBucketMax = 0
             var currentBucketFrames = 0.0
 
             val shortBuf = ShortArray(4096)
             var outputBufferCount = 0
+            var stallIterations = 0
 
-            while (!outputEos) {
+            while (!outputEos && stallIterations < MAX_DECODE_STALL_ITERATIONS) {
+                var madeProgress = false
                 if (!inputEos) {
                     val inIdx = dec.dequeueInputBuffer(10_000L)
                     if (inIdx >= 0) {
+                        madeProgress = true
                         val inBuf = dec.getInputBuffer(inIdx)
                         if (inBuf != null) {
                             val sampleSize = extractor.readSampleData(inBuf, 0)
@@ -234,6 +244,7 @@ class WaveformService(
 
                 val outIdx = dec.dequeueOutputBuffer(info, 10_000L)
                 if (outIdx >= 0) {
+                    madeProgress = true
                     outputBufferCount++
                     if (outputBufferCount % 64 == 0) {
                         yield()
@@ -265,7 +276,7 @@ class WaveformService(
                                 }
                                 currentBucketFrames += 1.0
                                 if (currentBucketFrames >= framesPerBucket) {
-                                    accumulatedPeaks.add((currentBucketMax.toFloat() / 32767f).coerceIn(0f, 1f))
+                                    appendPeak((currentBucketMax.toFloat() / 32767f).coerceIn(0f, 1f))
                                     currentBucketMax = 0
                                     currentBucketFrames -= framesPerBucket
                                 }
@@ -276,14 +287,25 @@ class WaveformService(
                     if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         outputEos = true
                     }
+                } else if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    madeProgress = true
+                }
+
+                if (madeProgress) {
+                    stallIterations = 0
+                } else {
+                    stallIterations++
+                    if (stallIterations % 16 == 0) {
+                        yield()
+                    }
                 }
             }
 
             if (currentBucketFrames > 0.0) {
-                accumulatedPeaks.add((currentBucketMax.toFloat() / 32767f).coerceIn(0f, 1f))
+                appendPeak((currentBucketMax.toFloat() / 32767f).coerceIn(0f, 1f))
             }
 
-            val peaksArray = FloatArray(accumulatedPeaks.size) { accumulatedPeaks[it] }
+            val peaksArray = peaksBuf.copyOf(peaksCount)
             return WaveformData(samplesPerSec, peaksArray)
         } catch (e: CancellationException) {
             throw e
@@ -300,6 +322,7 @@ class WaveformService(
         private val waveformSemaphore = Semaphore(1)
         const val DEFAULT_SAMPLES_PER_SEC = 50
         private const val MAGIC = 0x46435731 // "FCW1"
+        private const val MAX_DECODE_STALL_ITERATIONS = 400
 
         /**
          * Pure-Kotlin peak extractor from 16-bit PCM for JVM unit testing without Android mocks.
