@@ -789,7 +789,11 @@ class PreviewRenderer(
     // ---------------------------------------------------------------------------------------------
     // GLSurfaceView.Renderer implementation
     // ---------------------------------------------------------------------------------------------
+    @Volatile
+    private var isReleased: Boolean = false
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        if (isReleased) return
         PreviewWatchdog.glThread = Thread.currentThread()
         surfaceCreatedCount++
         val isEglLoss = surfaceCreatedCount > 1
@@ -798,6 +802,10 @@ class PreviewRenderer(
             arg0 = surfaceCreatedCount.toLong(),
             reason = "recreate: renderer.init, textures, decoders, passes"
         )
+        if (isEglLoss) {
+            // Purge stale GL texture IDs from the destroyed EGL context before passes re-initialize.
+            try { overlayTextureCache.clear() } catch (_: Throwable) {}
+        }
         renderer.init()
         GlPassScope.restoreBaseline(PREVIEW_W, PREVIEW_H)
         recreateSurfaceTextures(regenerateGlTextures = false)
@@ -965,11 +973,13 @@ class PreviewRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        if (isReleased) return
         PreviewWatchdog.onDrawFrameStart()
         val startNs = if (com.flowcut.app.BuildConfig.PERF_TELEMETRY) System.nanoTime() else 0L
         val wasWaitingInitial = isWaitingForFrame
         var showedNewFrame = false
         try {
+            if (isReleased) return
             if (isSuspendedForExport) {
                 PreviewEventLog.onBlackoutClearBranch("isSuspendedForExport", "isSuspended=true")
                 GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
@@ -1551,9 +1561,10 @@ class PreviewRenderer(
                 } else {
                     safeRequestRender()
                 }
-            } else {
-                // No pending surface frame here. Do NOT clear isWaitingForFrame.
-                // Only onFrameAvailable and a successful updateTexImage may clear it.
+            } else if (isWaitingForFrame && isFirstFrameLatched) {
+                // Target frame is already decoded and latched on screen (e.g., ACCEPT_CURRENT);
+                // clear waiting state immediately so FrameDriver/loader do not spin or stall.
+                isWaitingForFrame = false
             }
                     if (playhead.mode == PlayMode.PLAYING) {
                         safeRequestRender()
@@ -1660,7 +1671,9 @@ class PreviewRenderer(
                         } else {
                             !isContinuous && (currentPts == -1L || kotlin.math.abs(effectiveTargetPts - currentPts) > 60_000L)
                         }
-                        Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts eff=$effectiveTargetPts atEnd=${activeFs.isAtEndOfMedia}")
+                        if (com.flowcut.app.BuildConfig.DEBUG) {
+                            Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts eff=$effectiveTargetPts atEnd=${activeFs.isAtEndOfMedia}")
+                        }
                         if (shouldSeek) {
                             pendingSurfaceFramesA.set(0)
                             val useFast = isScrubbing &&
@@ -1989,9 +2002,10 @@ class PreviewRenderer(
                 } else {
                     safeRequestRender()
                 }
-            } else {
-                // No pending surface frame here. Do NOT clear isWaitingForFrame.
-                // Only onFrameAvailable and a successful updateTexImage may clear it.
+            } else if (isWaitingForFrame && isFirstFrameLatched) {
+                // Target frame is already decoded and latched on screen (e.g., ACCEPT_CURRENT);
+                // clear waiting state immediately so FrameDriver/loader do not spin or stall.
+                isWaitingForFrame = false
             }
         } else {
             // --- Slot B is Primary (stB / texBId) ---
@@ -2023,7 +2037,9 @@ class PreviewRenderer(
                         } else {
                             !isContinuous && (currentPts == -1L || kotlin.math.abs(effectiveTargetPts - currentPts) > 60_000L)
                         }
-                        Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts eff=$effectiveTargetPts atEnd=${activeFs.isAtEndOfMedia}")
+                        if (com.flowcut.app.BuildConfig.DEBUG) {
+                            Log.w("SEEKTRACE", "DECIDE shouldSeek=$shouldSeek target=$targetPts eff=$effectiveTargetPts atEnd=${activeFs.isAtEndOfMedia}")
+                        }
                         if (shouldSeek) {
                             pendingSurfaceFramesB.set(0)
                             val useFast = isScrubbing &&
@@ -2352,9 +2368,10 @@ class PreviewRenderer(
                 } else {
                     safeRequestRender()
                 }
-            } else {
-                // No pending surface frame here. Do NOT clear isWaitingForFrame.
-                // Only onFrameAvailable and a successful updateTexImage may clear it.
+            } else if (isWaitingForFrame && isFirstFrameLatched) {
+                // Target frame is already decoded and latched on screen (e.g., ACCEPT_CURRENT);
+                // clear waiting state immediately so FrameDriver/loader do not spin or stall.
+                isWaitingForFrame = false
             }
         }
         } catch (e: Throwable) {
@@ -2590,9 +2607,11 @@ class PreviewRenderer(
     }
 
     fun release() {
+        isReleased = true
         if (activeInstance === this) {
             activeInstance = null
         }
+        onRenderRequested = null
         trimPreviewTimeUs = -1L
         stopPrefetch()
         releaseDecoders(synchronous = true)
@@ -2610,6 +2629,16 @@ class PreviewRenderer(
         pendingSurfaceFramesA.set(0)
         pendingSurfaceFramesB.set(0)
         PreviewWatchdog.stop()
+        val gl = glSurfaceView
+        if (gl != null) {
+            try {
+                gl.queueEvent {
+                    try { overlayTextureCache.clear() } catch (_: Throwable) {}
+                    try { renderer.release() } catch (_: Throwable) {}
+                    try { passRegistry.onGlDestroyed() } catch (_: Throwable) {}
+                }
+            } catch (_: Throwable) {}
+        }
         try {
             overlayTextureCache.release()
         } catch (_: Throwable) {}
@@ -2621,7 +2650,9 @@ class PreviewRenderer(
                 c.release()
             } catch (_: Throwable) {}
         }
-        passRegistry.onGlDestroyed()
+        try {
+            passRegistry.onGlDestroyed()
+        } catch (_: Throwable) {}
     }
 
     fun registerPass(pass: RenderPass) {

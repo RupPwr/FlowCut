@@ -55,22 +55,122 @@ class ThumbnailService(
         val key: String get() = tileKey(path, bucketUs)
     }
 
-    // Copy-on-write memory cache: reads are strictly lock-free and zero-allocation (Rule R10)
+    private class CachedTile(
+        val path: String,
+        val bucketUs: Long,
+        val bitmap: ImageBitmap
+    )
+
+    private class LongBitmapTable(
+        val buckets: LongArray,
+        val bitmaps: Array<ImageBitmap>
+    ) {
+        fun get(bucketUs: Long): ImageBitmap? {
+            var lo = 0
+            var hi = buckets.size - 1
+            while (lo <= hi) {
+                val mid = (lo + hi) ushr 1
+                val v = buckets[mid]
+                if (v < bucketUs) {
+                    lo = mid + 1
+                } else if (v > bucketUs) {
+                    hi = mid - 1
+                } else {
+                    return bitmaps[mid]
+                }
+            }
+            return null
+        }
+    }
+
+    private class RetrieverSlot(
+        var path: String,
+        val retriever: MediaMetadataRetriever,
+        var lastUsedMs: Long,
+        val lock: Any = Any()
+    )
+
+    // Copy-on-write memory cache: reads in peek() are strictly lock-free and zero-allocation (Rule R10)
     @Volatile
-    private var ready: Map<String, ImageBitmap> = emptyMap()
+    private var ready: Map<String, CachedTile> = emptyMap()
+
+    @Volatile
+    private var readyByPath: Map<String, LongBitmapTable> = emptyMap()
 
     private val inFlight = ConcurrentHashMap<String, Job>()
     private val failed = ConcurrentHashMap.newKeySet<String>()
 
     var isPaused: () -> Boolean = { false }
-    private val retrieverCache = ConcurrentHashMap<String, MediaMetadataRetriever>()
+    private val retrieverPoolLock = Any()
+    private val retrieverPool = ArrayList<RetrieverSlot>(MAX_RETRIEVER_SLOTS)
+    @Volatile
+    private var poolCleared = false
+    private var diskWritesSincePrune = 0
 
-    private fun getOrCreateRetriever(path: String): MediaMetadataRetriever {
-        return retrieverCache.computeIfAbsent(path) { p ->
-            MediaMetadataRetriever().apply {
-                setDataSource(p)
+    private fun acquireRetrieverSlot(path: String): RetrieverSlot? {
+        synchronized(retrieverPoolLock) {
+            if (poolCleared || path.isEmpty()) return null
+            val now = System.currentTimeMillis()
+            val existing = retrieverPool.firstOrNull { it.path == path }
+            if (existing != null) {
+                existing.lastUsedMs = now
+                return existing
+            }
+            if (retrieverPool.size < MAX_RETRIEVER_SLOTS) {
+                val r = MediaMetadataRetriever()
+                return try {
+                    r.setDataSource(path)
+                    val slot = RetrieverSlot(path, r, now)
+                    retrieverPool.add(slot)
+                    slot
+                } catch (_: Throwable) {
+                    try { r.release() } catch (_: Throwable) {}
+                    null
+                }
+            }
+            val lru = retrieverPool.minByOrNull { it.lastUsedMs } ?: retrieverPool[0]
+            synchronized(lru.lock) {
+                return try {
+                    lru.retriever.setDataSource(path)
+                    lru.path = path
+                    lru.lastUsedMs = now
+                    lru
+                } catch (_: Throwable) {
+                    null
+                }
             }
         }
+    }
+
+    private fun releaseRetrieverForPath(path: String) {
+        synchronized(retrieverPoolLock) {
+            val idx = retrieverPool.indexOfFirst { it.path == path }
+            if (idx >= 0) {
+                val slot = retrieverPool.removeAt(idx)
+                synchronized(slot.lock) {
+                    try { slot.retriever.release() } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    private fun rebuildPathIndex(source: Map<String, CachedTile>): Map<String, LongBitmapTable> {
+        if (source.isEmpty()) return emptyMap()
+        val grouped = HashMap<String, ArrayList<CachedTile>>()
+        for (tile in source.values) {
+            grouped.getOrPut(tile.path) { ArrayList() }.add(tile)
+        }
+        val result = HashMap<String, LongBitmapTable>(grouped.size)
+        for ((p, list) in grouped) {
+            list.sortBy { it.bucketUs }
+            val buckets = LongArray(list.size)
+            val bitmaps = Array(list.size) { i ->
+                buckets[i] = list[i].bucketUs
+                list[i].bitmap
+            }
+            result[p] = LongBitmapTable(buckets, bitmaps)
+        }
+        return result
     }
 
     var onGeneratingChanged: ((Boolean) -> Unit)? = null
@@ -129,8 +229,8 @@ class ThumbnailService(
      */
     fun peek(path: String, timeUs: Long): ImageBitmap? {
         if (path.isEmpty()) return null
-        val key = tileKey(path, bucketTimeUs(timeUs))
-        return ready[key]
+        val table = readyByPath[path] ?: return null
+        return table.get(bucketTimeUs(timeUs))
     }
 
     /**
@@ -161,7 +261,7 @@ class ThumbnailService(
                     coroutineContext.ensureActive()
                     val img = loadTile(req.path, req.bucketUs, key)
                     if (img != null) {
-                        publish(key, img)
+                        publish(key, req.path, req.bucketUs, img)
                         notifyChangeThrottled(onChanged)
                     } else {
                         failed.add(key)
@@ -199,6 +299,7 @@ class ThumbnailService(
      * Clears all in-memory and in-flight states.
      */
     fun clearMemory() {
+        poolCleared = true
         synchronized(notifyLock) {
             pendingNotifyJob?.cancel()
             pendingNotifyJob = null
@@ -206,14 +307,22 @@ class ThumbnailService(
         inFlight.values.forEach { it.cancel() }
         inFlight.clear()
         failed.clear()
-        retrieverCache.values.forEach { r ->
-            try { r.release() } catch (_: Throwable) {}
+        synchronized(retrieverPoolLock) {
+            for (slot in retrieverPool) {
+                synchronized(slot.lock) {
+                    try { slot.retriever.release() } catch (_: Throwable) {}
+                }
+            }
+            retrieverPool.clear()
         }
-        retrieverCache.clear()
-        ready = emptyMap()
+        synchronized(this) {
+            ready = emptyMap()
+            readyByPath = emptyMap()
+        }
         if (activeInstance === this) {
             activeInstance = null
         }
+        poolCleared = false
         checkGeneratingState()
     }
 
@@ -227,6 +336,7 @@ class ThumbnailService(
         if (ready.size <= target) return
         if (target == 0) {
             ready = emptyMap()
+            readyByPath = emptyMap()
             return
         }
         val next = LinkedHashMap(ready)
@@ -235,6 +345,7 @@ class ThumbnailService(
             next.remove(oldest)
         }
         ready = next
+        readyByPath = rebuildPathIndex(next)
     }
 
     /**
@@ -279,23 +390,30 @@ class ThumbnailService(
 
             // Decode using OPTION_CLOSEST_SYNC for ultra-fast keyframe extraction
             try {
-                val retriever = getOrCreateRetriever(path)
+                try {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                } catch (_: Throwable) {}
+                val slot = acquireRetrieverSlot(path) ?: return@withPermit null
                 kotlin.coroutines.coroutineContext.ensureActive()
-                val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    retriever.getScaledFrameAtTime(
-                        bucketUs.coerceAtLeast(0L),
-                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                        TILE_WIDTH_PX,
-                        TILE_HEIGHT_PX
-                    ) ?: retriever.getFrameAtTime(
-                        bucketUs.coerceAtLeast(0L),
-                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                    )
-                } else {
-                    retriever.getFrameAtTime(
-                        bucketUs.coerceAtLeast(0L),
-                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                    )
+                val bmp = synchronized(slot.lock) {
+                    if (poolCleared || slot.path != path) {
+                        null
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        slot.retriever.getScaledFrameAtTime(
+                            bucketUs.coerceAtLeast(0L),
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                            TILE_WIDTH_PX,
+                            TILE_HEIGHT_PX
+                        ) ?: slot.retriever.getFrameAtTime(
+                            bucketUs.coerceAtLeast(0L),
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                        )
+                    } else {
+                        slot.retriever.getFrameAtTime(
+                            bucketUs.coerceAtLeast(0L),
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                        )
+                    }
                 }
 
                 if (bmp != null) {
@@ -308,7 +426,11 @@ class ThumbnailService(
                         if (diskFile.exists()) diskFile.delete()
                         if (temp.renameTo(diskFile)) {
                             diskFile.setLastModified(System.currentTimeMillis())
-                            pruneDiskCache()
+                            diskWritesSincePrune++
+                            if (diskWritesSincePrune >= DISK_PRUNE_INTERVAL) {
+                                diskWritesSincePrune = 0
+                                pruneDiskCache()
+                            }
                         }
                     } catch (_: Throwable) {}
                     bmp.asImageBitmap()
@@ -318,23 +440,22 @@ class ThumbnailService(
             } catch (_: CancellationException) {
                 null
             } catch (_: Throwable) {
-                retrieverCache.remove(path)?.let {
-                    try { it.release() } catch (_: Throwable) {}
-                }
+                releaseRetrieverForPath(path)
                 null
             }
         }
     }
 
     @Synchronized
-    private fun publish(key: String, img: ImageBitmap) {
+    private fun publish(key: String, path: String, bucketUs: Long, img: ImageBitmap) {
         val next = LinkedHashMap(ready)
-        next[key] = img
+        next[key] = CachedTile(path, bucketUs, img)
         while (next.size > maxMemEntries) {
             val oldest = next.keys.firstOrNull() ?: break
             next.remove(oldest)
         }
         ready = next
+        readyByPath = rebuildPathIndex(next)
     }
 
     private fun pruneDiskCache() {
@@ -356,6 +477,12 @@ class ThumbnailService(
 
     companion object {
         private val decodeSemaphore = Semaphore(1)
+        private const val MAX_RETRIEVER_SLOTS = 4
+        private const val DISK_PRUNE_INTERVAL = 20
+        private val HEX_CHARS = charArrayOf(
+            '0', '1', '2', '3', '4', '5', '6', '7',
+            '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+        )
         const val TILE_WIDTH_PX = 80
         const val TILE_HEIGHT_PX = 80
         const val DEFAULT_MAX_DISK_BYTES = 100L * 1024L * 1024L // 100 MB
@@ -387,7 +514,13 @@ class ThumbnailService(
             val input = "$path:$bucketUs"
             val md = MessageDigest.getInstance("SHA-256")
             val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
-            return bytes.joinToString("") { "%02x".format(it) }
+            val chars = CharArray(bytes.size * 2)
+            for (i in bytes.indices) {
+                val b = bytes[i].toInt() and 0xFF
+                chars[i * 2] = HEX_CHARS[b ushr 4]
+                chars[i * 2 + 1] = HEX_CHARS[b and 0x0F]
+            }
+            return String(chars)
         }
     }
 }

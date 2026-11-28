@@ -12,6 +12,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.flowcut.app.MainActivity
+import com.flowcut.app.shared.ExportState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,8 +56,14 @@ class ExportService : Service() {
         scope.launch(Dispatchers.IO) {
             try {
                 ExportCoordinator.run(applicationContext, request) { pct ->
-                    val manager = getSystemService(NotificationManager::class.java)
-                    manager?.notify(NOTIF_ID, buildNotification(pct))
+                    try {
+                        val manager = getSystemService(NotificationManager::class.java)
+                        manager?.notify(NOTIF_ID, buildNotification(pct))
+                    } catch (_: SecurityException) {
+                        // POST_NOTIFICATIONS not granted on Android 13+; continue export safely
+                    } catch (_: Throwable) {
+                        // Best-effort progress notification
+                    }
                 }
             } catch (_: Throwable) {
                 // ExportCoordinator sets the failed state
@@ -77,6 +84,9 @@ class ExportService : Service() {
     }
 
     override fun onDestroy() {
+        if (ExportCoordinator.state.value is ExportState.Exporting) {
+            ExportCoordinator.cancel("Export service stopped")
+        }
         scope.cancel()
         super.onDestroy()
     }

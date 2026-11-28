@@ -1,7 +1,9 @@
 package com.flowcut.app.engine
 
+import android.opengl.EGL14
 import android.opengl.GLES11Ext
 import android.opengl.GLES30
+import com.flowcut.app.BuildConfig
 import com.flowcut.app.core.model.ClipFilterParams
 import com.flowcut.app.model.Clip
 import com.flowcut.app.model.TransitionType
@@ -9,6 +11,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.UUID
 
 typealias ClipFilterState = ClipFilterParams
 
@@ -1057,6 +1060,21 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
     )
 
     fun init() {
+        // Clear any stale handles from a previous/lost EGL context so every shader program
+        // (including lazily compiled grade/overlay/mosaic programs) recompiles cleanly.
+        baseUniforms.programId = 0
+        gradeEffectUniforms.programId = 0
+        transitionUniforms.programId = 0
+        overlayProgramId = 0
+        mosaicProgramId = 0
+        vaoId = 0
+        vboId = 0
+        texAId = 0
+        texBId = 0
+        glRenderer = ""
+        glVersion = ""
+        programBinarySupported = null
+
         // Base passthrough program: compiled immediately in < 10ms
         baseUniforms.programId = buildProgram("BasePassthrough", vertexShaderSource, baseFragmentShaderSource)
         initBaseUniforms()
@@ -1412,7 +1430,7 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
             }
         }
         GLES30.glUniform1i(transitionUniforms.uTypeLoc, glType)
-        if (kotlin.math.abs(spec.easedP - lastLoggedTransP) >= 0.05f) {
+        if (BuildConfig.DEBUG && kotlin.math.abs(spec.easedP - lastLoggedTransP) >= 0.05f) {
             lastLoggedTransP = spec.easedP
             android.util.Log.d("FlowCutTrans", "type=${spec.transitionType} glType=$glType p=${spec.easedP}")
         }
@@ -1582,40 +1600,74 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
         GLES30.glDisable(GLES30.GL_BLEND)
     }
 
+    private var programBinarySupported: Boolean? = null
+
+    private fun hasCurrentGlContext(): Boolean {
+        return try {
+            EGL14.eglGetCurrentContext() != EGL14.EGL_NO_CONTEXT
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun isProgramBinarySupported(): Boolean {
+        programBinarySupported?.let { return it }
+        val supported = try {
+            val count = IntArray(1)
+            GLES30.glGetIntegerv(GLES30.GL_NUM_PROGRAM_BINARY_FORMATS, count, 0)
+            count[0] > 0
+        } catch (_: Throwable) {
+            false
+        }
+        programBinarySupported = supported
+        return supported
+    }
+
+    private fun drainGlErrors() {
+        try {
+            var guard = 0
+            while (GLES30.glGetError() != GLES30.GL_NO_ERROR && guard < 8) {
+                guard++
+            }
+        } catch (_: Throwable) {}
+    }
+
     fun release() {
+        val hasGl = hasCurrentGlContext()
         if (baseUniforms.programId != 0) {
-            GLES30.glDeleteProgram(baseUniforms.programId)
+            if (hasGl) GLES30.glDeleteProgram(baseUniforms.programId)
             baseUniforms.programId = 0
         }
         if (gradeEffectUniforms.programId != 0) {
-            GLES30.glDeleteProgram(gradeEffectUniforms.programId)
+            if (hasGl) GLES30.glDeleteProgram(gradeEffectUniforms.programId)
             gradeEffectUniforms.programId = 0
         }
         if (transitionUniforms.programId != 0) {
-            GLES30.glDeleteProgram(transitionUniforms.programId)
+            if (hasGl) GLES30.glDeleteProgram(transitionUniforms.programId)
             transitionUniforms.programId = 0
         }
         if (overlayProgramId != 0) {
-            GLES30.glDeleteProgram(overlayProgramId)
+            if (hasGl) GLES30.glDeleteProgram(overlayProgramId)
             overlayProgramId = 0
         }
         if (mosaicProgramId != 0) {
-            GLES30.glDeleteProgram(mosaicProgramId)
+            if (hasGl) GLES30.glDeleteProgram(mosaicProgramId)
             mosaicProgramId = 0
         }
         if (vaoId != 0) {
-            GLES30.glDeleteVertexArrays(1, intArrayOf(vaoId), 0)
+            if (hasGl) GLES30.glDeleteVertexArrays(1, intArrayOf(vaoId), 0)
             vaoId = 0
         }
         if (vboId != 0) {
-            GLES30.glDeleteBuffers(1, intArrayOf(vboId), 0)
+            if (hasGl) GLES30.glDeleteBuffers(1, intArrayOf(vboId), 0)
             vboId = 0
         }
         if (texAId != 0 || texBId != 0) {
-            GLES30.glDeleteTextures(2, intArrayOf(texAId, texBId), 0)
+            if (hasGl) GLES30.glDeleteTextures(2, intArrayOf(texAId, texBId), 0)
             texAId = 0
             texBId = 0
         }
+        programBinarySupported = null
     }
 
     private fun ensureGlStrings() {
@@ -1635,27 +1687,42 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
     }
 
     private fun tryLoadFromDisk(program: Int, cacheFile: File): Boolean {
-        if (!cacheFile.exists()) return false
+        if (!isProgramBinarySupported() || !cacheFile.exists()) return false
         return try {
             val bytes = cacheFile.readBytes()
-            if (bytes.size < 4) return false
+            if (bytes.size <= 4) {
+                try { cacheFile.delete() } catch (_: Throwable) {}
+                return false
+            }
             val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder())
             val binaryFormat = buffer.int
             val binaryLength = bytes.size - 4
             val payload = ByteBuffer.allocateDirect(binaryLength).order(ByteOrder.nativeOrder())
             payload.put(bytes, 4, binaryLength)
             payload.position(0)
+            drainGlErrors()
             GLES30.glProgramBinary(program, binaryFormat, payload, binaryLength)
+            val glErr = GLES30.glGetError()
             val linkStatus = IntArray(1)
             GLES30.glGetProgramiv(program, GLES30.GL_LINK_STATUS, linkStatus, 0)
-            linkStatus[0] == GLES30.GL_TRUE
+            val ok = (glErr == GLES30.GL_NO_ERROR) && (linkStatus[0] == GLES30.GL_TRUE)
+            if (!ok) {
+                drainGlErrors()
+                try { cacheFile.delete() } catch (_: Throwable) {}
+            }
+            ok
         } catch (e: Exception) {
-            android.util.Log.w("FlowCutShader", "Disk cache read failed for ${cacheFile.name}: ${e.message}")
+            drainGlErrors()
+            try { cacheFile.delete() } catch (_: Throwable) {}
+            if (BuildConfig.DEBUG) {
+                android.util.Log.w("FlowCutShader", "Disk cache read failed for ${cacheFile.name}: ${e.message}")
+            }
             false
         }
     }
 
     private fun saveToDisk(program: Int, cacheFile: File) {
+        if (!isProgramBinarySupported()) return
         try {
             val length = IntArray(1)
             GLES30.glGetProgramiv(program, GLES30.GL_PROGRAM_BINARY_LENGTH, length, 0)
@@ -1663,57 +1730,93 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
             val binary = ByteBuffer.allocateDirect(length[0]).order(ByteOrder.nativeOrder())
             val lengthOut = IntArray(1)
             val formatOut = IntArray(1)
+            drainGlErrors()
             GLES30.glGetProgramBinary(program, length[0], lengthOut, 0, formatOut, 0, binary)
+            if (GLES30.glGetError() != GLES30.GL_NO_ERROR) {
+                drainGlErrors()
+                return
+            }
             if (lengthOut[0] > 0) {
                 val bytes = ByteArray(4 + lengthOut[0])
                 val wrap = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder())
                 wrap.putInt(formatOut[0])
                 binary.position(0)
                 binary.get(bytes, 4, lengthOut[0])
-                cacheFile.writeBytes(bytes)
-                android.util.Log.d("FlowCutShader", "Saved binary cache ${cacheFile.name} (${lengthOut[0]} bytes)")
+                val parent = cacheFile.parentFile
+                val tmp = File(parent, "${cacheFile.name}.${UUID.randomUUID()}.tmp")
+                try {
+                    tmp.writeBytes(bytes)
+                    if (!tmp.renameTo(cacheFile)) {
+                        tmp.copyTo(cacheFile, overwrite = true)
+                        tmp.delete()
+                    }
+                } catch (io: Throwable) {
+                    try { tmp.delete() } catch (_: Throwable) {}
+                    throw io
+                }
+                if (BuildConfig.DEBUG) {
+                    android.util.Log.d("FlowCutShader", "Saved binary cache ${cacheFile.name} (${lengthOut[0]} bytes)")
+                }
             }
         } catch (e: Exception) {
-            android.util.Log.w("FlowCutShader", "Disk cache save failed for ${cacheFile.name}: ${e.message}")
+            if (BuildConfig.DEBUG) {
+                android.util.Log.w("FlowCutShader", "Disk cache save failed for ${cacheFile.name}: ${e.message}")
+            }
         }
     }
 
     private fun buildProgram(name: String, vertexSrc: String, fragmentSrc: String): Int {
         val program = GLES30.glCreateProgram()
+        if (program == 0) {
+            error("glCreateProgram returned 0 for $name")
+        }
         val cacheFile = getCacheFile(name, vertexSrc, fragmentSrc)
         val t0 = android.os.SystemClock.elapsedRealtime()
 
         if (cacheFile != null && tryLoadFromDisk(program, cacheFile)) {
-            val dt = android.os.SystemClock.elapsedRealtime() - t0
-            android.util.Log.d("FlowCutShader", "$name loaded from binary cache in $dt ms")
+            if (BuildConfig.DEBUG) {
+                val dt = android.os.SystemClock.elapsedRealtime() - t0
+                android.util.Log.d("FlowCutShader", "$name loaded from binary cache in $dt ms")
+            }
             return program
         }
 
-        val vs = compileShader(GLES30.GL_VERTEX_SHADER, vertexSrc)
-        val fs = compileShader(GLES30.GL_FRAGMENT_SHADER, fragmentSrc)
-        GLES30.glAttachShader(program, vs)
-        GLES30.glAttachShader(program, fs)
+        var vs = 0
+        var fs = 0
+        try {
+            vs = compileShader(GLES30.GL_VERTEX_SHADER, vertexSrc)
+            fs = compileShader(GLES30.GL_FRAGMENT_SHADER, fragmentSrc)
+            GLES30.glAttachShader(program, vs)
+            GLES30.glAttachShader(program, fs)
+            if (cacheFile != null && isProgramBinarySupported()) {
+                GLES30.glProgramParameteri(program, GLES30.GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GLES30.GL_TRUE)
+            }
 
-        val tLink = android.os.SystemClock.elapsedRealtime()
-        GLES30.glLinkProgram(program)
-        val linkDt = android.os.SystemClock.elapsedRealtime() - tLink
-        android.util.Log.d("FlowCutShader", "$name link $linkDt ms")
+            val tLink = android.os.SystemClock.elapsedRealtime()
+            GLES30.glLinkProgram(program)
+            if (BuildConfig.DEBUG) {
+                val linkDt = android.os.SystemClock.elapsedRealtime() - tLink
+                android.util.Log.d("FlowCutShader", "$name link $linkDt ms")
+            }
 
-        val status = IntArray(1)
-        GLES30.glGetProgramiv(program, GLES30.GL_LINK_STATUS, status, 0)
-        if (status[0] == 0) {
-            val log = GLES30.glGetProgramInfoLog(program)
+            val status = IntArray(1)
+            GLES30.glGetProgramiv(program, GLES30.GL_LINK_STATUS, status, 0)
+            if (status[0] == 0) {
+                val log = GLES30.glGetProgramInfoLog(program)
+                error("Error linking $name program: $log")
+            }
+
+            if (cacheFile != null) {
+                saveToDisk(program, cacheFile)
+            }
+            return program
+        } catch (t: Throwable) {
             GLES30.glDeleteProgram(program)
-            error("Error linking $name program: $log")
+            throw t
+        } finally {
+            if (vs != 0) GLES30.glDeleteShader(vs)
+            if (fs != 0) GLES30.glDeleteShader(fs)
         }
-
-        GLES30.glDeleteShader(vs)
-        GLES30.glDeleteShader(fs)
-
-        if (cacheFile != null) {
-            saveToDisk(program, cacheFile)
-        }
-        return program
     }
 
     private fun compileShader(type: Int, source: String): Int {
@@ -1735,6 +1838,9 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
         var canvasAspect: Float = 9.0f / 16.0f
 
         fun calculateCrop(clip: Clip, canvasAspectRatio: Float = canvasAspect): FloatArray {
+            if (clip.displayWidth <= 0 || clip.displayHeight <= 0) {
+                return floatArrayOf(1.0f, 1.0f)
+            }
             val aspect = clip.displayWidth.toFloat() / clip.displayHeight.toFloat()
             val target = if (canvasAspectRatio > 0f) canvasAspectRatio else (9f / 16f)
             return if (aspect > target) {

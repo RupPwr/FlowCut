@@ -231,9 +231,21 @@ class OverlayStagePass(
 
     override fun onGlCreated() {
         isGlContextActive = true
-        legacyRenderer?.onGlCreated()
+        cachedRenderServices = null
+        legacyEntry?.let {
+            it.consecutiveFailures = 0
+            it.disabled = false
+            it.disabledLogged = false
+        }
+        legacyRenderer?.let {
+            attachServicesIfNeeded(it)
+            it.onGlCreated()
+        }
         val list = synchronized(lock) { customRenderers.toList() }
         for (entry in list) {
+            entry.consecutiveFailures = 0
+            entry.disabled = false
+            entry.disabledLogged = false
             try {
                 attachServicesIfNeeded(entry.renderer)
                 entry.renderer.onGlCreated()

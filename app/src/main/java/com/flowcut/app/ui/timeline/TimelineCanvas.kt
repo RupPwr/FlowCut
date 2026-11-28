@@ -633,8 +633,7 @@ fun TimelineCanvas(
                 playhead.mode == PlayMode.SCRUBBING ||
                 playhead.mode == PlayMode.FLINGING ||
                 controller.playhead.mode == PlayMode.SCRUBBING ||
-                controller.playhead.mode == PlayMode.FLINGING ||
-                isLoaderActive
+                controller.playhead.mode == PlayMode.FLINGING
             }
         }
     }

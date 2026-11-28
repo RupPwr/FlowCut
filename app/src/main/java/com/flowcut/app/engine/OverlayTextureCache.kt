@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
+import android.opengl.EGL14
 import android.opengl.GLES20
 import android.opengl.GLUtils
 import android.os.Build
@@ -18,6 +19,8 @@ import com.flowcut.app.engine.perf.ResourceTracker
 import com.flowcut.app.engine.proxy.ProxyStore
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -58,6 +61,42 @@ class OverlayTextureCache(
     private val tempTexIds = IntArray(1)
     private val retrieverPool = RetrieverPool(maxEntries = 4)
     private var accessCounter = 0L
+    private val pendingPruneRequested = AtomicBoolean(false)
+    @Volatile
+    private var isReleased = false
+    private var cachedMaxGlTextureSize = 0
+
+    private fun hasCurrentGlContext(): Boolean {
+        return try {
+            EGL14.eglGetCurrentContext() != EGL14.EGL_NO_CONTEXT
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun maxSupportedTextureSize(): Int {
+        if (cachedMaxGlTextureSize > 0) return cachedMaxGlTextureSize
+        if (!hasCurrentGlContext()) return 2048
+        val maxTex = IntArray(1)
+        GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTex, 0)
+        val detected = if (maxTex[0] > 0) maxTex[0] else 2048
+        cachedMaxGlTextureSize = detected.coerceIn(1024, 4096)
+        return cachedMaxGlTextureSize
+    }
+
+    /**
+     * Thread-safe prune request safe to invoke from PerfGovernor or Main/onTrimMemory threads.
+     * Actual map eviction and glDeleteTextures run on the GL thread during the next draw pass.
+     */
+    fun requestPrune() {
+        pendingPruneRequested.set(true)
+    }
+
+    private fun drainPendingPruneOnGlThread(protectedItemId: String) {
+        if (pendingPruneRequested.get() && pendingPruneRequested.compareAndSet(true, false)) {
+            pruneToBudget(protectedItemId)
+        }
+    }
 
     /**
      * Dedicated background executor for non-blocking preview PIP video frame decoding.
@@ -112,6 +151,7 @@ class OverlayTextureCache(
         if (item.type == LayerType.VIDEO) {
             return getOrUpdateVideoTexture(item, item.startUs, isSynchronous = false)
         }
+        drainPendingPruneOnGlThread(item.id)
         val targetHash = computeContentHash(item)
         val existing = cache[item.id]
         if (existing != null && existing.contentHash == targetHash && existing.texId > 0) {
@@ -192,6 +232,11 @@ class OverlayTextureCache(
      * Protected items (currently visible/active in frame) are NEVER evicted.
      */
     fun pruneToBudget(protectedItemIds: Set<String> = emptySet()) {
+        if (!hasCurrentGlContext()) {
+            // Never mutate unsynchronized GL maps or call glDeleteTextures without an active EGL context.
+            pendingPruneRequested.set(true)
+            return
+        }
         var total = currentTotalBytes()
         if (total <= maxByteBudget) return
 
@@ -289,9 +334,10 @@ class OverlayTextureCache(
 
         val lineSpacingMultiplier = item.lineSpacing.coerceIn(0.55f, 2.80f)
 
+        val maxTexDim = maxSupportedTextureSize()
         // Measure text using full desired width so wide character spacing never clips
         val desiredWidth = ceil(StaticLayout.getDesiredWidth(rawText, textPaint)).toInt().coerceAtLeast(1)
-        val maxTextW = (1920 * effScale).toInt().coerceIn(1920, 4096)
+        val maxTextW = (1920 * effScale).toInt().coerceIn(512, maxTexDim)
         val textW = desiredWidth.coerceIn(1, maxTextW)
 
         val layout = StaticLayout.Builder.obtain(rawText, 0, rawText.length, textPaint, textW)
@@ -307,8 +353,8 @@ class OverlayTextureCache(
         val padX = if (hasLabel) (64f * effScale).toInt() else (40f * effScale + strokeOffset).toInt()
         val padY = if (hasLabel) (44f * effScale).toInt() else (28f * effScale + strokeOffset).toInt()
 
-        val bmpW = (textW + padX * 2).coerceIn(1, 4096)
-        val bmpH = (textH + padY * 2).coerceIn(1, 4096)
+        val bmpW = (textW + padX * 2).coerceIn(1, maxTexDim)
+        val bmpH = (textH + padY * 2).coerceIn(1, maxTexDim)
         val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
@@ -576,6 +622,7 @@ class OverlayTextureCache(
         isSynchronous: Boolean = false
     ): CachedOverlayTex? {
         if (item.mediaPath.isEmpty()) return null
+        drainPendingPruneOnGlThread(item.id)
         val localUs = (timelineUs - item.startUs).coerceAtLeast(0L)
         val speedVal = if (item.speed > 0f) item.speed.toDouble() else 1.0
         val targetSourceUs = item.sourceInUs + (localUs.toDouble() * speedVal).toLong()
@@ -633,6 +680,10 @@ class OverlayTextureCache(
         if (state == null) {
             val newState = VideoPipState(item.id)
             newState.decodeTask = Runnable {
+                if (isReleased) {
+                    newState.isDecoding = false
+                    return@Runnable
+                }
                 val path = newState.mediaPath
                 val decodeBucket = newState.targetBucket
                 val decodeSourceUs = newState.targetSourceUs
@@ -649,17 +700,25 @@ class OverlayTextureCache(
                 val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
                 newState.lastDecodeDurationMs = elapsedMs
                 if (decoded != null && !decoded.isRecycled) {
+                    var shouldNotify = false
                     synchronized(newState.lock) {
-                        val old = newState.backBitmap
-                        newState.backBitmap = decoded
-                        newState.pendingDecodedBucket = decodeBucket
-                        newState.hasDirtyBitmap = true
-                        if (old != null && old != decoded && !old.isRecycled) {
-                            old.recycle()
+                        if (isReleased) {
+                            decoded.recycle()
+                        } else {
+                            val old = newState.backBitmap
+                            newState.backBitmap = decoded
+                            newState.pendingDecodedBucket = decodeBucket
+                            newState.hasDirtyBitmap = true
+                            shouldNotify = true
+                            if (old != null && old != decoded && !old.isRecycled) {
+                                old.recycle()
+                            }
                         }
                     }
-                    newState.lastFailedBucket = -1L
-                    onFrameReady?.invoke()
+                    if (shouldNotify) {
+                        newState.lastFailedBucket = -1L
+                        onFrameReady?.invoke()
+                    }
                 } else {
                     newState.lastFailedBucket = decodeBucket
                     newState.lastFailedAtMs = System.currentTimeMillis()
@@ -798,10 +857,13 @@ class OverlayTextureCache(
     }
 
     fun clear() {
+        val glActive = hasCurrentGlContext()
         for (entry in cache.values) {
             if (entry.texId > 0) {
-                tempTexIds[0] = entry.texId
-                GLES20.glDeleteTextures(1, tempTexIds, 0)
+                if (glActive) {
+                    tempTexIds[0] = entry.texId
+                    GLES20.glDeleteTextures(1, tempTexIds, 0)
+                }
                 entry.texId = 0
             }
         }
@@ -809,24 +871,30 @@ class OverlayTextureCache(
 
         for (vState in videoStates.values) {
             if (vState.texEntry.texId > 0) {
-                tempTexIds[0] = vState.texEntry.texId
-                GLES20.glDeleteTextures(1, tempTexIds, 0)
+                if (glActive) {
+                    tempTexIds[0] = vState.texEntry.texId
+                    GLES20.glDeleteTextures(1, tempTexIds, 0)
+                }
                 vState.texEntry.texId = 0
             }
             synchronized(vState.lock) {
                 vState.backBitmap?.recycle()
                 vState.backBitmap = null
+                vState.hasDirtyBitmap = false
             }
         }
         videoStates.clear()
     }
 
     fun release() {
-        clear()
-        retrieverPool.release()
+        isReleased = true
+        onFrameReady = null
         try {
             pipDecodeExecutor.shutdownNow()
+            pipDecodeExecutor.awaitTermination(150L, TimeUnit.MILLISECONDS)
         } catch (_: Throwable) {}
+        retrieverPool.release()
+        clear()
     }
 
     companion object {
@@ -843,7 +911,7 @@ class OverlayTextureCache(
             if (Runtime.getRuntime().availableProcessors() >= 4) 2 else 1
 
         fun pruneDefaultCache() {
-            PreviewRenderer.activeInstance?.overlayTextureCache?.pruneToBudget()
+            PreviewRenderer.activeInstance?.overlayTextureCache?.requestPrune()
         }
     }
 }

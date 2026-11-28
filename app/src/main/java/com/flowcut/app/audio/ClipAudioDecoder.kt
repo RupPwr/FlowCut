@@ -37,6 +37,8 @@ class ClipAudioDecoder(val filePath: String) {
         const val BUFFER_SAMPLES = BUFFER_FRAMES * TARGET_CHANNELS
         const val PREFILL_FRAMES = 48000 // 1 second ahead
         private const val DECODE_TIMEOUT_US = 0L
+        private const val PCM_24BIT_PACKED = 21 // AudioFormat.ENCODING_PCM_24BIT_PACKED (API 31+)
+        private const val PCM_32BIT = 22        // AudioFormat.ENCODING_PCM_32BIT (API 31+)
 
         fun framesToUs(frames: Long): Long = Math.floorDiv(frames * US_PER_MS, AUDIO_FRAMES_PER_MS)
     }
@@ -77,6 +79,7 @@ class ClipAudioDecoder(val filePath: String) {
 
     private var inputEos: Boolean = false
     private var outputEos: Boolean = false
+    private var pendingSeekSync: Boolean = false
 
     // Pre-allocated scratch buffers for decoding
     private val bufferInfo = MediaCodec.BufferInfo()
@@ -131,16 +134,16 @@ class ClipAudioDecoder(val filePath: String) {
 
                 val mime = audioFormat.getString(MediaFormat.KEY_MIME) ?: ""
                 val dec = MediaCodec.createDecoderByType(mime)
+                codec = dec
                 dec.configure(audioFormat, null, null, 0)
                 dec.start()
-                codec = dec
 
                 srcSampleRate = if (audioFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
-                    audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8000)
                 } else TARGET_SAMPLE_RATE
 
                 srcChannels = if (audioFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                    audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
                 } else TARGET_CHANNELS
 
                 srcPcmEncoding = if (audioFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
@@ -277,6 +280,7 @@ class ClipAudioDecoder(val filePath: String) {
 
             inputEos = false
             outputEos = false
+            pendingSeekSync = true
             bufferStartFrame = clampedTargetFrame
             writeFrame = clampedTargetFrame
             bufferedFrames = 0
@@ -284,9 +288,10 @@ class ClipAudioDecoder(val filePath: String) {
             prevSrcSampleL = 0f
             prevSrcSampleR = 0f
 
-            // Fill buffer forward to target + prefill
+            // Fill buffer forward past target + prefill (accounting for SEEK_TO_PREVIOUS_SYNC preroll)
+            val desiredEndFrame = clampedTargetFrame + targetMinFrames
             var iterations = 0
-            while (bufferedFrames < targetMinFrames && !outputEos && iterations < maxIterations) {
+            while ((writeFrame < desiredEndFrame || bufferedFrames < targetMinFrames) && !outputEos && iterations < maxIterations) {
                 val decoded = internalDecodeChunk()
                 if (!decoded && inputEos) break
                 iterations++
@@ -712,7 +717,7 @@ class ClipAudioDecoder(val filePath: String) {
                             dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inputEos = true
                         } else {
-                            dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
+                            dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime.coerceAtLeast(0L), 0)
                             ext.advance()
                         }
                     }
@@ -724,6 +729,16 @@ class ClipAudioDecoder(val filePath: String) {
             if (outIndex >= 0) {
                 val outBuf = dec.getOutputBuffer(outIndex)
                 if (outBuf != null && bufferInfo.size > 0) {
+                    if (pendingSeekSync) {
+                        pendingSeekSync = false
+                        val ptsUs = bufferInfo.presentationTimeUs
+                        if (ptsUs >= 0L) {
+                            val actualStartFrame = usToAudioFrames(ptsUs)
+                            bufferStartFrame = actualStartFrame
+                            writeFrame = actualStartFrame
+                            bufferedFrames = 0
+                        }
+                    }
                     outBuf.position(bufferInfo.offset)
                     outBuf.limit(bufferInfo.offset + bufferInfo.size)
                     appendPcm(outBuf)
@@ -736,10 +751,10 @@ class ClipAudioDecoder(val filePath: String) {
             } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 val newFormat = dec.outputFormat
                 if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
-                    srcSampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    srcSampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8000)
                 }
                 if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                    srcChannels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    srcChannels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
                 }
                 if (newFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
                     srcPcmEncoding = newFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
@@ -753,11 +768,72 @@ class ClipAudioDecoder(val filePath: String) {
         return produced
     }
 
+    private fun readOtherPcmSample(byteBuf: ByteBuffer, encoding: Int): Float {
+        return when (encoding) {
+            AudioFormat.ENCODING_PCM_8BIT -> ((byteBuf.get().toInt() and 0xFF) - 128) / 128.0f
+            PCM_24BIT_PACKED -> {
+                val b0 = byteBuf.get().toInt() and 0xFF
+                val b1 = byteBuf.get().toInt() and 0xFF
+                val b2 = byteBuf.get().toInt() // sign-extended MSB
+                val s24 = (b2 shl 16) or (b1 shl 8) or b0
+                s24 / 8388608.0f
+            }
+            PCM_32BIT -> byteBuf.int / 2147483648.0f
+            else -> byteBuf.short / 32768.0f
+        }
+    }
+
     private fun appendPcm(byteBuf: ByteBuffer) {
         byteBuf.order(ByteOrder.LITTLE_ENDIAN)
 
-        val is16Bit = srcPcmEncoding != AudioFormat.ENCODING_PCM_FLOAT
+        val encoding = srcPcmEncoding
         val channels = maxOf(1, srcChannels)
+        val safeRate = maxOf(8000, srcSampleRate)
+
+        if (encoding == AudioFormat.ENCODING_PCM_8BIT || encoding == PCM_24BIT_PACKED || encoding == PCM_32BIT) {
+            val bytesPerSample = when (encoding) {
+                AudioFormat.ENCODING_PCM_8BIT -> 1
+                PCM_24BIT_PACKED -> 3
+                else -> 4
+            }
+            val bytesPerFrame = bytesPerSample * channels
+            val totalSrcFrames = byteBuf.remaining() / bytesPerFrame
+            if (totalSrcFrames <= 0) return
+
+            if (safeRate == TARGET_SAMPLE_RATE) {
+                for (f in 0 until totalSrcFrames) {
+                    val sL = readOtherPcmSample(byteBuf, encoding)
+                    val sR = if (channels > 1) readOtherPcmSample(byteBuf, encoding) else sL
+                    for (c in 2 until channels) {
+                        readOtherPcmSample(byteBuf, encoding)
+                    }
+                    writeSampleToRing(sL, sR)
+                }
+                return
+            }
+
+            val step = safeRate.toDouble() / TARGET_SAMPLE_RATE.toDouble()
+            for (f in 0 until totalSrcFrames) {
+                val sL = readOtherPcmSample(byteBuf, encoding)
+                val sR = if (channels > 1) readOtherPcmSample(byteBuf, encoding) else sL
+                for (c in 2 until channels) {
+                    readOtherPcmSample(byteBuf, encoding)
+                }
+                while (resamplePhase < 1.0) {
+                    val frac = resamplePhase.toFloat()
+                    val outL = prevSrcSampleL * (1f - frac) + sL * frac
+                    val outR = prevSrcSampleR * (1f - frac) + sR * frac
+                    writeSampleToRing(outL, outR)
+                    resamplePhase += step
+                }
+                resamplePhase -= 1.0
+                prevSrcSampleL = sL
+                prevSrcSampleR = sR
+            }
+            return
+        }
+
+        val is16Bit = encoding != AudioFormat.ENCODING_PCM_FLOAT
 
         if (is16Bit) {
             val shortBuf = byteBuf.asShortBuffer()
@@ -900,6 +976,7 @@ class ClipAudioDecoder(val filePath: String) {
 
         hasAudio = false
         isPrepared = false
+        pendingSeekSync = false
         bufferedFrames = 0
         wavPcmData = null
         wavTotalFrames = 0

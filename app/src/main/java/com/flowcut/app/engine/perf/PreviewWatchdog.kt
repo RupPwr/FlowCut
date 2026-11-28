@@ -65,6 +65,11 @@ object PreviewWatchdog {
 
     fun stop() {
         running = false
+        stateProvider = null
+        glThread = null
+        glDrawStartNs = 0L
+        glDrawCompletedNs = 0L
+        isRenderPending = false
         synchronized(watchdogLock) {
             (watchdogLock as java.lang.Object).notifyAll()
         }

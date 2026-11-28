@@ -10,6 +10,7 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES30
 import android.os.SystemClock
+import android.view.Surface
 import com.flowcut.app.core.timeline.TimelineSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -75,6 +76,7 @@ object ExportBenchmark {
         var eglDisplay: EGLDisplay? = null
         var eglContext: EGLContext? = null
         var eglSurface: EGLSurface? = null
+        var encoderInputSurface: Surface? = null
         var videoEncoder: MediaCodec? = null
 
         try {
@@ -85,40 +87,73 @@ object ExportBenchmark {
             videoEncoder = vEnc
             vEnc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val inputSurface = vEnc.createInputSurface()
+            encoderInputSurface = inputSurface
             vEnc.start()
 
             // Setup lightweight offscreen EGL context for rendering
             val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            if (display == EGL14.EGL_NO_DISPLAY) error("EGL display unavailable")
             eglDisplay = display
             val version = IntArray(2)
-            EGL14.eglInitialize(display, version, 0, version, 1)
+            if (!EGL14.eglInitialize(display, version, 0, version, 1)) error("EGL initialize failed")
 
-            val configAttribs = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL_RECORDABLE_ANDROID, 1,
-                EGL14.EGL_NONE
-            )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
-            val config = configs[0] ?: error("EGL config not found")
+            val configCandidates = arrayOf(
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, 0x0040, // EGL_OPENGL_ES3_BIT_KHR
+                    EGL_RECORDABLE_ANDROID, 1,
+                    EGL14.EGL_NONE
+                ),
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL_RECORDABLE_ANDROID, 1,
+                    EGL14.EGL_NONE
+                ),
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_NONE
+                )
+            )
+            var config: EGLConfig? = null
+            for (attribs in configCandidates) {
+                configs[0] = null
+                numConfigs[0] = 0
+                if (EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, numConfigs, 0) &&
+                    numConfigs[0] > 0 && configs[0] != null
+                ) {
+                    config = configs[0]
+                    break
+                }
+            }
+            if (config == null) error("EGL config not found")
 
             val contextAttribs = intArrayOf(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
                 EGL14.EGL_NONE
             )
             val eglCtx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+            if (eglCtx == null || eglCtx == EGL14.EGL_NO_CONTEXT) error("EGL context creation failed")
             eglContext = eglCtx
 
             val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
             val surf = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfaceAttribs, 0)
+            if (surf == null || surf == EGL14.EGL_NO_SURFACE) error("EGL surface creation failed")
             eglSurface = surf
 
-            EGL14.eglMakeCurrent(display, surf, surf, eglCtx)
+            if (!EGL14.eglMakeCurrent(display, surf, surf, eglCtx)) error("EGL makeCurrent failed")
             GLES30.glViewport(0, 0, choice.width, choice.height)
 
             val startMs = SystemClock.elapsedRealtime()
@@ -174,8 +209,13 @@ object ExportBenchmark {
                     if (eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT) {
                         EGL14.eglDestroyContext(eglDisplay, eglContext)
                     }
-                    EGL14.eglTerminate(eglDisplay)
+                    // Never call EGL14.eglTerminate(EGL_DEFAULT_DISPLAY): it is process-shared with Preview/HWUI.
+                    EGL14.eglReleaseThread()
                 }
+            } catch (_: Throwable) {}
+
+            try {
+                encoderInputSurface?.release()
             } catch (_: Throwable) {}
 
             try {

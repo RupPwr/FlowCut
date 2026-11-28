@@ -18,7 +18,10 @@ class ExportCapabilities(
         val width: Int,
         val height: Int,
         val minBps: Int,
-        val maxBps: Int
+        val maxBps: Int,
+        val supportsVbr: Boolean = true,
+        val supportedProfile: Int = 0,
+        val supportedLevel: Int = 0
     )
 
     companion object {
@@ -47,17 +50,26 @@ class ExportCapabilities(
                 setInteger(MediaFormat.KEY_BIT_RATE, clampBitrate(bps, c.minBps, c.maxBps))
                 setInteger(MediaFormat.KEY_FRAME_RATE, spec.fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                if (c.supportsVbr) {
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 }
-                setInteger(MediaFormat.KEY_LATENCY, 0)
-                val profile = if (spec.codec == OutCodec.AVC) {
-                    MediaCodecInfo.CodecProfileLevel.AVCProfileMain
-                } else {
-                    MediaCodecInfo.CodecProfileLevel.HEVCProfileMain
+                if (c.supportedProfile > 0 && c.supportedLevel > 0) {
+                    setInteger(MediaFormat.KEY_PROFILE, c.supportedProfile)
+                    setInteger(MediaFormat.KEY_LEVEL, c.supportedLevel)
                 }
-                setInteger(MediaFormat.KEY_PROFILE, profile)
+            }
+        }
+
+        fun buildMinimalVideoFormat(spec: OutputSpec, c: Choice, bps: Int): MediaFormat {
+            val mime = if (spec.codec == OutCodec.AVC) MediaFormat.MIMETYPE_VIDEO_AVC else MediaFormat.MIMETYPE_VIDEO_HEVC
+            return MediaFormat.createVideoFormat(mime, c.width, c.height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, clampBitrate(bps, c.minBps, c.maxBps))
+                setInteger(MediaFormat.KEY_FRAME_RATE, spec.fps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             }
         }
     }
@@ -65,6 +77,13 @@ class ExportCapabilities(
     fun find(spec: OutputSpec, allowSoftware: Boolean = true): Choice? {
         val mime = if (spec.codec == OutCodec.AVC) MediaFormat.MIMETYPE_VIDEO_AVC else MediaFormat.MIMETYPE_VIDEO_HEVC
         val needHardware = isHardwareRequired(spec)
+        val desiredProfile = if (spec.codec == OutCodec.AVC) {
+            MediaCodecInfo.CodecProfileLevel.AVCProfileMain
+        } else {
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain
+        }
+
+        var softwareFallback: Choice? = null
 
         for (info in encoders) {
             if (info.supportedTypes.none { it.equals(mime, ignoreCase = true) }) continue
@@ -82,6 +101,13 @@ class ExportCapabilities(
                 null
             } ?: continue
 
+            val colorFormats = caps.colorFormats
+            if (colorFormats != null && colorFormats.isNotEmpty() &&
+                !colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            ) {
+                continue
+            }
+
             val vc = caps.videoCapabilities ?: continue
             val alignW = vc.widthAlignment.coerceAtLeast(2)
             val alignH = vc.heightAlignment.coerceAtLeast(2)
@@ -93,17 +119,42 @@ class ExportCapabilities(
             val range = vc.bitrateRange
             val minBps = range?.lower ?: 200_000
             val maxBps = range?.upper ?: Int.MAX_VALUE
+            val supportsVbr = try {
+                caps.encoderCapabilities?.isBitrateModeSupported(
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                ) ?: true
+            } catch (_: Throwable) {
+                false
+            }
+            var matchedProfile = 0
+            var maxLevelForProfile = 0
+            try {
+                for (pl in caps.profileLevels.orEmpty()) {
+                    if (pl.profile == desiredProfile && pl.level > maxLevelForProfile) {
+                        matchedProfile = pl.profile
+                        maxLevelForProfile = pl.level
+                    }
+                }
+            } catch (_: Throwable) {}
 
-            return Choice(
+            val candidate = Choice(
                 codecName = info.name,
                 hardware = hw,
                 width = size.w,
                 height = size.h,
                 minBps = minBps,
-                maxBps = maxBps
+                maxBps = maxBps,
+                supportsVbr = supportsVbr,
+                supportedProfile = matchedProfile,
+                supportedLevel = maxLevelForProfile
             )
+            if (hw) {
+                return candidate
+            } else if (softwareFallback == null) {
+                softwareFallback = candidate
+            }
         }
-        return null
+        return softwareFallback
     }
 
     fun dumpSupportedSummary(): String {

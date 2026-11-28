@@ -12,7 +12,7 @@ object ColorInfoCheck {
     const val HEVC_PROFILE_MAIN10 = 2
     const val HEVC_PROFILE_MAIN10_HDR10 = 4096
     const val HEVC_PROFILE_MAIN10_HDR10_PLUS = 8192
-    const val AVC_PROFILE_HIGH10 = 4
+    const val AVC_PROFILE_HIGH10 = 16
 
     const val MIMETYPE_VIDEO_HEVC = "video/hevc"
     const val MIMETYPE_VIDEO_AVC = "video/avc"

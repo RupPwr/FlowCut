@@ -19,16 +19,19 @@ import android.opengl.GLES20
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import android.view.Surface
 import com.flowcut.app.engine.export.FrameGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -47,6 +50,9 @@ class PipProxyGenerator(
     val proxyStore: ProxyStore = ProxyStore(context),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 ) {
+    private val job = SupervisorJob(scope.coroutineContext[Job])
+    private val proxyScope = CoroutineScope(scope.coroutineContext + job)
+    private val transcodeSemaphore = Semaphore(1)
     private val inFlight = ConcurrentHashMap<String, Deferred<String?>>()
 
     /**
@@ -56,29 +62,35 @@ class PipProxyGenerator(
 
     /**
      * Retrieves an existing proxy or enqueues a background transcode task.
-     * Deduplicates in-flight jobs using source cache key.
+     * Deduplicates in-flight jobs using source cache key and serializes hardware codec usage.
      */
     fun getOrGenerateProxy(sourcePath: String): Deferred<String?> {
         val ready = proxyStore.getReadyProxyPath(sourcePath)
         if (ready != null) {
             return CompletableDeferred(ready)
         }
+        if (!job.isActive) {
+            return CompletableDeferred(null)
+        }
 
         val key = proxyStore.computeKeyForSource(sourcePath)
         return inFlight.computeIfAbsent(key) {
-            scope.async(Dispatchers.IO) {
+            proxyScope.async(Dispatchers.IO) {
                 try {
-                    val existing = proxyStore.getReadyProxyPath(sourcePath)
-                    if (existing != null) return@async existing
+                    transcodeSemaphore.withPermit {
+                        val existing = proxyStore.getReadyProxyPath(sourcePath)
+                        if (existing != null) return@withPermit existing
 
-                    val tempFile = proxyStore.getTempProxyFile(key)
-                    val ok = transcodeWithFallback(sourcePath, tempFile)
-                    if (ok && tempFile.exists() && tempFile.length() > 0L) {
-                        val committed = proxyStore.commitProxy(key)
-                        committed?.absolutePath
-                    } else {
-                        try { tempFile.delete() } catch (_: Throwable) {}
-                        null
+                        val tempFile = proxyStore.getTempProxyFile(key)
+                        val checkCancelled = { !isActive || Thread.currentThread().isInterrupted }
+                        val ok = transcodeWithFallback(sourcePath, tempFile, checkCancelled)
+                        if (ok && !checkCancelled() && tempFile.exists() && tempFile.length() > 0L) {
+                            val committed = proxyStore.commitProxy(key)
+                            committed?.absolutePath
+                        } else {
+                            try { tempFile.delete() } catch (_: Throwable) {}
+                            null
+                        }
                     }
                 } catch (_: Throwable) {
                     try { proxyStore.getTempProxyFile(key).delete() } catch (_: Throwable) {}
@@ -99,9 +111,18 @@ class PipProxyGenerator(
     /**
      * Transcodes source video to tempFile with all-intra verification and fallback.
      */
-    fun transcodeWithFallback(sourcePath: String, tempFile: File): Boolean {
+    fun transcodeWithFallback(
+        sourcePath: String,
+        tempFile: File,
+        isCancelled: () -> Boolean = { Thread.currentThread().isInterrupted }
+    ): Boolean {
+        if (isCancelled()) return false
         // Attempt 1: All-intra via KEY_I_FRAME_INTERVAL = 0
-        var success = transcodeInternal(sourcePath, tempFile, forcePerFrameSync = false)
+        var success = transcodeInternal(sourcePath, tempFile, forcePerFrameSync = false, isCancelled = isCancelled)
+        if (isCancelled()) {
+            try { tempFile.delete() } catch (_: Throwable) {}
+            return false
+        }
         if (success && tempFile.exists() && tempFile.length() > 0L) {
             val allSync = verifyAllSamplesSync(tempFile)
             if (allSync) {
@@ -111,8 +132,13 @@ class PipProxyGenerator(
             try { tempFile.delete() } catch (_: Throwable) {}
         }
 
+        if (isCancelled()) return false
         // Attempt 2: Fallback with per-frame PARAMETER_KEY_REQUEST_SYNC_FRAME
-        success = transcodeInternal(sourcePath, tempFile, forcePerFrameSync = true)
+        success = transcodeInternal(sourcePath, tempFile, forcePerFrameSync = true, isCancelled = isCancelled)
+        if (isCancelled()) {
+            try { tempFile.delete() } catch (_: Throwable) {}
+            return false
+        }
         return success && tempFile.exists() && tempFile.length() > 0L
     }
 
@@ -157,9 +183,10 @@ class PipProxyGenerator(
     private fun transcodeInternal(
         sourcePath: String,
         tempFile: File,
-        forcePerFrameSync: Boolean
+        forcePerFrameSync: Boolean,
+        isCancelled: () -> Boolean
     ): Boolean {
-        if (sourcePath.isEmpty()) return false
+        if (isCancelled() || sourcePath.isEmpty()) return false
         val srcFile = File(sourcePath)
         if (!srcFile.exists() || srcFile.length() <= 0L) return false
 
@@ -184,6 +211,8 @@ class PipProxyGenerator(
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
         var encoder: MediaCodec? = null
+        var encoderInputSurface: Surface? = null
+        var frameCallbackThread: HandlerThread? = null
         var muxer: MediaMuxer? = null
         var surfaceTexture: SurfaceTexture? = null
         var decoderSurface: Surface? = null
@@ -227,6 +256,7 @@ class PipProxyGenerator(
             encoder = vEnc
             vEnc.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val inputSurface = vEnc.createInputSurface()
+            encoderInputSurface = inputSurface
             vEnc.start()
 
             // 2. EGL setup for encoder inputSurface
@@ -236,34 +266,54 @@ class PipProxyGenerator(
             val version = IntArray(2)
             if (!EGL14.eglInitialize(display, version, 0, version, 1)) return false
 
-            val configAttribs = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL_RECORDABLE_ANDROID, 1,
-                EGL14.EGL_NONE
-            )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
-            val config = configs[0] ?: return false
+            val configCandidates = arrayOf(
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL_RECORDABLE_ANDROID, 1,
+                    EGL14.EGL_NONE
+                ),
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_NONE
+                )
+            )
+            var config: EGLConfig? = null
+            for (attribs in configCandidates) {
+                configs[0] = null
+                numConfigs[0] = 0
+                if (EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, numConfigs, 0) &&
+                    numConfigs[0] > 0 && configs[0] != null
+                ) {
+                    config = configs[0]
+                    break
+                }
+            }
+            if (config == null) return false
 
             val contextAttribs = intArrayOf(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
                 EGL14.EGL_NONE
             )
             val ctx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
-            if (ctx == EGL14.EGL_NO_CONTEXT) return false
+            if (ctx == null || ctx == EGL14.EGL_NO_CONTEXT) return false
             eglContext = ctx
 
             val surfAttribs = intArrayOf(EGL14.EGL_NONE)
             val surf = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfAttribs, 0)
-            if (surf == EGL14.EGL_NO_SURFACE) return false
+            if (surf == null || surf == EGL14.EGL_NO_SURFACE) return false
             eglSurface = surf
 
-            EGL14.eglMakeCurrent(display, surf, surf, ctx)
+            if (!EGL14.eglMakeCurrent(display, surf, surf, ctx)) return false
 
             // 3. OES Texture & TextureRenderer setup
             val rnd = TextureRenderer()
@@ -279,12 +329,14 @@ class PipProxyGenerator(
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
             val frameGate = FrameGate()
-            val mainHandler = Handler(Looper.getMainLooper())
+            val cbThread = HandlerThread("FlowCut-PipProxyCb").apply { start() }
+            frameCallbackThread = cbThread
+            val cbHandler = Handler(cbThread.looper)
             val st = SurfaceTexture(oesTexId).apply {
                 setDefaultBufferSize(targetW, targetH)
                 setOnFrameAvailableListener({
                     frameGate.signal()
-                }, mainHandler)
+                }, cbHandler)
             }
             surfaceTexture = st
             val decSurf = Surface(st)
@@ -314,8 +366,11 @@ class PipProxyGenerator(
                 Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }
             } else null
             var eosRetries = 0
+            var lastEncodedPtsUs = -1L
+            var lastMuxedPtsUs = -1L
 
             while (!encoderEos) {
+                if (isCancelled()) return false
                 // A. Feed Extractor -> Decoder
                 if (!inputEos) {
                     val inIdx = vDec.dequeueInputBuffer(10_000L)
@@ -327,9 +382,9 @@ class PipProxyGenerator(
                                 vDec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 inputEos = true
                             } else {
-                                val timeUs = extractor.sampleTime
-                                val flags = extractor.sampleFlags
-                                vDec.queueInputBuffer(inIdx, 0, sampleSize, timeUs, flags)
+                                val timeUs = extractor.sampleTime.coerceAtLeast(0L)
+                                val codecFlags = mapExtractorFlagsToCodecFlags(extractor.sampleFlags)
+                                vDec.queueInputBuffer(inIdx, 0, sampleSize, timeUs, codecFlags)
                                 extractor.advance()
                             }
                         }
@@ -357,8 +412,10 @@ class PipProxyGenerator(
 
                                     GLES20.glViewport(0, 0, targetW, targetH)
                                     rnd.draw(stMatrix, oesTexId)
-                                    val ptsNs = decBufferInfo.presentationTimeUs.coerceAtLeast(0L) * 1000L
-                                    EGLExt.eglPresentationTimeANDROID(display, surf, ptsNs)
+                                    val rawPtsUs = decBufferInfo.presentationTimeUs.coerceAtLeast(0L)
+                                    val monoPtsUs = if (rawPtsUs <= lastEncodedPtsUs) lastEncodedPtsUs + 100L else rawPtsUs
+                                    lastEncodedPtsUs = monoPtsUs
+                                    EGLExt.eglPresentationTimeANDROID(display, surf, monoPtsUs * 1000L)
                                     EGL14.eglSwapBuffers(display, surf)
                                 } catch (_: Throwable) {}
                             }
@@ -395,6 +452,13 @@ class PipProxyGenerator(
                                 encBufferInfo.size = 0
                             }
                             if (encBufferInfo.size > 0 && muxerStarted) {
+                                if (encBufferInfo.presentationTimeUs <= lastMuxedPtsUs) {
+                                    encBufferInfo.presentationTimeUs = lastMuxedPtsUs + 100L
+                                }
+                                if (encBufferInfo.presentationTimeUs < 0L) {
+                                    encBufferInfo.presentationTimeUs = 0L
+                                }
+                                lastMuxedPtsUs = encBufferInfo.presentationTimeUs
                                 outBuf.position(encBufferInfo.offset)
                                 outBuf.limit(encBufferInfo.offset + encBufferInfo.size)
                                 mux.writeSampleData(videoTrackIndexInMuxer, outBuf, encBufferInfo)
@@ -423,28 +487,34 @@ class PipProxyGenerator(
             try { extractor.release() } catch (_: Throwable) {}
             try { decoder?.stop() } catch (_: Throwable) {}
             try { decoder?.release() } catch (_: Throwable) {}
+            try { decoderSurface?.release() } catch (_: Throwable) {}
+            try { surfaceTexture?.setOnFrameAvailableListener(null) } catch (_: Throwable) {}
+            try { surfaceTexture?.release() } catch (_: Throwable) {}
+            try { frameCallbackThread?.quitSafely() } catch (_: Throwable) {}
+            try { renderer?.release() } catch (_: Throwable) {}
+            if (texIds[0] != 0) {
+                try { GLES20.glDeleteTextures(1, texIds, 0) } catch (_: Throwable) {}
+            }
+            if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                try {
+                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                } catch (_: Throwable) {}
+                if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
+                    try { EGL14.eglDestroySurface(eglDisplay, eglSurface) } catch (_: Throwable) {}
+                }
+                if (eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT) {
+                    try { EGL14.eglDestroyContext(eglDisplay, eglContext) } catch (_: Throwable) {}
+                }
+                // Never call EGL14.eglTerminate(EGL_DEFAULT_DISPLAY): it is process-shared with Preview/HWUI.
+                try { EGL14.eglReleaseThread() } catch (_: Throwable) {}
+            }
+            try { encoderInputSurface?.release() } catch (_: Throwable) {}
             try { encoder?.stop() } catch (_: Throwable) {}
             try { encoder?.release() } catch (_: Throwable) {}
             if (muxerStarted) {
                 try { muxer?.stop() } catch (_: Throwable) {}
             }
             try { muxer?.release() } catch (_: Throwable) {}
-            try { decoderSurface?.release() } catch (_: Throwable) {}
-            try { surfaceTexture?.release() } catch (_: Throwable) {}
-            try { renderer?.release() } catch (_: Throwable) {}
-            if (texIds[0] != 0) {
-                try { GLES20.glDeleteTextures(1, texIds, 0) } catch (_: Throwable) {}
-            }
-            if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
-                    EGL14.eglDestroySurface(eglDisplay, eglSurface)
-                }
-                if (eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT) {
-                    EGL14.eglDestroyContext(eglDisplay, eglContext)
-                }
-                EGL14.eglTerminate(eglDisplay)
-            }
         }
     }
 
@@ -454,10 +524,10 @@ class PipProxyGenerator(
     }
 
     fun release() {
+        cancelAll()
         try {
-            scope.cancel()
+            job.cancel()
         } catch (_: Throwable) {}
-        inFlight.clear()
     }
 
     private class TextureRenderer {
@@ -508,6 +578,16 @@ class PipProxyGenerator(
             GLES20.glAttachShader(program, vShader)
             GLES20.glAttachShader(program, fShader)
             GLES20.glLinkProgram(program)
+            GLES20.glDeleteShader(vShader)
+            GLES20.glDeleteShader(fShader)
+            val linkStatus = IntArray(1)
+            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0)
+            if (linkStatus[0] == 0) {
+                val log = GLES20.glGetProgramInfoLog(program)
+                GLES20.glDeleteProgram(program)
+                program = 0
+                throw IllegalStateException("PipProxy shader link failed: $log")
+            }
             aPositionHandle = GLES20.glGetAttribLocation(program, "aPosition")
             aTextureHandle = GLES20.glGetAttribLocation(program, "aTextureCoord")
             uSTMatrixHandle = GLES20.glGetUniformLocation(program, "uSTMatrix")
@@ -541,11 +621,29 @@ class PipProxyGenerator(
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, shaderCode)
             GLES20.glCompileShader(shader)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) {
+                val log = GLES20.glGetShaderInfoLog(shader)
+                GLES20.glDeleteShader(shader)
+                throw IllegalStateException("PipProxy shader compile failed: $log")
+            }
             return shader
         }
     }
 
     companion object {
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+
+        internal fun mapExtractorFlagsToCodecFlags(extractorFlags: Int): Int {
+            var codecFlags = 0
+            if ((extractorFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                codecFlags = codecFlags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+            }
+            if ((extractorFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0) {
+                codecFlags = codecFlags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+            }
+            return codecFlags
+        }
     }
 }

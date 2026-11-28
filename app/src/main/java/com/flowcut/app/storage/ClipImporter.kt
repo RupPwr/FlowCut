@@ -20,7 +20,7 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import android.view.Surface
 import com.flowcut.app.audio.WaveformService
 import com.flowcut.app.engine.export.FrameGate
@@ -37,6 +37,7 @@ import com.flowcut.app.model.MIN_CLIP_MS
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -53,7 +54,12 @@ sealed class ImportValidationResult {
 
 class ClipImporter(private val context: Context) {
 
-    private val waveformService = WaveformService(context, CoroutineScope(Dispatchers.IO + SupervisorJob()))
+    private val importerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val waveformService = WaveformService(context, importerScope)
+
+    fun release() {
+        importerScope.cancel()
+    }
 
     private val clipsDir: File
         get() = File(context.filesDir, "clips").apply { if (!exists()) mkdirs() }
@@ -104,7 +110,8 @@ class ClipImporter(private val context: Context) {
         try {
             fileSize = pfd.statSize
             val usableSpace = clipsDir.usableSpace
-            if (usableSpace < (fileSize * 1.2)) {
+            val requiredBytes = if (fileSize > 0L) (fileSize * 1.2).toLong() else 50L * 1024L * 1024L
+            if (usableSpace < requiredBytes) {
                 pfd.close()
                 return ImportValidationResult.Error("Not enough storage")
             }
@@ -308,7 +315,7 @@ class ClipImporter(private val context: Context) {
             }
 
             // Trigger keyframe index in background (Section 19.8)
-            CoroutineScope(Dispatchers.IO).launch {
+            importerScope.launch {
                 KeyframeIndex.build(destFile.absolutePath, destFile.absolutePath.replace(".mp4", ".idx"))
             }
 
@@ -386,6 +393,8 @@ class ClipImporter(private val context: Context) {
         var extractor: MediaExtractor? = null
         var decoder: MediaCodec? = null
         var encoder: MediaCodec? = null
+        var encoderInputSurface: Surface? = null
+        var frameCallbackThread: HandlerThread? = null
         var muxer: MediaMuxer? = null
         var surfaceTexture: SurfaceTexture? = null
         var decoderSurface: Surface? = null
@@ -439,6 +448,7 @@ class ClipImporter(private val context: Context) {
             encoder = vEnc
             vEnc.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val inputSurface = vEnc.createInputSurface()
+            encoderInputSurface = inputSurface
             vEnc.start()
 
             // 2. EGL setup for encoder inputSurface
@@ -448,34 +458,54 @@ class ClipImporter(private val context: Context) {
             val version = IntArray(2)
             if (!EGL14.eglInitialize(display, version, 0, version, 1)) return false
 
-            val configAttribs = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                0x3142, 1, // EGL_RECORDABLE_ANDROID
-                EGL14.EGL_NONE
-            )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
-            val config = configs[0] ?: return false
+            val configCandidates = arrayOf(
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    0x3142, 1, // EGL_RECORDABLE_ANDROID
+                    EGL14.EGL_NONE
+                ),
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_NONE
+                )
+            )
+            var config: EGLConfig? = null
+            for (attribs in configCandidates) {
+                configs[0] = null
+                numConfigs[0] = 0
+                if (EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, numConfigs, 0) &&
+                    numConfigs[0] > 0 && configs[0] != null
+                ) {
+                    config = configs[0]
+                    break
+                }
+            }
+            if (config == null) return false
 
             val contextAttribs = intArrayOf(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
                 EGL14.EGL_NONE
             )
             val ctx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
-            if (ctx == EGL14.EGL_NO_CONTEXT) return false
+            if (ctx == null || ctx == EGL14.EGL_NO_CONTEXT) return false
             eglContext = ctx
 
             val surfAttribs = intArrayOf(EGL14.EGL_NONE)
             val surf = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfAttribs, 0)
-            if (surf == EGL14.EGL_NO_SURFACE) return false
+            if (surf == null || surf == EGL14.EGL_NO_SURFACE) return false
             eglSurface = surf
 
-            EGL14.eglMakeCurrent(display, surf, surf, ctx)
+            if (!EGL14.eglMakeCurrent(display, surf, surf, ctx)) return false
 
             // 3. OES Texture and Renderer setup
             val rnd = ImportTextureRenderer()
@@ -491,12 +521,14 @@ class ClipImporter(private val context: Context) {
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
             val frameGate = FrameGate()
-            val mainHandler = Handler(Looper.getMainLooper())
+            val cbThread = HandlerThread("FlowCut-ImportCb").apply { start() }
+            frameCallbackThread = cbThread
+            val cbHandler = Handler(cbThread.looper)
             val st = SurfaceTexture(oesTexId).apply {
                 setDefaultBufferSize(targetW, targetH)
                 setOnFrameAvailableListener({
                     frameGate.signal()
-                }, mainHandler)
+                }, cbHandler)
             }
             surfaceTexture = st
             val decSurf = Surface(st)
@@ -508,9 +540,63 @@ class ClipImporter(private val context: Context) {
             vDec.configure(videoFormat, decSurf, null, 0)
             vDec.start()
 
-            // 5. MediaMuxer setup
+            // 5. MediaMuxer & interleaved audio extractor setup
             val mux = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             muxer = mux
+
+            var audioBuf: ByteBuffer? = null
+            val aBufInfo = MediaCodec.BufferInfo()
+            var audioEos = audioTrackIdx < 0
+            var lastAudioPtsUs = -1L
+            if (audioTrackIdx >= 0) {
+                val aExt = MediaExtractor()
+                audioExtractor = aExt
+                aExt.setDataSource(sourceFile.absolutePath)
+                aExt.selectTrack(audioTrackIdx)
+                val maxAudioInput = try {
+                    if (audioFormat != null && audioFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                        audioFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE)
+                    } else {
+                        256 * 1024
+                    }
+                } catch (_: Throwable) {
+                    256 * 1024
+                }.coerceAtLeast(256 * 1024)
+                audioBuf = ByteBuffer.allocateDirect(maxAudioInput)
+            }
+
+            fun drainAudioUpTo(limitPtsUs: Long) {
+                val aExt = audioExtractor ?: return
+                val buf = audioBuf ?: return
+                if (audioEos || audioTrackIndexInMuxer < 0 || !muxerStarted) return
+                while (true) {
+                    val rawPtsUs = aExt.sampleTime
+                    if (rawPtsUs < 0L) {
+                        audioEos = true
+                        break
+                    }
+                    if (rawPtsUs > limitPtsUs) break
+                    buf.clear()
+                    val sampleSize = aExt.readSampleData(buf, 0)
+                    if (sampleSize < 0) {
+                        audioEos = true
+                        break
+                    }
+                    val monoPtsUs = if (rawPtsUs < lastAudioPtsUs) lastAudioPtsUs else rawPtsUs
+                    lastAudioPtsUs = monoPtsUs
+                    buf.position(0)
+                    buf.limit(sampleSize)
+                    aBufInfo.offset = 0
+                    aBufInfo.size = sampleSize
+                    aBufInfo.presentationTimeUs = monoPtsUs
+                    aBufInfo.flags = mapExtractorFlagsToCodecFlags(aExt.sampleFlags)
+                    mux.writeSampleData(audioTrackIndexInMuxer, buf, aBufInfo)
+                    if (!aExt.advance()) {
+                        audioEos = true
+                        break
+                    }
+                }
+            }
 
             // 6. Transcoding loop
             val decBufferInfo = MediaCodec.BufferInfo()
@@ -519,6 +605,9 @@ class ClipImporter(private val context: Context) {
             var inputEos = false
             var decoderOutputEos = false
             var encoderOutputEos = false
+            var eosRetries = 0
+            var lastEncodedPtsUs = -1L
+            var lastMuxedVideoPtsUs = -1L
 
             while (!encoderOutputEos) {
                 // Feed decoder
@@ -532,8 +621,9 @@ class ClipImporter(private val context: Context) {
                                 vDec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 inputEos = true
                             } else {
-                                val pts = ext.sampleTime
-                                vDec.queueInputBuffer(inIdx, 0, sampleSize, pts, 0)
+                                val pts = ext.sampleTime.coerceAtLeast(0L)
+                                val codecFlags = mapExtractorFlagsToCodecFlags(ext.sampleFlags)
+                                vDec.queueInputBuffer(inIdx, 0, sampleSize, pts, codecFlags)
                                 ext.advance()
                             }
                         }
@@ -555,8 +645,11 @@ class ClipImporter(private val context: Context) {
                                 st.getTransformMatrix(stMatrix)
                                 GLES20.glViewport(0, 0, targetW, targetH)
                                 rnd.draw(stMatrix, oesTexId)
-                                EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, decBufferInfo.presentationTimeUs * 1000L)
-                                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+                                val rawPtsUs = decBufferInfo.presentationTimeUs.coerceAtLeast(0L)
+                                val monoPtsUs = if (rawPtsUs <= lastEncodedPtsUs) lastEncodedPtsUs + 100L else rawPtsUs
+                                lastEncodedPtsUs = monoPtsUs
+                                EGLExt.eglPresentationTimeANDROID(display, surf, monoPtsUs * 1000L)
+                                EGL14.eglSwapBuffers(display, surf)
                             }
                         }
                         if ((decBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -588,7 +681,18 @@ class ClipImporter(private val context: Context) {
                         val outBuf = vEnc.getOutputBuffer(encStatus)
                         if (outBuf != null && encBufferInfo.size > 0 && muxerStarted) {
                             if ((encBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                                if (encBufferInfo.presentationTimeUs <= lastMuxedVideoPtsUs) {
+                                    encBufferInfo.presentationTimeUs = lastMuxedVideoPtsUs + 100L
+                                }
+                                if (encBufferInfo.presentationTimeUs < 0L) {
+                                    encBufferInfo.presentationTimeUs = 0L
+                                }
+                                lastMuxedVideoPtsUs = encBufferInfo.presentationTimeUs
+                                outBuf.position(encBufferInfo.offset)
+                                outBuf.limit(encBufferInfo.offset + encBufferInfo.size)
                                 mux.writeSampleData(videoTrackIndexInMuxer, outBuf, encBufferInfo)
+                                // Interleave audio packets up to the current muxed video PTS
+                                drainAudioUpTo(lastMuxedVideoPtsUs)
                             }
                         }
                         vEnc.releaseOutputBuffer(encStatus, false)
@@ -598,26 +702,18 @@ class ClipImporter(private val context: Context) {
                         }
                     }
                 }
+
+                if (decoderOutputEos && !encoderOutputEos) {
+                    eosRetries++
+                    if (eosRetries > 300) {
+                        break
+                    }
+                }
             }
 
-            // 7. Lossless Audio Pass-Through
-            if (audioTrackIdx >= 0 && audioTrackIndexInMuxer >= 0 && muxerStarted) {
-                val aExt = MediaExtractor()
-                audioExtractor = aExt
-                aExt.setDataSource(sourceFile.absolutePath)
-                aExt.selectTrack(audioTrackIdx)
-                val audioBuf = ByteBuffer.allocateDirect(256 * 1024)
-                val aBufInfo = MediaCodec.BufferInfo()
-                while (true) {
-                    val sampleSize = aExt.readSampleData(audioBuf, 0)
-                    if (sampleSize < 0) break
-                    aBufInfo.offset = 0
-                    aBufInfo.size = sampleSize
-                    aBufInfo.presentationTimeUs = aExt.sampleTime
-                    aBufInfo.flags = aExt.sampleFlags
-                    mux.writeSampleData(audioTrackIndexInMuxer, audioBuf, aBufInfo)
-                    aExt.advance()
-                }
+            // 7. Flush any remaining interleaved audio samples after video EOS
+            if (muxerStarted && !audioEos) {
+                drainAudioUpTo(Long.MAX_VALUE)
             }
 
             return true
@@ -628,26 +724,34 @@ class ClipImporter(private val context: Context) {
             try { extractor?.release() } catch (_: Throwable) {}
             try { decoder?.stop() } catch (_: Throwable) {}
             try { decoder?.release() } catch (_: Throwable) {}
+            try { decoderSurface?.release() } catch (_: Throwable) {}
+            try { surfaceTexture?.setOnFrameAvailableListener(null) } catch (_: Throwable) {}
+            try { surfaceTexture?.release() } catch (_: Throwable) {}
+            try { frameCallbackThread?.quitSafely() } catch (_: Throwable) {}
+            try { renderer?.release() } catch (_: Throwable) {}
+            if (texIds[0] != 0) {
+                try { GLES20.glDeleteTextures(1, texIds, 0) } catch (_: Throwable) {}
+            }
+            if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                try {
+                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                } catch (_: Throwable) {}
+                if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
+                    try { EGL14.eglDestroySurface(eglDisplay, eglSurface) } catch (_: Throwable) {}
+                }
+                if (eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT) {
+                    try { EGL14.eglDestroyContext(eglDisplay, eglContext) } catch (_: Throwable) {}
+                }
+                // Never call EGL14.eglTerminate(EGL_DEFAULT_DISPLAY): it is process-shared with Preview/HWUI.
+                try { EGL14.eglReleaseThread() } catch (_: Throwable) {}
+            }
+            try { encoderInputSurface?.release() } catch (_: Throwable) {}
             try { encoder?.stop() } catch (_: Throwable) {}
             try { encoder?.release() } catch (_: Throwable) {}
             if (muxerStarted) {
                 try { muxer?.stop() } catch (_: Throwable) {}
             }
             try { muxer?.release() } catch (_: Throwable) {}
-            try { decoderSurface?.release() } catch (_: Throwable) {}
-            try { surfaceTexture?.release() } catch (_: Throwable) {}
-            try { renderer?.release() } catch (_: Throwable) {}
-            if (texIds[0] != 0) {
-                try { GLES20.glDeleteTextures(1, texIds, 0) } catch (_: Throwable) {}
-            }
-            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                try {
-                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                    if (eglSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, eglSurface)
-                    if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext)
-                    EGL14.eglTerminate(eglDisplay)
-                } catch (_: Throwable) {}
-            }
         }
     }
 
@@ -699,6 +803,16 @@ class ClipImporter(private val context: Context) {
             GLES20.glAttachShader(program, vShader)
             GLES20.glAttachShader(program, fShader)
             GLES20.glLinkProgram(program)
+            GLES20.glDeleteShader(vShader)
+            GLES20.glDeleteShader(fShader)
+            val linkStatus = IntArray(1)
+            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0)
+            if (linkStatus[0] == 0) {
+                val log = GLES20.glGetProgramInfoLog(program)
+                GLES20.glDeleteProgram(program)
+                program = 0
+                throw IllegalStateException("Import shader link failed: $log")
+            }
             aPositionHandle = GLES20.glGetAttribLocation(program, "aPosition")
             aTextureHandle = GLES20.glGetAttribLocation(program, "aTextureCoord")
             uSTMatrixHandle = GLES20.glGetUniformLocation(program, "uSTMatrix")
@@ -732,7 +846,27 @@ class ClipImporter(private val context: Context) {
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, shaderCode)
             GLES20.glCompileShader(shader)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) {
+                val log = GLES20.glGetShaderInfoLog(shader)
+                GLES20.glDeleteShader(shader)
+                throw IllegalStateException("Import shader compile failed: $log")
+            }
             return shader
+        }
+    }
+
+    companion object {
+        internal fun mapExtractorFlagsToCodecFlags(extractorFlags: Int): Int {
+            var codecFlags = 0
+            if ((extractorFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                codecFlags = codecFlags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+            }
+            if ((extractorFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0) {
+                codecFlags = codecFlags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+            }
+            return codecFlags
         }
     }
 }

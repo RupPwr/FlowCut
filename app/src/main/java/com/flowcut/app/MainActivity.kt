@@ -386,6 +386,11 @@ class MainActivity : ComponentActivity() {
         viewModel.onAppStop()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        viewModel.onTrimMemory(level)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         PreviewEventLog.log(PreviewEventType.ACTIVITY_LIFECYCLE, reason = "onDestroy")
@@ -394,10 +399,15 @@ class MainActivity : ComponentActivity() {
 
     private fun testShaderWarmup() {
         Thread {
+            var dpy = EGL14.EGL_NO_DISPLAY
+            var ctx = EGL14.EGL_NO_CONTEXT
+            var surf = EGL14.EGL_NO_SURFACE
+            var renderer: TransitionRenderer? = null
             try {
-                val dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                if (dpy == EGL14.EGL_NO_DISPLAY) return@Thread
                 val vers = IntArray(2)
-                EGL14.eglInitialize(dpy, vers, 0, vers, 1)
+                if (!EGL14.eglInitialize(dpy, vers, 0, vers, 1)) return@Thread
                 val configAttrs = intArrayOf(
                     EGL14.EGL_RENDERABLE_TYPE, 0x0040,
                     EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
@@ -406,33 +416,46 @@ class MainActivity : ComponentActivity() {
                 val configs = arrayOfNulls<EGLConfig>(1)
                 val numConfigs = IntArray(1)
                 EGL14.eglChooseConfig(dpy, configAttrs, 0, configs, 0, 1, numConfigs, 0)
+                val cfg = configs[0] ?: return@Thread
                 val ctxAttrs = intArrayOf(
                     EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
                     EGL14.EGL_NONE
                 )
-                val ctx = EGL14.eglCreateContext(dpy, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttrs, 0)
+                ctx = EGL14.eglCreateContext(dpy, cfg, EGL14.EGL_NO_CONTEXT, ctxAttrs, 0)
+                if (ctx == null || ctx == EGL14.EGL_NO_CONTEXT) return@Thread
                 val pbufAttrs = intArrayOf(
                     EGL14.EGL_WIDTH, 64,
                     EGL14.EGL_HEIGHT, 64,
                     EGL14.EGL_NONE
                 )
-                val surf = EGL14.eglCreatePbufferSurface(dpy, configs[0], pbufAttrs, 0)
-                EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
+                surf = EGL14.eglCreatePbufferSurface(dpy, cfg, pbufAttrs, 0)
+                if (surf == null || surf == EGL14.EGL_NO_SURFACE) return@Thread
+                if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return@Thread
 
                 android.util.Log.d("FlowCutPerf", "Offscreen EGL initialized for shader test")
-                val renderer = TransitionRenderer(cacheDir)
+                val rnd = TransitionRenderer(cacheDir)
+                renderer = rnd
                 val t0 = android.os.SystemClock.elapsedRealtime()
-                renderer.init()
+                rnd.init()
                 val initMs = android.os.SystemClock.elapsedRealtime() - t0
                 android.util.Log.d("FlowCutPerf", "TransitionRenderer init finished in ${initMs} ms")
-
-                renderer.release()
-                EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                EGL14.eglDestroySurface(dpy, surf)
-                EGL14.eglDestroyContext(dpy, ctx)
-                EGL14.eglTerminate(dpy)
             } catch (e: Exception) {
                 android.util.Log.e("FlowCutPerf", "testShaderWarmup failed", e)
+            } finally {
+                try { renderer?.release() } catch (_: Exception) {}
+                if (dpy != EGL14.EGL_NO_DISPLAY) {
+                    try {
+                        EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                    } catch (_: Exception) {}
+                    if (surf != null && surf != EGL14.EGL_NO_SURFACE) {
+                        try { EGL14.eglDestroySurface(dpy, surf) } catch (_: Exception) {}
+                    }
+                    if (ctx != null && ctx != EGL14.EGL_NO_CONTEXT) {
+                        try { EGL14.eglDestroyContext(dpy, ctx) } catch (_: Exception) {}
+                    }
+                    // Never call EGL14.eglTerminate(EGL_DEFAULT_DISPLAY): it is process-shared with Preview/HWUI.
+                    try { EGL14.eglReleaseThread() } catch (_: Exception) {}
+                }
             }
         }.start()
     }

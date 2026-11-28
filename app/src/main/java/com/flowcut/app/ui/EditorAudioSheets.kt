@@ -204,16 +204,34 @@ internal fun CoverSelectionSheet(
     }
 }
 
+internal fun persistentMediaDir(context: Context): File =
+    File(context.filesDir, "media").apply { if (!exists()) mkdirs() }
+
 internal fun copyUriToCacheFile(context: Context, uri: Uri, prefix: String): String? {
     return try {
-        val extension = context.contentResolver.getType(uri)?.substringAfterLast('/')?.let { ".$it" } ?: ".jpg"
-        val cacheFile = File(context.cacheDir, "${prefix}${System.currentTimeMillis()}${extension}")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(cacheFile).use { output ->
-                input.copyTo(output)
-            }
+        val rawSubType = context.contentResolver.getType(uri)
+            ?.substringAfterLast('/')
+            ?.substringBefore(';')
+            ?.lowercase()
+        val extension = when (rawSubType) {
+            "jpeg" -> ".jpg"
+            "mpeg" -> ".mp3"
+            "x-wav", "wav" -> ".wav"
+            "mp4", "m4a", "aac", "png", "webp", "gif", "ogg", "webm", "3gpp", "mkv" -> ".$rawSubType"
+            null, "" -> ".bin"
+            else -> ".${rawSubType.replace(Regex("[^a-z0-9]"), "").ifEmpty { "bin" }}"
         }
-        cacheFile.absolutePath
+        val targetFile = File(persistentMediaDir(context), "${prefix}${System.currentTimeMillis()}${extension}")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(targetFile).use { output ->
+                input.copyTo(output, bufferSize = 64 * 1024)
+            }
+        } ?: return null
+        if (!targetFile.exists() || targetFile.length() <= 0L) {
+            targetFile.delete()
+            return null
+        }
+        targetFile.absolutePath
     } catch (_: Exception) {
         null
     }
@@ -689,7 +707,7 @@ internal fun AudioVoiceRecordSheet(
 
                                 errorMessage = null
                                 elapsedMs = 0L
-                                val outFile = File(context.cacheDir, "voice_${System.currentTimeMillis()}.m4a")
+                                val outFile = File(persistentMediaDir(context), "voice_${System.currentTimeMillis()}.m4a")
                                 recordFile = outFile
                                 val startedRecorder = try {
                                     // Prefer 48 kHz to match FlowCut's native AudioEngine; fall back to 44.1 kHz on devices that require it.
@@ -1084,7 +1102,7 @@ internal fun generateSynthesizedAudioFile(
     title: String,
     durationSec: Float
 ): String {
-    val dir = File(context.cacheDir, "synth_audio").apply { mkdirs() }
+    val dir = File(persistentMediaDir(context), "synth_audio").apply { mkdirs() }
     val file = File(dir, "${id}.wav")
     if (file.exists() && file.length() > 1000L) {
         return file.absolutePath

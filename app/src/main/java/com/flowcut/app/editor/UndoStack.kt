@@ -67,7 +67,7 @@ data class EditorUndoSnapshot(
         project = project,
         timeMaps = HashMap(timeMaps),
         volumes = HashMap(volumes),
-        transforms = HashMap(transforms),
+        transforms = transforms.mapValuesTo(HashMap(transforms.size)) { (_, v) -> v.copy() },
         colorAdjusts = HashMap(colorAdjusts),
         backgrounds = HashMap(backgrounds),
         layerItems = ArrayList(layerItems),

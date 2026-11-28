@@ -1,6 +1,7 @@
 package com.flowcut.app.audio
 
 import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -21,6 +22,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteOrder
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -189,12 +191,15 @@ class WaveformService(
             if (audioTrackIdx < 0 || audioFormat == null) return null
             extractor.selectTrack(audioTrackIdx)
 
-            val sampleRate = if (audioFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
-                audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            var sampleRate = if (audioFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8000)
             } else 44100
-            val channels = if (audioFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+            var channels = if (audioFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
                 audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
             } else 2
+            var pcmEncoding = if (audioFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                audioFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+            } else AudioFormat.ENCODING_PCM_16BIT
             val mime = audioFormat.getString(MediaFormat.KEY_MIME) ?: return null
 
             val dec = MediaCodec.createDecoderByType(mime)
@@ -206,7 +211,7 @@ class WaveformService(
             var inputEos = false
             var outputEos = false
 
-            val framesPerBucket = sampleRate.toDouble() / samplesPerSec.toDouble()
+            var framesPerBucket = sampleRate.toDouble() / samplesPerSec.toDouble()
             var peaksBuf = FloatArray(1024)
             var peaksCount = 0
             fun appendPeak(v: Float) {
@@ -215,7 +220,7 @@ class WaveformService(
                 }
                 peaksBuf[peaksCount++] = v
             }
-            var currentBucketMax = 0
+            var currentBucketMax = 0f
             var currentBucketFrames = 0.0
 
             val shortBuf = ShortArray(4096)
@@ -235,7 +240,7 @@ class WaveformService(
                                 dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 inputEos = true
                             } else {
-                                dec.queueInputBuffer(inIdx, 0, sampleSize, extractor.sampleTime, 0)
+                                dec.queueInputBuffer(inIdx, 0, sampleSize, extractor.sampleTime.coerceAtLeast(0L), 0)
                                 extractor.advance()
                             }
                         }
@@ -254,31 +259,92 @@ class WaveformService(
                         outBuf.position(info.offset)
                         outBuf.limit(info.offset + info.size)
                         outBuf.order(ByteOrder.LITTLE_ENDIAN)
-                        val shortBuffer = outBuf.asShortBuffer()
-                        val totalShorts = shortBuffer.remaining()
 
-                        var processed = 0
-                        while (processed < totalShorts) {
-                            val toRead = minOf(shortBuf.size, totalShorts - processed)
-                            shortBuffer.get(shortBuf, 0, toRead)
-                            processed += toRead
+                        when (pcmEncoding) {
+                            AudioFormat.ENCODING_PCM_FLOAT -> {
+                                val floatBuffer = outBuf.asFloatBuffer()
+                                val frames = floatBuffer.remaining() / channels
+                                for (f in 0 until frames) {
+                                    var frameMax = 0f
+                                    for (c in 0 until channels) {
+                                        val s = abs(floatBuffer.get())
+                                        if (s > frameMax) frameMax = s
+                                    }
+                                    if (frameMax > currentBucketMax) currentBucketMax = frameMax
+                                    currentBucketFrames += 1.0
+                                    if (currentBucketFrames >= framesPerBucket) {
+                                        appendPeak(currentBucketMax.coerceIn(0f, 1f))
+                                        currentBucketMax = 0f
+                                        currentBucketFrames -= framesPerBucket
+                                    }
+                                }
+                            }
+                            AudioFormat.ENCODING_PCM_8BIT, PCM_24BIT_PACKED, PCM_32BIT -> {
+                                val bytesPerSample = when (pcmEncoding) {
+                                    AudioFormat.ENCODING_PCM_8BIT -> 1
+                                    PCM_24BIT_PACKED -> 3
+                                    else -> 4
+                                }
+                                val frames = outBuf.remaining() / (bytesPerSample * channels)
+                                for (f in 0 until frames) {
+                                    var frameMax = 0f
+                                    for (c in 0 until channels) {
+                                        val s = when (pcmEncoding) {
+                                            AudioFormat.ENCODING_PCM_8BIT -> abs(((outBuf.get().toInt() and 0xFF) - 128) / 128f)
+                                            PCM_24BIT_PACKED -> {
+                                                val b0 = outBuf.get().toInt() and 0xFF
+                                                val b1 = outBuf.get().toInt() and 0xFF
+                                                val b2 = outBuf.get().toInt()
+                                                abs(((b2 shl 16) or (b1 shl 8) or b0) / 8388608f)
+                                            }
+                                            else -> abs(outBuf.int / 2147483648f)
+                                        }
+                                        if (s > frameMax) frameMax = s
+                                    }
+                                    if (frameMax > currentBucketMax) currentBucketMax = frameMax
+                                    currentBucketFrames += 1.0
+                                    if (currentBucketFrames >= framesPerBucket) {
+                                        appendPeak(currentBucketMax.coerceIn(0f, 1f))
+                                        currentBucketMax = 0f
+                                        currentBucketFrames -= framesPerBucket
+                                    }
+                                }
+                            }
+                            else -> {
+                                val shortBuffer = outBuf.asShortBuffer()
+                                val totalShorts = shortBuffer.remaining()
+                                val alignedChunkCapacity = ((shortBuf.size / channels) * channels).coerceAtLeast(channels)
+                                var processed = 0
+                                while (processed < totalShorts) {
+                                    val remaining = totalShorts - processed
+                                    val toRead = if (remaining >= alignedChunkCapacity) {
+                                        alignedChunkCapacity
+                                    } else {
+                                        (remaining / channels) * channels
+                                    }
+                                    if (toRead <= 0) break
+                                    shortBuffer.get(shortBuf, 0, toRead)
+                                    processed += toRead
 
-                            val frames = toRead / channels
-                            var sIdx = 0
-                            for (f in 0 until frames) {
-                                var frameMax = 0
-                                for (c in 0 until channels) {
-                                    val s = abs(shortBuf[sIdx++].toInt())
-                                    if (s > frameMax) frameMax = s
-                                }
-                                if (frameMax > currentBucketMax) {
-                                    currentBucketMax = frameMax
-                                }
-                                currentBucketFrames += 1.0
-                                if (currentBucketFrames >= framesPerBucket) {
-                                    appendPeak((currentBucketMax.toFloat() / 32767f).coerceIn(0f, 1f))
-                                    currentBucketMax = 0
-                                    currentBucketFrames -= framesPerBucket
+                                    val frames = toRead / channels
+                                    var sIdx = 0
+                                    for (f in 0 until frames) {
+                                        var frameMaxInt = 0
+                                        for (c in 0 until channels) {
+                                            val s = abs(shortBuf[sIdx++].toInt())
+                                            if (s > frameMaxInt) frameMaxInt = s
+                                        }
+                                        val frameMax = frameMaxInt / 32767f
+                                        if (frameMax > currentBucketMax) {
+                                            currentBucketMax = frameMax
+                                        }
+                                        currentBucketFrames += 1.0
+                                        if (currentBucketFrames >= framesPerBucket) {
+                                            appendPeak(currentBucketMax.coerceIn(0f, 1f))
+                                            currentBucketMax = 0f
+                                            currentBucketFrames -= framesPerBucket
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -289,6 +355,19 @@ class WaveformService(
                     }
                 } else if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     madeProgress = true
+                    try {
+                        val outFmt = dec.outputFormat
+                        if (outFmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                            sampleRate = outFmt.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8000)
+                            framesPerBucket = sampleRate.toDouble() / samplesPerSec.toDouble()
+                        }
+                        if (outFmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                            channels = outFmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                        }
+                        if (outFmt.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                            pcmEncoding = outFmt.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                        }
+                    } catch (_: Throwable) {}
                 }
 
                 if (madeProgress) {
@@ -302,7 +381,7 @@ class WaveformService(
             }
 
             if (currentBucketFrames > 0.0) {
-                appendPeak((currentBucketMax.toFloat() / 32767f).coerceIn(0f, 1f))
+                appendPeak(currentBucketMax.coerceIn(0f, 1f))
             }
 
             val peaksArray = peaksBuf.copyOf(peaksCount)
@@ -323,6 +402,8 @@ class WaveformService(
         const val DEFAULT_SAMPLES_PER_SEC = 50
         private const val MAGIC = 0x46435731 // "FCW1"
         private const val MAX_DECODE_STALL_ITERATIONS = 400
+        private const val PCM_24BIT_PACKED = 21
+        private const val PCM_32BIT = 22
 
         /**
          * Pure-Kotlin peak extractor from 16-bit PCM for JVM unit testing without Android mocks.
@@ -389,20 +470,27 @@ class WaveformService(
         }
 
         fun writeToDisk(file: File, data: WaveformData) {
-            val tempFile = File(file.parentFile, "${file.name}.tmp")
             file.parentFile?.mkdirs()
-            DataOutputStream(FileOutputStream(tempFile).buffered()).use { dos ->
-                dos.writeInt(MAGIC)
-                dos.writeInt(data.samplesPerSec)
-                dos.writeInt(data.peaks.size)
-                val buf = ByteArray(data.peaks.size)
-                for (i in data.peaks.indices) {
-                    buf[i] = (data.peaks[i] * 255f).roundToInt().coerceIn(0, 255).toByte()
+            val tempFile = File(file.parentFile, "${file.name}.${UUID.randomUUID()}.tmp")
+            try {
+                DataOutputStream(FileOutputStream(tempFile).buffered()).use { dos ->
+                    dos.writeInt(MAGIC)
+                    dos.writeInt(data.samplesPerSec)
+                    dos.writeInt(data.peaks.size)
+                    val buf = ByteArray(data.peaks.size)
+                    for (i in data.peaks.indices) {
+                        buf[i] = (data.peaks[i] * 255f).roundToInt().coerceIn(0, 255).toByte()
+                    }
+                    dos.write(buf)
                 }
-                dos.write(buf)
+                if (!tempFile.renameTo(file)) {
+                    tempFile.copyTo(file, overwrite = true)
+                    tempFile.delete()
+                }
+            } catch (t: Throwable) {
+                try { tempFile.delete() } catch (_: Throwable) {}
+                throw t
             }
-            if (file.exists()) file.delete()
-            tempFile.renameTo(file)
         }
 
         fun readFromDisk(file: File): WaveformData? {

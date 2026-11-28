@@ -19,9 +19,12 @@ import android.opengl.GLES30
 import android.opengl.Matrix
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import android.view.Surface
 import com.flowcut.app.BuildConfig
 import com.flowcut.app.audio.ClipAudioContributor
 import com.flowcut.app.engine.proxy.ProxyStore
@@ -263,6 +266,8 @@ class ExportEngine(private val context: Context) {
         var muxer: MediaMuxer? = null
         var videoEncoder: MediaCodec? = null
         var audioEncoder: MediaCodec? = null
+        var encoderInputSurface: Surface? = null
+        var frameCallbackThread: HandlerThread? = null
         var eglDisplay: EGLDisplay? = null
         var eglContext: EGLContext? = null
         var eglSurface: EGLSurface? = null
@@ -280,11 +285,6 @@ class ExportEngine(private val context: Context) {
         val audioOverlays = plan.items.filter { it.type == LayerType.AUDIO || (it.type == LayerType.VIDEO && it.volume > 0.001f) }
         if (audioOverlays.isNotEmpty()) {
             ClipAudioContributor.syncAudioOverlays(audioOverlays)
-            for (item in audioOverlays) {
-                if (item.mediaPath.isNotEmpty()) {
-                    ClipAudioContributor.prewarmAudioPath(item.mediaPath)
-                }
-            }
         }
 
         var muxerStarted = false
@@ -295,12 +295,22 @@ class ExportEngine(private val context: Context) {
             val mux = MediaMuxer(tempFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             muxer = mux
 
-            // Step 2: Configure video encoder using probed capability
+            // Step 2: Configure video encoder using probed capability (with minimal-format fallback for strict OEM codecs)
             val videoFormat = ExportCapabilities.buildVideoFormat(spec, choice, bitrateBps)
-            val vEnc = MediaCodec.createByCodecName(choice.codecName)
+            var vEnc = MediaCodec.createByCodecName(choice.codecName)
             videoEncoder = vEnc
-            vEnc.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            try {
+                vEnc.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (_: Throwable) {
+                try { vEnc.release() } catch (_: Throwable) {}
+                videoEncoder = null
+                val minimalFormat = ExportCapabilities.buildMinimalVideoFormat(spec, choice, bitrateBps)
+                vEnc = MediaCodec.createByCodecName(choice.codecName)
+                videoEncoder = vEnc
+                vEnc.configure(minimalFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
             val inputSurface = vEnc.createInputSurface()
+            encoderInputSurface = inputSurface
             vEnc.start()
 
             if (BuildConfig.DEBUG) {
@@ -337,43 +347,85 @@ class ExportEngine(private val context: Context) {
 
             // Step 4: Setup EGL for rendering onto encoder's input surface
             val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            if (display == EGL14.EGL_NO_DISPLAY) {
+                error("EGL display unavailable")
+            }
             eglDisplay = display
             val version = IntArray(2)
-            EGL14.eglInitialize(display, version, 0, version, 1)
+            if (!EGL14.eglInitialize(display, version, 0, version, 1)) {
+                error("EGL initialize failed (err=0x${Integer.toHexString(EGL14.eglGetError())})")
+            }
 
-            val configAttribs = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL_RECORDABLE_ANDROID, 1,
-                EGL14.EGL_NONE
-            )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
-            val config = configs[0] ?: error("EGL config not found")
+            val configCandidates = arrayOf(
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, 0x0040, // EGL_OPENGL_ES3_BIT_KHR
+                    EGL_RECORDABLE_ANDROID, 1,
+                    EGL14.EGL_NONE
+                ),
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL_RECORDABLE_ANDROID, 1,
+                    EGL14.EGL_NONE
+                ),
+                intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_NONE
+                )
+            )
+            var config: EGLConfig? = null
+            for (attribs in configCandidates) {
+                configs[0] = null
+                numConfigs[0] = 0
+                if (EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, numConfigs, 0) &&
+                    numConfigs[0] > 0 && configs[0] != null
+                ) {
+                    config = configs[0]
+                    break
+                }
+            }
+            if (config == null) error("EGL config not found")
 
             val contextAttribs = intArrayOf(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
                 EGL14.EGL_NONE
             )
             val eglCtx = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+            if (eglCtx == null || eglCtx == EGL14.EGL_NO_CONTEXT) {
+                error("EGL context creation failed (err=0x${Integer.toHexString(EGL14.eglGetError())})")
+            }
             eglContext = eglCtx
 
             val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
             val surf = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfaceAttribs, 0)
+            if (surf == null || surf == EGL14.EGL_NO_SURFACE) {
+                error("EGL window surface creation failed (err=0x${Integer.toHexString(EGL14.eglGetError())})")
+            }
             eglSurface = surf
 
-            EGL14.eglMakeCurrent(display, surf, surf, eglCtx)
+            if (!EGL14.eglMakeCurrent(display, surf, surf, eglCtx)) {
+                error("EGL makeCurrent failed (err=0x${Integer.toHexString(EGL14.eglGetError())})")
+            }
             val exportAspect = (width.toFloat() / height.toFloat()).coerceAtLeast(0.01f)
             PreviewRenderer.setCanvasAspectRatio(exportAspect)
             TransitionRenderer.canvasAspect = exportAspect
             GLES30.glViewport(0, 0, width, height)
 
             // Step 5: Setup TransitionRenderer and SurfaceTextures
-            val rnd = TransitionRenderer()
+            val rnd = TransitionRenderer(context.cacheDir)
             renderer = rnd
             rnd.init()
             val otc = OverlayTextureCache(proxyStore = OverlayTextureCache.defaultProxyStore ?: ProxyStore(context)).apply {
@@ -385,17 +437,21 @@ class ExportEngine(private val context: Context) {
             val gateA = FrameGate()
             val gateB = FrameGate()
 
+            val cbThread = HandlerThread("FlowCut-ExportFrameCb").apply { start() }
+            frameCallbackThread = cbThread
+            val cbHandler = Handler(cbThread.looper)
+
             val stA = SurfaceTexture(rnd.textureIdA()).apply {
                 setDefaultBufferSize(width, height)
-                setOnFrameAvailableListener {
+                setOnFrameAvailableListener({
                     gateA.signal()
-                }
+                }, cbHandler)
             }
             val stB = SurfaceTexture(rnd.textureIdB()).apply {
                 setDefaultBufferSize(width, height)
-                setOnFrameAvailableListener {
+                setOnFrameAvailableListener({
                     gateB.signal()
-                }
+                }, cbHandler)
             }
             surfaceTextureA = stA
             surfaceTextureB = stB
@@ -446,17 +502,20 @@ class ExportEngine(private val context: Context) {
                 if (!muxerStarted && videoTrackIndex >= 0 && audioTrackIndex >= 0) {
                     mux.start()
                     muxerStarted = true
-                    val sampleBuf = ByteBuffer.allocateDirect(1024 * 1024)
-                    val sampleInfo = MediaCodec.BufferInfo()
-                    for (pending in pendingSamples) {
-                        sampleBuf.clear()
-                        sampleBuf.put(pending.data)
-                        sampleBuf.flip()
-                        sampleInfo.set(0, pending.data.size, pending.presentationTimeUs, pending.flags)
-                        val trackIdx = if (pending.isVideo) videoTrackIndex else audioTrackIndex
-                        mux.writeSampleData(trackIdx, sampleBuf, sampleInfo)
+                    if (pendingSamples.isNotEmpty()) {
+                        val maxPendingBytes = pendingSamples.maxOf { it.data.size }.coerceAtLeast(64 * 1024)
+                        val sampleBuf = ByteBuffer.allocateDirect(maxPendingBytes)
+                        val sampleInfo = MediaCodec.BufferInfo()
+                        for (pending in pendingSamples) {
+                            sampleBuf.clear()
+                            sampleBuf.put(pending.data)
+                            sampleBuf.flip()
+                            sampleInfo.set(0, pending.data.size, pending.presentationTimeUs, pending.flags)
+                            val trackIdx = if (pending.isVideo) videoTrackIndex else audioTrackIndex
+                            mux.writeSampleData(trackIdx, sampleBuf, sampleInfo)
+                        }
+                        pendingSamples.clear()
                     }
-                    pendingSamples.clear()
                 }
             }
 
@@ -639,7 +698,7 @@ class ExportEngine(private val context: Context) {
                 gateA.arm()
                 val renderedA: Boolean
                 if (currentAIndex != res.clipAIndex || frameSourceA == null) {
-                    frameSourceA?.release()
+                    frameSourceA?.release(synchronous = true)
                     frameSourceA = FrameSource(legacyClipA, stA).apply {
                         prepare()
                     }
@@ -703,7 +762,7 @@ class ExportEngine(private val context: Context) {
                     gateB.arm()
                     val renderedB: Boolean
                     if (currentBIndex != res.clipBIndex || frameSourceB == null) {
-                        frameSourceB?.release()
+                        frameSourceB?.release(synchronous = true)
                         frameSourceB = FrameSource(legacyClipB, stB).apply {
                             prepare()
                         }
@@ -757,7 +816,7 @@ class ExportEngine(private val context: Context) {
                     }
                 } else {
                     if (frameSourceB != null) {
-                        frameSourceB?.release()
+                        frameSourceB?.release(synchronous = true)
                         frameSourceB = null
                         currentBIndex = -1
                     }
@@ -1011,24 +1070,32 @@ class ExportEngine(private val context: Context) {
                 PreviewRenderer.setCanvasAspectRatio(prevCanvasAspect)
                 TransitionRenderer.canvasAspect = prevCanvasAspect
             } catch (_: Exception) {}
-            audioContributor.release()
-            frameSourceA?.release()
-            frameSourceB?.release()
-            surfaceTextureA?.release()
-            surfaceTextureB?.release()
-            overlayTextureCache?.release()
-            renderer?.release()
+            try { audioContributor.release() } catch (_: Exception) {}
+            try { frameSourceA?.release(synchronous = true) } catch (_: Exception) {}
+            try { frameSourceB?.release(synchronous = true) } catch (_: Exception) {}
+            try { surfaceTextureA?.setOnFrameAvailableListener(null) } catch (_: Exception) {}
+            try { surfaceTextureB?.setOnFrameAvailableListener(null) } catch (_: Exception) {}
+            try { surfaceTextureA?.release() } catch (_: Exception) {}
+            try { surfaceTextureB?.release() } catch (_: Exception) {}
+            try { frameCallbackThread?.quitSafely() } catch (_: Exception) {}
+            try { overlayTextureCache?.release() } catch (_: Exception) {}
+            try { renderer?.release() } catch (_: Exception) {}
 
             if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                try {
+                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                } catch (_: Exception) {}
                 if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
-                    EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                    try { EGL14.eglDestroySurface(eglDisplay, eglSurface) } catch (_: Exception) {}
                 }
                 if (eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT) {
-                    EGL14.eglDestroyContext(eglDisplay, eglContext)
+                    try { EGL14.eglDestroyContext(eglDisplay, eglContext) } catch (_: Exception) {}
                 }
-                EGL14.eglTerminate(eglDisplay)
+                // Never call EGL14.eglTerminate(EGL_DEFAULT_DISPLAY): it is process-shared with Preview/HWUI.
+                try { EGL14.eglReleaseThread() } catch (_: Exception) {}
             }
+
+            try { encoderInputSurface?.release() } catch (_: Exception) {}
 
             try {
                 videoEncoder?.stop()

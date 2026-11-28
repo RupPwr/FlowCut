@@ -323,7 +323,7 @@ fun EditorScreen(
         }
     }
     val audioEngine = remember(featureRegistry) {
-        AudioEngine(featureRegistry).apply {
+        AudioEngine(featureRegistry, context.applicationContext).apply {
             onPlaybackStopped = { audioContributor.onPlaybackStopped() }
         }
     }
@@ -400,7 +400,6 @@ fun EditorScreen(
                 // Prevents full-screen Compose recomposition storms at 60-120fps during drag!
                 val stoppedMoving = (lastReportedMode == PlayMode.SCRUBBING || lastReportedMode == PlayMode.FLINGING) && mode == PlayMode.PAUSED
                 if (stoppedMoving) {
-                    previewRenderer.isWaitingForFrame = true
                     previewRenderer.requestAccurateSeek()
                 }
                 if (curSec != lastReportedSec || stoppedMoving) {
@@ -418,7 +417,7 @@ fun EditorScreen(
                 val isDirty = currentDirtyVersion != lastRenderDirtyVersion
                 val currentTrimPreviewUs = previewRenderer.trimPreviewTimeUs
                 val trimPreviewChanged = currentTrimPreviewUs != lastRequestedTrimPreviewUs
-                val isPausedJump = (mode == PlayMode.PAUSED || mode == PlayMode.SCRUBBING) &&
+                val isPausedJump = (mode == PlayMode.PAUSED) &&
                         lastRequestedTimeUs != -1L &&
                         kotlin.math.abs(tUs - lastRequestedTimeUs) > 80_000L
                 if (isPausedJump) {
@@ -523,9 +522,24 @@ fun EditorScreen(
         }
     }
 
-    DisposableEffect(frameDriver, previewRenderer, audioEngine, audioContributor) {
+    DisposableEffect(frameDriver, previewRenderer, audioEngine, audioContributor, playbackController) {
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        audioEngine.onAudioFocusLost = {
+            val pauseAction = {
+                if (playbackController.playhead.mode == PlayMode.PLAYING) {
+                    playbackController.pause()
+                    onPlaybackStateChangeState.value.invoke(false)
+                }
+            }
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                pauseAction()
+            } else {
+                mainHandler.post(pauseAction)
+            }
+        }
         previewRenderer.startPrefetch(coroutineScope)
         onDispose {
+            audioEngine.onAudioFocusLost = null
             frameDriver.stop()
             previewRenderer.release()
             audioEngine.release()
@@ -913,7 +927,6 @@ fun EditorScreen(
             val vm = resolvedViewModel ?: return@rememberLauncherForActivityResult
             coroutineScope.launch {
                 vm.setProcessingEdit(true)
-                previewRenderer.isWaitingForFrame = true
                 try {
                     val cachePath = withContext(Dispatchers.IO) {
                         copyUriToCacheFile(context, uri, "audio_extract_")
@@ -1123,17 +1136,39 @@ fun EditorScreen(
     val isLoaderVisible by localLoadingManager.isLoadingVisible.collectAsState()
     val currentLoadingMessage by localLoadingManager.loadingMessage.collectAsState()
 
-    // 1. Scrubbing: when timeline is scrolling, mark scrubbing as active
+    // 1. Timeline scrolling / scrubbing must NEVER block interaction with a global Processing overlay.
+    // Ensure any stale SEEKING loader clears immediately whenever user starts scrolling again.
     LaunchedEffect(isTimelineScrolling) {
-        localLoadingManager.setLoading(LoadingSources.SCRUBBING, isTimelineScrolling, "Processing...")
+        if (isTimelineScrolling) {
+            localLoadingManager.setLoading(LoadingSources.SEEKING, false)
+        }
     }
 
-    // 2. Seeking / Frame catchup: notify when renderer is waiting for accurate seek frame
-    DisposableEffect(previewRenderer) {
+    // 2. Seeking / Frame catchup: only show loader when genuinely paused & waiting on a cold/slow seek,
+    // with a short safety timeout so an already-latched ACCEPT_CURRENT frame can never trap the UI.
+    DisposableEffect(previewRenderer, coroutineScope) {
+        var seekLoaderGuardJob: Job? = null
         previewRenderer.onWaitingForFrameChanged = { waiting ->
-            localLoadingManager.setLoading(LoadingSources.SEEKING, waiting, "Processing...")
+            seekLoaderGuardJob?.cancel()
+            seekLoaderGuardJob = null
+            val shouldShowSeekLoader = waiting &&
+                playbackController.playhead.mode == PlayMode.PAUSED &&
+                !isTimelineScrollingState.value
+            localLoadingManager.setLoading(LoadingSources.SEEKING, shouldShowSeekLoader, "Processing...")
+            if (shouldShowSeekLoader && previewRenderer.isFirstFrameLatched) {
+                seekLoaderGuardJob = coroutineScope.launch {
+                    delay(1200L)
+                    // If the target frame was already on screen (ACCEPT_CURRENT without a new surface buffer),
+                    // clear the waiting flag so the UI and FrameDriver do not spin or stay blocked.
+                    if (previewRenderer.isWaitingForFrame && previewRenderer.isFirstFrameLatched) {
+                        previewRenderer.isWaitingForFrame = false
+                    }
+                    localLoadingManager.setLoading(LoadingSources.SEEKING, false)
+                }
+            }
         }
         onDispose {
+            seekLoaderGuardJob?.cancel()
             previewRenderer.onWaitingForFrameChanged = null
             localLoadingManager.setLoading(LoadingSources.SEEKING, false)
         }
@@ -1157,7 +1192,37 @@ fun EditorScreen(
     val coverTimeUs = vmUiState?.coverTimeUs ?: 0L
     val clips: List<com.flowcut.app.model.Clip> = vmUiState?.project?.clips ?: emptyList()
 
-    LaunchedEffect(coverPath, coverTimeUs, clips) {
+    // Compute a stable cover decode key so unrelated clip edits (split, filter, volume, transform, etc.)
+    // do NOT spawn a new MediaMetadataRetriever on every operation.
+    val coverDecodeKey = remember(coverPath, coverTimeUs, clips) {
+        if (!coverPath.isNullOrEmpty()) {
+            "img:$coverPath"
+        } else if (clips.isEmpty()) {
+            "empty"
+        } else {
+            val snapshot = snapshotHolder.current
+            val n = snapshot.main.n
+            var targetClip = clips.first()
+            var clipStartUs = 0L
+            for (k in 0 until n) {
+                val kStartUs = msToUs(snapshot.main.startMs[k])
+                val kEndUs = msToUs(snapshot.main.endMs[k])
+                if (coverTimeUs in kStartUs..kEndUs) {
+                    targetClip = clips.getOrNull(k) ?: clips.first()
+                    clipStartUs = kStartUs
+                    break
+                }
+            }
+            val tm = resolvedViewModel?.clipTimeMaps?.get(targetClip.id)
+            val inUs = tm?.inUs ?: 0L
+            val speedFactor = if (tm != null && tm.speedDen > 0) tm.speedNum.toDouble() / tm.speedDen.toDouble() else 1.0
+            val frameOffsetUs = (coverTimeUs - clipStartUs).coerceAtLeast(0L)
+            val sourceTimeUs = inUs + (frameOffsetUs * speedFactor).toLong()
+            "vid:${targetClip.path}:${sourceTimeUs / 100_000L}"
+        }
+    }
+
+    LaunchedEffect(coverDecodeKey) {
         withContext(Dispatchers.IO) {
             try {
                 if (!coverPath.isNullOrEmpty()) {
@@ -1205,8 +1270,23 @@ fun EditorScreen(
                             val inUs = tm?.inUs ?: 0L
                             val speedFactor = if (tm != null && tm.speedDen > 0) tm.speedNum.toDouble() / tm.speedDen.toDouble() else 1.0
                             val frameOffsetUs = (coverTimeUs - clipStartUs).coerceAtLeast(0L)
-                            val sourceTimeUs = inUs + (frameOffsetUs * speedFactor).toLong()
-                            val raw = retriever.getFrameAtTime(sourceTimeUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            val sourceTimeUs = (inUs + (frameOffsetUs * speedFactor).toLong()).coerceAtLeast(0L)
+                            val raw = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                                retriever.getScaledFrameAtTime(
+                                    sourceTimeUs,
+                                    android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                    128,
+                                    128
+                                ) ?: retriever.getFrameAtTime(
+                                    sourceTimeUs,
+                                    android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                                )
+                            } else {
+                                retriever.getFrameAtTime(
+                                    sourceTimeUs,
+                                    android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                                )
+                            }
                             if (raw != null) {
                                 val scaled = android.graphics.Bitmap.createScaledBitmap(raw, 76, 84, true)
                                 if (scaled != raw) raw.recycle()
@@ -2362,12 +2442,10 @@ fun EditorScreen(
                         isMainTrackMuted = isMainTrackMuted,
                         onPositionTimeline = { timelineBoundsInRoot = it },
                         onScrollingStateChanged = { isTimelineScrolling = it },
-                        onThumbnailGeneratingChanged = { isGen ->
-                            localLoadingManager.setLoading(LoadingSources.THUMBNAIL_GEN, isGen, "Processing...")
-                        },
-                        onWaveformGeneratingChanged = { isGen ->
-                            localLoadingManager.setLoading(LoadingSources.WAVEFORM_GEN, isGen, "Processing...")
-                        },
+                        // Background filmstrip thumbnails and waveforms load progressively without
+                        // blocking the editor or triggering the ThumbnailService.isPaused deadlock.
+                        onThumbnailGeneratingChanged = {},
+                        onWaveformGeneratingChanged = {},
                         onSelectClip = onSelectClip,
                         onSelectJunction = onSelectJunction,
                         onDeselectAll = onDeselectAll,

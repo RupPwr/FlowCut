@@ -27,6 +27,7 @@ class ProxyStore(
             if (!proxyDir.exists()) {
                 proxyDir.mkdirs()
             }
+            cleanStaleTempFiles()
         } catch (_: Throwable) {}
     }
 
@@ -104,11 +105,13 @@ class ProxyStore(
     }
 
     /**
-     * Evicts oldest proxy files (lastModified ascending) until total directory size is <= maxBytes.
+     * Evicts oldest proxy files (lastModified ascending) until total directory size is <= maxBytes,
+     * and cleans up abandoned .mp4.tmp files left behind by crashed transcodes.
      */
     fun pruneToBudget() {
         synchronized(lock) {
             try {
+                cleanStaleTempFilesLocked()
                 val files = proxyDir.listFiles()?.filter { it.isFile && it.name.endsWith(".mp4") } ?: return
                 var totalBytes = files.sumOf { it.length() }
                 if (totalBytes <= maxBytes) return
@@ -123,6 +126,23 @@ class ProxyStore(
                 }
             } catch (_: Throwable) {}
         }
+    }
+
+    fun cleanStaleTempFiles(maxAgeMs: Long = STALE_TEMP_MAX_AGE_MS) {
+        synchronized(lock) {
+            cleanStaleTempFilesLocked(maxAgeMs)
+        }
+    }
+
+    private fun cleanStaleTempFilesLocked(maxAgeMs: Long = STALE_TEMP_MAX_AGE_MS) {
+        try {
+            val cutoff = System.currentTimeMillis() - maxAgeMs
+            proxyDir.listFiles()?.forEach { file ->
+                if (file.isFile && file.name.endsWith(".mp4.tmp") && file.lastModified() < cutoff) {
+                    try { file.delete() } catch (_: Throwable) {}
+                }
+            }
+        } catch (_: Throwable) {}
     }
 
     /**
@@ -162,6 +182,7 @@ class ProxyStore(
 
     companion object {
         const val DEFAULT_MAX_BYTES: Long = 1_024L * 1024L * 1024L // 1 GB cap
+        const val STALE_TEMP_MAX_AGE_MS: Long = 60L * 60L * 1000L // 1 hour
 
         /**
          * Computes deterministic SHA-256 cache key for source media.

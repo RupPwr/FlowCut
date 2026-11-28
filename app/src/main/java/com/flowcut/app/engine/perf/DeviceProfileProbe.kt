@@ -19,6 +19,8 @@ class DeviceProfileProbe(private val context: Context) {
 
     companion object {
         private const val PREFS_NAME = "flowcut_device_profile"
+        private const val PROBE_SCHEMA_VERSION = 2
+        private const val KEY_PROBE_VERSION = "probe_version"
         private const val KEY_FINGERPRINT = "fingerprint"
         private const val KEY_SDK = "sdk"
         private const val KEY_TOTAL_RAM_MB = "total_ram_mb"
@@ -29,15 +31,19 @@ class DeviceProfileProbe(private val context: Context) {
     }
 
     /**
-     * Returns cached profile if Build.FINGERPRINT matches, otherwise performs full hardware probe
-     * and persists the result.
+     * Returns cached profile if Build.FINGERPRINT and probe schema version match, otherwise
+     * performs full hardware probe and persists the result.
      */
     fun probe(): DeviceProfile {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val cachedFingerprint = prefs.getString(KEY_FINGERPRINT, null)
+        val cachedVersion = prefs.getInt(KEY_PROBE_VERSION, 0)
         val currentFingerprint = Build.FINGERPRINT
 
-        if (cachedFingerprint == currentFingerprint && prefs.contains(KEY_TOTAL_RAM_MB)) {
+        if (cachedVersion == PROBE_SCHEMA_VERSION &&
+            cachedFingerprint == currentFingerprint &&
+            prefs.contains(KEY_TOTAL_RAM_MB)
+        ) {
             return DeviceProfile(
                 sdk = prefs.getInt(KEY_SDK, Build.VERSION.SDK_INT),
                 totalRamMb = prefs.getLong(KEY_TOTAL_RAM_MB, 0L),
@@ -51,6 +57,7 @@ class DeviceProfileProbe(private val context: Context) {
         val probed = runProbe()
 
         prefs.edit()
+            .putInt(KEY_PROBE_VERSION, PROBE_SCHEMA_VERSION)
             .putString(KEY_FINGERPRINT, currentFingerprint)
             .putInt(KEY_SDK, probed.sdk)
             .putLong(KEY_TOTAL_RAM_MB, probed.totalRamMb)

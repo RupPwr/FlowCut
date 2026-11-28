@@ -44,6 +44,8 @@ class ThermalMonitor(
             false
         }
 
+    @Volatile
+    private var started: Boolean = false
     private var scheduledTask: ScheduledFuture<*>? = null
 
     private val listener: Any? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -54,11 +56,19 @@ class ThermalMonitor(
         null
     }
 
+    @Synchronized
     fun start() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && listener is PowerManager.OnThermalStatusChangedListener) {
+        if (started) return
+        started = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
-                pm?.addThermalStatusListener(exec, listener)
+                pm?.let { status = it.currentThermalStatus }
             } catch (_: Throwable) {}
+            if (listener is PowerManager.OnThermalStatusChangedListener) {
+                try {
+                    pm?.addThermalStatusListener(exec, listener)
+                } catch (_: Throwable) {}
+            }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -79,7 +89,10 @@ class ThermalMonitor(
         }
     }
 
+    @Synchronized
     fun stop() {
+        if (!started) return
+        started = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && listener is PowerManager.OnThermalStatusChangedListener) {
             try {
                 pm?.removeThermalStatusListener(listener)

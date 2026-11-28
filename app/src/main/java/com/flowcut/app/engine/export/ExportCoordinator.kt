@@ -13,6 +13,7 @@ import com.flowcut.app.shared.ExportState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 private fun buildLegacySpec(width: Int, height: Int, fps: Int): OutputSpec {
@@ -77,14 +78,21 @@ object ExportCoordinator {
     @Volatile
     private var isCancelRequested = false
 
+    private val isExportInProgress = AtomicBoolean(false)
     private val pendingRequest = AtomicReference<ExportRequest?>()
     private val activeEngine = AtomicReference<ExportEngine?>()
 
     fun takePendingRequest(): ExportRequest? = pendingRequest.getAndSet(null)
 
     fun start(context: Context, request: ExportRequest) {
+        if (!isExportInProgress.compareAndSet(false, true)) {
+            Log.w("EXPORT", "Export start ignored: an export is already in progress")
+            return
+        }
+
         val preflight = ExportPreflight.check(context, request.snapshot.totalMs, request.bitrateBps)
         if (preflight is PreflightResult.InsufficientStorage) {
+            isExportInProgress.set(false)
             fail(preflight.message)
             return
         }
@@ -101,18 +109,29 @@ object ExportCoordinator {
         try {
             ContextCompat.startForegroundService(context, intent)
         } catch (e: Exception) {
+            pendingRequest.set(null)
+            isExportInProgress.set(false)
             fail(e.message ?: "Failed to start export foreground service")
         }
     }
 
     fun cancel(reason: String = "Export cancelled by user") {
         isCancelRequested = true
-        activeEngine.get()?.cancel()
+        val hadPending = pendingRequest.getAndSet(null) != null
+        val engine = activeEngine.get()
+        engine?.cancel()
+        if (engine == null && hadPending) {
+            isExportInProgress.set(false)
+        }
         errorMessage = reason
         _state.value = ExportState.Failed
     }
 
     fun fail(message: String) {
+        pendingRequest.set(null)
+        if (activeEngine.get() == null) {
+            isExportInProgress.set(false)
+        }
         errorMessage = message
         _state.value = ExportState.Failed
     }
@@ -122,6 +141,7 @@ object ExportCoordinator {
         request: ExportRequest,
         onProgress: (Int) -> Unit
     ) {
+        isExportInProgress.set(true)
         val guard = SessionGuard(context)
         val ladder = ExportLadder.candidates(request.spec).filter { !guard.isExcluded(it.key()) }
         val candidateSpecs = if (ladder.isNotEmpty()) ladder else listOf(request.spec)
@@ -144,6 +164,7 @@ object ExportCoordinator {
                 }
 
                 guard.markExportStart(candidateSpec.key())
+                var lastNotifiedPct = -1
                 try {
                     val uri = engine.export(
                         snapshot = request.snapshot,
@@ -151,7 +172,11 @@ object ExportCoordinator {
                         explicitBitrateBps = if (candidateSpec == request.spec) request.explicitBitrateBps else null
                     ) { progress ->
                         _state.value = ExportState.Exporting(progress)
-                        onProgress((progress * 100).toInt().coerceIn(0, 100))
+                        val pct = (progress * 100).toInt().coerceIn(0, 100)
+                        if (pct != lastNotifiedPct) {
+                            lastNotifiedPct = pct
+                            onProgress(pct)
+                        }
                     }
                     guard.markExportEnd()
                     lastCompletedSpec = candidateSpec
@@ -179,6 +204,7 @@ object ExportCoordinator {
             throw e
         } finally {
             activeEngine.set(null)
+            isExportInProgress.set(false)
             PreviewRenderer.resumeActiveDecoders()
         }
     }

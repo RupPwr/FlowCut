@@ -40,6 +40,9 @@ class ClipAudioContributor(
     // Cached decoders by clip path (ConcurrentHashMap for thread-safe access from pre-warm thread)
     private val decoders = ConcurrentHashMap<String, ClipAudioDecoder>()
 
+    // Per-instance overlay decoders keyed by overlay item ID (prevents preview/export cross-release and same-file seek thrash)
+    private val overlayDecoders = ConcurrentHashMap<String, ClipAudioDecoder>()
+
     // Dedicated single-thread background worker for pre-warming next clips
     private val prewarmExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "FlowCut-AudioPrewarm")
@@ -568,7 +571,8 @@ class ClipAudioContributor(
             val sourceAudioUs = item.sourceInUs + (localItemUs.toDouble() * item.speed.toDouble()).toLong()
             val sourceStartFrame = usToAudioFrames(sourceAudioUs.coerceAtLeast(0L))
 
-            val decoder = sharedOverlayDecoders[path] ?: getSharedOverlayDecoder(path)
+            val decoderKey = if (item.id.isNotEmpty()) item.id else path
+            val decoder = getOrCreateOverlayDecoder(decoderKey, path)
             val neededSamples = framesToRender * 2
             if (neededSamples <= scratch.size) {
                 scratch.fill(0f, 0, neededSamples)
@@ -651,8 +655,35 @@ class ClipAudioContributor(
         lastAIndex = -1
         lastBIndex = -1
         lastPrewarmedKey = null
+        for (d in overlayDecoders.values) {
+            d.lastReadEndSourceFrame = -1L
+        }
         for (d in sharedOverlayDecoders.values) {
             d.lastReadEndSourceFrame = -1L
+        }
+    }
+
+    private fun getOrCreateOverlayDecoder(key: String, path: String): ClipAudioDecoder {
+        val existing = overlayDecoders[key]
+        if (existing != null) return existing
+        if (overlayDecoders.size >= 8) {
+            val iter = overlayDecoders.entries.iterator()
+            if (iter.hasNext()) {
+                val victim = iter.next().value
+                iter.remove()
+                try {
+                    prewarmExecutor.execute {
+                        try { victim.release() } catch (_: Throwable) {}
+                    }
+                } catch (_: Throwable) {
+                    try { victim.release() } catch (_: Throwable) {}
+                }
+            }
+        }
+        return overlayDecoders.computeIfAbsent(key) {
+            val dec = ClipAudioDecoder(path)
+            dec.prepare()
+            dec
         }
     }
 
@@ -705,14 +736,14 @@ class ClipAudioContributor(
         } catch (_: Throwable) {}
 
         for (d in decoders.values) {
-            d.release()
+            try { d.release() } catch (_: Throwable) {}
         }
         decoders.clear()
 
-        for (d in sharedOverlayDecoders.values) {
-            d.release()
+        for (d in overlayDecoders.values) {
+            try { d.release() } catch (_: Throwable) {}
         }
-        sharedOverlayDecoders.clear()
+        overlayDecoders.clear()
 
         lastAIndex = -1
         lastBIndex = -1

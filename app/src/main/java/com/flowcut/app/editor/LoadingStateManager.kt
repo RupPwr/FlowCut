@@ -69,6 +69,7 @@ class LoadingStateManager(
     }
 
     private fun logW(tag: String, msg: String) {
+        if (!com.flowcut.app.BuildConfig.DEBUG) return
         try {
             Log.w(tag, msg)
         } catch (_: Throwable) {
@@ -182,6 +183,10 @@ class LoadingStateManager(
     }
 
     private fun stopLoadingLocked(source: String) {
+        if (!_activeSources.value.contains(source)) {
+            sourceStartTimes.remove(source)
+            return
+        }
         val startTime = sourceStartTimes.remove(source)
         val now = getElapsedRealtime()
         val heldMs = if (startTime != null) now - startTime else 0L

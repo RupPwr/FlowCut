@@ -27,7 +27,20 @@ class FrameSource(
     private val surfaceTexture: SurfaceTexture
 ) {
     companion object {
-        private val releaseExecutor = Executors.newCachedThreadPool()
+        private val releaseExecutor = Executors.newFixedThreadPool(2) { r ->
+            Thread(r, "FlowCut-CodecRelease").apply { isDaemon = true }
+        }
+
+        internal fun mapExtractorFlagsToCodecFlags(extractorFlags: Int): Int {
+            var codecFlags = 0
+            if ((extractorFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                codecFlags = codecFlags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+            }
+            if ((extractorFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0) {
+                codecFlags = codecFlags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+            }
+            return codecFlags
+        }
 
         /**
          * Pure frame selection decision function.
@@ -70,6 +83,8 @@ class FrameSource(
                 // New clip file: reset all stale state so the replaced clip starts fresh
                 mediaDurationUs = -1L
                 cachedKeyframes = null
+                keyframesLoaded = false
+                cachedFrameDurationUs = -1L
                 keyframeIntervalUs = -1L
                 acceptedTargetUs = -1L
                 lastRenderedPtsUs = -1L
@@ -138,8 +153,12 @@ class FrameSource(
     @Volatile var didReleaseOutputBuffer: Boolean = false
         internal set
 
+    @Volatile private var cachedFrameDurationUs: Long = -1L
+
     val frameDurationUs: Long
         get() {
+            val cached = cachedFrameDurationUs
+            if (cached > 0L) return cached
             val vf = videoFormat
             if (vf != null && vf.containsKey(MediaFormat.KEY_FRAME_RATE)) {
                 val fps = try {
@@ -147,7 +166,11 @@ class FrameSource(
                 } catch (_: Exception) {
                     try { vf.getFloat(MediaFormat.KEY_FRAME_RATE).toInt() } catch (_: Exception) { 0 }
                 }
-                if (fps > 0) return 1_000_000L / fps
+                if (fps > 0) {
+                    val dur = 1_000_000L / fps
+                    cachedFrameDurationUs = dur
+                    return dur
+                }
             }
             if (clip.frameRate > 0) {
                 return 1_000_000L / clip.frameRate
@@ -282,9 +305,11 @@ class FrameSource(
     private var videoFormat: MediaFormat? = null
 
     private var cachedKeyframes: LongArray? = null
+    private var keyframesLoaded: Boolean = false
 
     private fun getKeyframes(): LongArray? {
-        if (cachedKeyframes != null) return cachedKeyframes
+        if (keyframesLoaded) return cachedKeyframes
+        keyframesLoaded = true
         val idxPath = clip.path.replace(".mp4", ".idx")
         cachedKeyframes = com.flowcut.app.storage.KeyframeIndex.load(idxPath)
         return cachedKeyframes
@@ -373,7 +398,9 @@ class FrameSource(
                     ext.seekTo(0L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
                 } catch (_: Exception) {}
             }
-            Log.w("SEEKTRACE", "GOP clip=${clip.id} intervalUs=$keyframeIntervalUs")
+            if (BuildConfig.DEBUG) {
+                Log.w("SEEKTRACE", "GOP clip=${clip.id} intervalUs=$keyframeIntervalUs")
+            }
 
             val rawMime = format.getString(MediaFormat.KEY_MIME) ?: ""
             // MediaTek MT6833 / Codec2 Dolby Vision Fallback:
@@ -394,6 +421,17 @@ class FrameSource(
                 currentMime = rawMime
             }
             videoFormat = format
+            cachedFrameDurationUs = -1L
+            if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                val fps = try {
+                    format.getInteger(MediaFormat.KEY_FRAME_RATE)
+                } catch (_: Exception) {
+                    try { format.getFloat(MediaFormat.KEY_FRAME_RATE).toInt() } catch (_: Exception) { 0 }
+                }
+                if (fps > 0) {
+                    cachedFrameDurationUs = 1_000_000L / fps
+                }
+            }
             mediaDurationUs = -1L
             if (format.containsKey(MediaFormat.KEY_DURATION)) {
                 try {
@@ -480,15 +518,17 @@ class FrameSource(
             // Pass 1: Try Hardware Decoder
             try {
                 val hwDec = MediaCodec.createDecoderByType(targetMime)
+                decoder = hwDec
                 ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
                 hwDec.configure(format, surface, null, 0)
                 hwDec.start()
-                decoder = hwDec
             } catch (e1: Exception) {
                 PreviewEventLog.logSwallowedException("FrameSource.startCodec_hwPass1", e1)
                 try {
-                    decoder?.release()
-                    ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
+                    if (decoder != null) {
+                        decoder.release()
+                        ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
+                    }
                 } catch (_: Exception) {}
                 decoder = null
 
@@ -497,15 +537,17 @@ class FrameSource(
                     val fallbackFormat = ext.getTrackFormat(videoTrackIndex)
                     fallbackFormat.setString(MediaFormat.KEY_MIME, targetMime)
                     val hwRetry = MediaCodec.createDecoderByType(targetMime)
+                    decoder = hwRetry
                     ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
                     hwRetry.configure(fallbackFormat, surface, null, 0)
                     hwRetry.start()
-                    decoder = hwRetry
                 } catch (e2: Exception) {
                     PreviewEventLog.logSwallowedException("FrameSource.startCodec_hwPass2", e2)
                     try {
-                        decoder?.release()
-                        ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
+                        if (decoder != null) {
+                            decoder.release()
+                            ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
+                        }
                     } catch (_: Exception) {}
                     decoder = null
 
@@ -514,15 +556,17 @@ class FrameSource(
                     if (swCodecName != null) {
                         try {
                             val swDec = MediaCodec.createByCodecName(swCodecName)
+                            decoder = swDec
                             ResourceTracker.onCreated(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
                             swDec.configure(format, surface, null, 0)
                             swDec.start()
-                            decoder = swDec
                         } catch (e3: Exception) {
                             PreviewEventLog.logSwallowedException("FrameSource.startCodec_swPass3", e3)
                             try {
-                                decoder?.release()
-                                ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
+                                if (decoder != null) {
+                                    decoder.release()
+                                    ResourceTracker.onReleased(ResourceTracker.ResourceType.MEDIA_CODEC, clip.id)
+                                }
                             } catch (_: Exception) {}
                             decoder = null
                         }
@@ -593,90 +637,105 @@ class FrameSource(
         var pendingPts = -1L
         try {
             val bufferInfo = MediaCodec.BufferInfo()
-
-            // Feed up to 8 input buffers (0L non-blocking)
-            var fed = 0
-            while (fed < 8 && !inputEos) {
-                fed++
-                val inIndex = dec.dequeueInputBuffer(0L)
-                if (inIndex >= 0) {
-                    val inBuf = dec.getInputBuffer(inIndex)
-                    if (inBuf != null) {
-                        inBuf.clear()
-                        val sampleSize = ext.readSampleData(inBuf, 0)
-                        if (sampleSize < 0) {
-                            dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputEos = true
-                        } else {
-                            dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
-                            ext.advance()
-                        }
-                    }
-                } else {
-                    break
-                }
-            }
-
-            // Drain output buffers without prematurely declaring outputEos on a single TRY_AGAIN_LATER
-            var drained = 0
-            var eosTryAgain = 0
             val clipDurationUs = effectiveMediaDurationUs
-            val maxDrainSteps = if (inputEos) 16 else 4
-            while (drained < maxDrainSteps && !outputEos) {
-                val timeoutUs = if (drained == 0 || inputEos) 3_000L else 0L
-                drained++
-                val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-                if (outIndex >= 0) {
-                    eosTryAgain = 0
-                    val pts = bufferInfo.presentationTimeUs
-                    markDecodeProgress(pts)
-                    val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    if (isEos) {
-                        outputEos = true
-                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
-                        if (pts > lastVideoPtsUs) lastVideoPtsUs = pts
-                    }
-                    if (isEos && bufferInfo.size == 0) {
-                        dec.releaseOutputBuffer(outIndex, false)
-                        break
-                    }
-                    val atClipEnd = outputEos ||
-                        (clipDurationUs > 0L && pts >= clipDurationUs - 85_000L)
+            val deadlineNs = System.nanoTime() + 18_000_000L // 18ms bounded burst prewarm per tick
+            var eosTryAgain = 0
+            var passCount = 0
 
-                    if (pts >= targetUs - 20_000L || atClipEnd) {
-                        if (pendingIdx >= 0) {
-                            dec.releaseOutputBuffer(pendingIdx, false)
-                            pendingIdx = -1
+            while (!outputEos && (passCount == 0 || System.nanoTime() < deadlineNs)) {
+                passCount++
+
+                // Burst-feed up to 16 input buffers (0L non-blocking)
+                var fed = 0
+                while (fed < 16 && !inputEos) {
+                    val inIndex = dec.dequeueInputBuffer(0L)
+                    if (inIndex >= 0) {
+                        val inBuf = dec.getInputBuffer(inIndex)
+                        if (inBuf != null) {
+                            inBuf.clear()
+                            val sampleSize = ext.readSampleData(inBuf, 0)
+                            if (sampleSize < 0) {
+                                dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputEos = true
+                            } else {
+                                dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
+                                ext.advance()
+                            }
                         }
-                        didReleaseOutputBuffer = true
-                        dec.releaseOutputBuffer(outIndex, true)
-                        currentPtsUs = pts
-                        lastRenderedPtsUs = pts
-                        lastRenderedLocalUs = targetUs
-                        isAccuratePausedFrameLatched = true
-                        isCatchingUpFromSeek = false
-                        prewarmStage = 3
-                        notifyFirstFrame()
-                        return true
+                        fed++
                     } else {
-                        if (pendingIdx >= 0) {
-                            dec.releaseOutputBuffer(pendingIdx, false)
-                        }
-                        pendingIdx = outIndex
-                        pendingPts = pts
-                        currentPtsUs = pts
-                    }
-                } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
-                    outIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
-                    continue
-                } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
-                    eosTryAgain++
-                    if (eosTryAgain >= 15) {
-                        outputEos = true
-                        if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
                         break
                     }
-                } else {
+                }
+
+                // Drain all currently ready output buffers within the time slice
+                var drainedThisPass = 0
+                var firstDrain = true
+                while (!outputEos && System.nanoTime() < deadlineNs) {
+                    val timeoutUs = when {
+                        inputEos -> 2_000L
+                        firstDrain && passCount == 1 -> 2_500L
+                        firstDrain -> 500L
+                        else -> 0L
+                    }
+                    firstDrain = false
+                    val outIndex = dec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+                    if (outIndex >= 0) {
+                        eosTryAgain = 0
+                        drainedThisPass++
+                        val pts = bufferInfo.presentationTimeUs
+                        markDecodeProgress(pts)
+                        val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                        if (isEos) {
+                            outputEos = true
+                            if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
+                            if (pts > lastVideoPtsUs) lastVideoPtsUs = pts
+                        }
+                        if (isEos && bufferInfo.size == 0) {
+                            dec.releaseOutputBuffer(outIndex, false)
+                            break
+                        }
+                        val atClipEnd = outputEos ||
+                            (clipDurationUs > 0L && pts >= clipDurationUs - 85_000L)
+
+                        if (pts >= targetUs - 20_000L || atClipEnd) {
+                            if (pendingIdx >= 0) {
+                                dec.releaseOutputBuffer(pendingIdx, false)
+                                pendingIdx = -1
+                            }
+                            didReleaseOutputBuffer = true
+                            dec.releaseOutputBuffer(outIndex, true)
+                            currentPtsUs = pts
+                            lastRenderedPtsUs = pts
+                            lastRenderedLocalUs = targetUs
+                            isAccuratePausedFrameLatched = true
+                            isCatchingUpFromSeek = false
+                            prewarmStage = 3
+                            notifyFirstFrame()
+                            return true
+                        } else {
+                            if (pendingIdx >= 0) {
+                                dec.releaseOutputBuffer(pendingIdx, false)
+                            }
+                            pendingIdx = outIndex
+                            pendingPts = pts
+                            currentPtsUs = pts
+                        }
+                    } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
+                        outIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                        continue
+                    } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
+                        eosTryAgain++
+                        if (eosTryAgain >= 15) {
+                            outputEos = true
+                            if (lastRenderedPtsUs > lastVideoPtsUs) lastVideoPtsUs = lastRenderedPtsUs
+                            break
+                        }
+                    } else {
+                        break
+                    }
+                }
+                if (fed == 0 && drainedThisPass == 0 && !inputEos) {
                     break
                 }
             }
@@ -823,7 +882,9 @@ class FrameSource(
 
     fun seekTo(localUs: Long, fastKeyframeOnly: Boolean = false, isExport: Boolean = false): Boolean {
         acceptedTargetUs = -1L
-        android.util.Log.w("SEEKTRACE", "ENTER target=$localUs fast=$fastKeyframeOnly lastVideoPts=$lastVideoPtsUs lastRendered=$lastRenderedPtsUs eos=$outputEos")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.w("SEEKTRACE", "ENTER target=$localUs fast=$fastKeyframeOnly lastVideoPts=$lastVideoPtsUs lastRendered=$lastRenderedPtsUs eos=$outputEos")
+        }
         checkCatchUpTimeout()
         stopFast()
         lastHopKfUs = -1L
@@ -841,16 +902,16 @@ class FrameSource(
                 isCatchingUpFromSeek = false
                 isAccuratePausedFrameLatched = true
                 prewarmStage = 3
-                android.util.Log.w("SEEKTRACE", "EXIT-1 rendered=true target=$localUs")
+                if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-1 rendered=true target=$localUs")
                 return true
             }
         }
         val ext = extractor ?: run {
-            android.util.Log.w("SEEKTRACE", "EXIT-2 rendered=false target=$localUs")
+            if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-2 rendered=false target=$localUs")
             return false
         }
         val dec = codec ?: run {
-            android.util.Log.w("SEEKTRACE", "EXIT-3 rendered=false target=$localUs")
+            if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-3 rendered=false target=$localUs")
             return false
         }
         var pendingIndex = -1
@@ -860,6 +921,13 @@ class FrameSource(
             isCatchingUpFromSeek = true
             var seekTimeUs = localUs
             if (fastKeyframeOnly) {
+                // Short-circuit sub-half-frame redundant scrub targets without touching MediaExtractor or MediaCodec
+                if (!outputEos && !inputEos && lastRenderedPtsUs != -1L && lastRenderedLocalUs != -1L &&
+                    abs(localUs - lastRenderedLocalUs) < (frameDurationUs / 2L).coerceAtLeast(12_000L)
+                ) {
+                    isCatchingUpFromSeek = false
+                    return true
+                }
                 val keyframes = getKeyframes()
                 if (keyframes != null && keyframes.isNotEmpty()) {
                     val targetMs = localUs / 1000L
@@ -871,7 +939,7 @@ class FrameSource(
                     val withinTolerance = abs(lastRenderedPtsUs - localUs) <= maxOf(250_000L, frameDurationUs * 15)
                     if (!isInvalid && withinTolerance) {
                         isCatchingUpFromSeek = false
-                        android.util.Log.w("SEEKTRACE", "EXIT-4 rendered=true target=$localUs")
+                        if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-4 rendered=true target=$localUs")
                         return true   // this keyframe is already on screen; no flush needed
                     }
                 }
@@ -880,7 +948,7 @@ class FrameSource(
                 // which prevents stale state from freezing the preview on the wrong frame.
                 if (!outputEos && !inputEos && isAccuratePausedFrameLatched && lastKeyframePtsUs != -1L && seekTimeUs == lastKeyframePtsUs && lastRenderedPtsUs == lastKeyframePtsUs) {
                     isCatchingUpFromSeek = false
-                    android.util.Log.w("SEEKTRACE", "EXIT-5 rendered=true target=$localUs")
+                    if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-5 rendered=true target=$localUs")
                     return true
                 }
             }
@@ -890,9 +958,9 @@ class FrameSource(
             val resolvedSyncUs = if (syncSampleTimeUs >= 0L) syncSampleTimeUs else seekTimeUs
             if (fastKeyframeOnly && !outputEos && !inputEos && syncSampleTimeUs >= 0L &&
                 lastRenderedPtsUs != -1L && lastFastSeekKeyframeUs == syncSampleTimeUs &&
-                abs(lastRenderedPtsUs - syncSampleTimeUs) <= maxOf(50_000L, frameDurationUs * 2)
+                abs(lastRenderedPtsUs - syncSampleTimeUs) <= maxOf(250_000L, frameDurationUs * 8)
             ) {
-                // Even without an .idx file (e.g. immediately after Replace), MediaExtractor
+                // Even without an .idx file or with B-frame reordering offsets, MediaExtractor
                 // resolved to the exact same sync frame already displayed. Skip dec.flush()
                 // so hardware MediaCodec is never hammered at 60Hz.
                 isCatchingUpFromSeek = false
@@ -909,7 +977,7 @@ class FrameSource(
             } catch (e: Exception) {
                 PreviewEventLog.logSwallowedException("FrameSource.seekTo_flush", e)
                 val rec = recoverCodec(seekTimeUs)
-                android.util.Log.w("SEEKTRACE", "EXIT-6 rendered=$rec target=$localUs")
+                if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-6 rendered=$rec target=$localUs")
                 return rec
             }
             inputEos = false
@@ -940,7 +1008,7 @@ class FrameSource(
                                 dec.queueInputBuffer(inputIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 inputEos = true
                             } else {
-                                dec.queueInputBuffer(inputIndex, 0, sampleSize, ext.sampleTime, 0)
+                                dec.queueInputBuffer(inputIndex, 0, sampleSize, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                                 ext.advance()
                             }
                         }
@@ -1103,7 +1171,7 @@ class FrameSource(
                                     dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                     inputEos = true
                                 } else {
-                                    dec.queueInputBuffer(inIdx, 0, sz, ext.sampleTime, 0)
+                                    dec.queueInputBuffer(inIdx, 0, sz, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                                     ext.advance()
                                 }
                             }
@@ -1174,7 +1242,7 @@ class FrameSource(
                                     dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                     inputEos = true
                                 } else {
-                                    dec.queueInputBuffer(inIdx, 0, sz, ext.sampleTime, 0)
+                                    dec.queueInputBuffer(inIdx, 0, sz, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                                     ext.advance()
                                 }
                             }
@@ -1246,14 +1314,14 @@ class FrameSource(
             }
             val totalDurMs = SystemClock.elapsedRealtime() - t0
             PreviewEventLog.log(PreviewEventType.SEEK_RESULT, slot = slot, clipId = clip.id, arg0 = totalDurMs, arg1 = if (rendered) 1L else 0L, reason = "seekTo_rendered=$rendered")
-            android.util.Log.w("SEEKTRACE", "EXIT-7 rendered=$rendered target=$localUs")
+            if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-7 rendered=$rendered target=$localUs")
             return rendered
         } catch (e: Exception) {
             PreviewEventLog.logSwallowedException("FrameSource.seekTo", e)
             recoverCodec(localUs)
             isCatchingUpFromSeek = false
             isAccuratePausedFrameLatched = false
-            android.util.Log.w("SEEKTRACE", "EXIT-8 rendered=false target=$localUs")
+            if (BuildConfig.DEBUG) android.util.Log.w("SEEKTRACE", "EXIT-8 rendered=false target=$localUs")
             return false
         } finally {
             if (pendingIndex >= 0) {
@@ -1314,7 +1382,7 @@ class FrameSource(
                     dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                     inputEos = true
                 } else {
-                    dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime, 0)
+                    dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                     ext.advance()
                 }
             }
@@ -1330,7 +1398,7 @@ class FrameSource(
         clipDurationUs: Long
     ): Boolean {
         val info = MediaCodec.BufferInfo()
-        val deadlineNs = System.nanoTime() + 10_000_000L // 10ms slice max per draw
+        val deadlineNs = System.nanoTime() + 22_000_000L // 22ms slice when paused settles accurate seeks 2-3x faster
         var reached = false
         var eosTryAgain = 0
         var decodedCount = 0L
@@ -1350,16 +1418,22 @@ class FrameSource(
                             dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inputEos = true
                         } else {
-                            dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime, 0)
+                            dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                             ext.advance()
                         }
                     }
                     fed++
                 }
 
-                // Drain output buffers
+                // Drain output buffers without wasting 1ms per empty dequeue after the first poll
+                var firstDrain = true
                 while (true) {
-                    val outTimeoutUs = if (inputEos) 2_000L else 1_000L
+                    val outTimeoutUs = when {
+                        inputEos -> 2_000L
+                        firstDrain -> 1_000L
+                        else -> 0L
+                    }
+                    firstDrain = false
                     val outIdx = dec.dequeueOutputBuffer(info, outTimeoutUs)
                     if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
                         outIdx == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) continue
@@ -1482,7 +1556,7 @@ class FrameSource(
                             dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inputEos = true
                         } else {
-                            dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime, 0)
+                            dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                             ext.advance()
                         }
                     }
@@ -1624,7 +1698,7 @@ class FrameSource(
                             dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inputEos = true
                         } else {
-                            dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime, 0)
+                            dec.queueInputBuffer(inIdx, 0, size, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                             ext.advance()
                         }
                     }
@@ -2071,7 +2145,7 @@ class FrameSource(
                                 dec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 inputEos = true
                             } else {
-                                dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime, 0)
+                                dec.queueInputBuffer(inIndex, 0, sampleSize, ext.sampleTime.coerceAtLeast(0L), mapExtractorFlagsToCodecFlags(ext.sampleFlags))
                                 ext.advance()
                             }
                         }

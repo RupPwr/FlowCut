@@ -14,6 +14,8 @@ import com.flowcut.app.engine.OverlayKeyframe
 import com.flowcut.app.model.CURRENT_PROJECT_SCHEMA
 import com.flowcut.app.model.Project
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -310,6 +312,7 @@ object DraftLibraryUtils {
             draft.customCoverPath?.takeIf { it.isNotBlank() }?.let { paths.add(it) }
             for (item in draft.layerItems) {
                 if (item.mediaPath.isNotBlank()) paths.add(item.mediaPath)
+                if (item.customFontPath.isNotBlank()) paths.add(item.customFontPath)
             }
         }
         return paths
@@ -577,6 +580,8 @@ fun OverlayItem.toDraft(): OverlayItemDraft = OverlayItemDraft(
 )
 
 class ProjectStore(private val context: Context) {
+    private val ioMutex = Mutex()
+
     private val projectFile: File
         get() = File(context.filesDir, "project.json")
 
@@ -589,6 +594,9 @@ class ProjectStore(private val context: Context) {
     private val clipsDir: File
         get() = File(context.filesDir, "clips").apply { if (!exists()) mkdirs() }
 
+    private val mediaDir: File
+        get() = File(context.filesDir, "media").apply { if (!exists()) mkdirs() }
+
     private fun draftFileFor(draftId: String): File {
         val safeId = draftId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
         return File(draftsDir, "$safeId.json")
@@ -597,12 +605,18 @@ class ProjectStore(private val context: Context) {
     private fun atomicWriteText(target: File, content: String) {
         val parent = target.parentFile
         if (parent != null && !parent.exists()) parent.mkdirs()
-        val tempFile = File(parent, "${target.name}.tmp")
-        tempFile.writeText(content)
-        if (tempFile.exists()) {
-            if (!tempFile.renameTo(target)) {
-                target.writeText(content)
-                tempFile.delete()
+        val tempFile = File(parent, "${target.name}.${UUID.randomUUID()}.tmp")
+        try {
+            tempFile.writeText(content)
+            if (tempFile.exists()) {
+                if (!tempFile.renameTo(target)) {
+                    target.writeText(content)
+                    tempFile.delete()
+                }
+            }
+        } finally {
+            if (tempFile.exists()) {
+                try { tempFile.delete() } catch (_: Exception) {}
             }
         }
     }
@@ -651,7 +665,7 @@ class ProjectStore(private val context: Context) {
         }
     }
 
-    suspend fun listDrafts(): List<ProjectDraftSummary> = withContext(Dispatchers.IO) {
+    private fun listDraftsLocked(): List<ProjectDraftSummary> {
         val index = ensureMigratedSync()
         val validDrafts = index.drafts
             .filter { draftFileFor(it.id).exists() }
@@ -659,10 +673,10 @@ class ProjectStore(private val context: Context) {
         if (validDrafts.size != index.drafts.size) {
             writeIndexSync(index.copy(drafts = validDrafts))
         }
-        validDrafts
+        return validDrafts
     }
 
-    suspend fun saveDraft(draft: FullProjectDraft): ProjectDraftSummary = withContext(Dispatchers.IO) {
+    private fun saveDraftLocked(draft: FullProjectDraft): ProjectDraftSummary {
         val index = ensureMigratedSync()
         val now = System.currentTimeMillis()
         val id = draft.draftId.ifBlank { UUID.randomUUID().toString() }
@@ -684,13 +698,13 @@ class ProjectStore(private val context: Context) {
         val summary = DraftLibraryUtils.summarizeDraft(stampedDraft, id, resolvedTitle, now)
         val updatedDrafts = DraftLibraryUtils.upsertSummary(index.drafts, summary)
         writeIndexSync(ProjectDraftIndex(activeDraftId = id, drafts = updatedDrafts))
-        summary
+        return summary
     }
 
-    suspend fun loadDraft(draftId: String): FullProjectDraft? = withContext(Dispatchers.IO) {
+    private fun loadDraftLocked(draftId: String): FullProjectDraft? {
         val file = draftFileFor(draftId)
-        if (!file.exists()) return@withContext null
-        try {
+        if (!file.exists()) return null
+        return try {
             val draft = decodeFullDraft(file.readText())
             val index = readIndexSync()
             if (index.activeDraftId != draftId) {
@@ -704,68 +718,9 @@ class ProjectStore(private val context: Context) {
         }
     }
 
-    suspend fun renameDraft(draftId: String, newTitle: String): List<ProjectDraftSummary> = withContext(Dispatchers.IO) {
-        val cleanTitle = newTitle.trim()
-        if (cleanTitle.isEmpty()) return@withContext listDrafts()
-        val index = ensureMigratedSync()
-        val file = draftFileFor(draftId)
-        if (file.exists()) {
-            try {
-                val existing = decodeFullDraft(file.readText())
-                val updated = existing.copy(title = cleanTitle)
-                atomicWriteText(file, projectJson.encodeToString(updated))
-            } catch (_: Exception) {}
-        }
-        val updatedList = index.drafts.map { s ->
-            if (s.id == draftId) s.copy(title = cleanTitle) else s
-        }.sortedByDescending { it.updatedAtMs }
-        writeIndexSync(index.copy(drafts = updatedList))
-        updatedList
-    }
-
-    suspend fun duplicateDraft(draftId: String): Pair<ProjectDraftSummary, List<ProjectDraftSummary>>? = withContext(Dispatchers.IO) {
-        val index = ensureMigratedSync()
-        val sourceFile = draftFileFor(draftId)
-        if (!sourceFile.exists()) return@withContext null
-        val source = try {
-            decodeFullDraft(sourceFile.readText())
-        } catch (_: Exception) {
-            return@withContext null
-        }
-        val now = System.currentTimeMillis()
-        val newId = UUID.randomUUID().toString()
-        val baseTitle = source.title.trim().ifEmpty { "Project" }
-        val newTitle = DraftLibraryUtils.generateUniqueTitle("$baseTitle Copy", index.drafts.map { it.title })
-        val duplicated = source.copy(
-            draftId = newId,
-            title = newTitle,
-            updatedAtMs = now,
-            project = source.project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
-        )
-        atomicWriteText(draftFileFor(newId), projectJson.encodeToString(duplicated))
-        val summary = DraftLibraryUtils.summarizeDraft(duplicated, newId, newTitle, now)
-        val updatedList = DraftLibraryUtils.upsertSummary(index.drafts, summary)
-        writeIndexSync(index.copy(drafts = updatedList))
-        Pair(summary, updatedList)
-    }
-
-    suspend fun deleteDraft(draftId: String): List<ProjectDraftSummary> = withContext(Dispatchers.IO) {
-        val index = ensureMigratedSync()
-        val file = draftFileFor(draftId)
-        if (file.exists()) file.delete()
-        val remaining = index.drafts.filterNot { it.id == draftId }.sortedByDescending { it.updatedAtMs }
-        val nextActive = if (index.activeDraftId == draftId) remaining.firstOrNull()?.id else index.activeDraftId
-        writeIndexSync(ProjectDraftIndex(activeDraftId = nextActive, drafts = remaining))
-        if (remaining.isEmpty() && projectFile.exists()) {
-            projectFile.delete()
-        }
-        cleanupOrphanClipsAcrossAllDrafts()
-        remaining
-    }
-
-    suspend fun saveFull(draft: FullProjectDraft): Unit = withContext(Dispatchers.IO) {
+    private fun saveFullLocked(draft: FullProjectDraft) {
         if (draft.project.clips.isNotEmpty() || draft.draftId.isNotBlank()) {
-            saveDraft(draft)
+            saveDraftLocked(draft)
         } else {
             val stampedDraft = draft.copy(
                 project = draft.project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
@@ -774,23 +729,17 @@ class ProjectStore(private val context: Context) {
         }
     }
 
-    suspend fun save(project: Project): Unit = withContext(Dispatchers.IO) {
-        val stamped = project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
-        val existing = loadFull()
-        saveFull(existing.copy(project = stamped))
-    }
-
-    suspend fun loadFull(): FullProjectDraft = withContext(Dispatchers.IO) {
+    private fun loadFullLocked(): FullProjectDraft {
         val index = ensureMigratedSync()
         val activeId = index.activeDraftId ?: index.drafts.firstOrNull()?.id
         if (activeId != null) {
-            val loaded = loadDraft(activeId)
-            if (loaded != null) return@withContext loaded
+            val loaded = loadDraftLocked(activeId)
+            if (loaded != null) return loaded
         }
         if (!projectFile.exists()) {
-            return@withContext FullProjectDraft()
+            return FullProjectDraft()
         }
-        try {
+        return try {
             val content = projectFile.readText()
             decodeFullDraft(content)
         } catch (e: NewerProjectException) {
@@ -800,11 +749,7 @@ class ProjectStore(private val context: Context) {
         }
     }
 
-    suspend fun load(): Project = withContext(Dispatchers.IO) {
-        loadFull().project
-    }
-
-    suspend fun cleanupOrphanClipsAcrossAllDrafts(extraActiveProject: Project? = null): Unit = withContext(Dispatchers.IO) {
+    private fun cleanupOrphanClipsLocked(extraActiveProject: Project? = null) {
         val index = ensureMigratedSync()
         val loadedDrafts = ArrayList<FullProjectDraft>(index.drafts.size + 1)
         for (summary in index.drafts) {
@@ -819,32 +764,144 @@ class ProjectStore(private val context: Context) {
             loadedDrafts.add(FullProjectDraft(project = extraActiveProject))
         }
         val activePaths = DraftLibraryUtils.collectReferencedMediaPaths(loadedDrafts)
-        val allClips = clipsDir.listFiles() ?: return@withContext
-        for (file in allClips) {
+        clipsDir.listFiles()?.forEach { file ->
+            if (file.isFile && !activePaths.contains(file.absolutePath)) {
+                // Keep sidecar .idx files for active clips
+                val isSidecarForActive = file.name.endsWith(".idx") &&
+                    activePaths.contains(file.absolutePath.removeSuffix(".idx") + ".mp4")
+                if (!isSidecarForActive) {
+                    file.delete()
+                }
+            }
+        }
+        mediaDir.listFiles()?.forEach { file ->
             if (file.isFile && !activePaths.contains(file.absolutePath)) {
                 file.delete()
             }
         }
     }
 
+    suspend fun listDrafts(): List<ProjectDraftSummary> = withContext(Dispatchers.IO) {
+        ioMutex.withLock { listDraftsLocked() }
+    }
+
+    suspend fun saveDraft(draft: FullProjectDraft): ProjectDraftSummary = withContext(Dispatchers.IO) {
+        ioMutex.withLock { saveDraftLocked(draft) }
+    }
+
+    suspend fun loadDraft(draftId: String): FullProjectDraft? = withContext(Dispatchers.IO) {
+        ioMutex.withLock { loadDraftLocked(draftId) }
+    }
+
+    suspend fun renameDraft(draftId: String, newTitle: String): List<ProjectDraftSummary> = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            val cleanTitle = newTitle.trim()
+            if (cleanTitle.isEmpty()) return@withLock listDraftsLocked()
+            val index = ensureMigratedSync()
+            val file = draftFileFor(draftId)
+            if (file.exists()) {
+                try {
+                    val existing = decodeFullDraft(file.readText())
+                    val updated = existing.copy(title = cleanTitle)
+                    atomicWriteText(file, projectJson.encodeToString(updated))
+                } catch (_: Exception) {}
+            }
+            val updatedList = index.drafts.map { s ->
+                if (s.id == draftId) s.copy(title = cleanTitle) else s
+            }.sortedByDescending { it.updatedAtMs }
+            writeIndexSync(index.copy(drafts = updatedList))
+            updatedList
+        }
+    }
+
+    suspend fun duplicateDraft(draftId: String): Pair<ProjectDraftSummary, List<ProjectDraftSummary>>? = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            val index = ensureMigratedSync()
+            val sourceFile = draftFileFor(draftId)
+            if (!sourceFile.exists()) return@withLock null
+            val source = try {
+                decodeFullDraft(sourceFile.readText())
+            } catch (_: Exception) {
+                return@withLock null
+            }
+            val now = System.currentTimeMillis()
+            val newId = UUID.randomUUID().toString()
+            val baseTitle = source.title.trim().ifEmpty { "Project" }
+            val newTitle = DraftLibraryUtils.generateUniqueTitle("$baseTitle Copy", index.drafts.map { it.title })
+            val duplicated = source.copy(
+                draftId = newId,
+                title = newTitle,
+                updatedAtMs = now,
+                project = source.project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
+            )
+            atomicWriteText(draftFileFor(newId), projectJson.encodeToString(duplicated))
+            val summary = DraftLibraryUtils.summarizeDraft(duplicated, newId, newTitle, now)
+            val updatedList = DraftLibraryUtils.upsertSummary(index.drafts, summary)
+            writeIndexSync(index.copy(drafts = updatedList))
+            Pair(summary, updatedList)
+        }
+    }
+
+    suspend fun deleteDraft(draftId: String): List<ProjectDraftSummary> = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            val index = ensureMigratedSync()
+            val file = draftFileFor(draftId)
+            if (file.exists()) file.delete()
+            val remaining = index.drafts.filterNot { it.id == draftId }.sortedByDescending { it.updatedAtMs }
+            val nextActive = if (index.activeDraftId == draftId) remaining.firstOrNull()?.id else index.activeDraftId
+            writeIndexSync(ProjectDraftIndex(activeDraftId = nextActive, drafts = remaining))
+            if (remaining.isEmpty() && projectFile.exists()) {
+                projectFile.delete()
+            }
+            cleanupOrphanClipsLocked(extraActiveProject = null)
+            remaining
+        }
+    }
+
+    suspend fun saveFull(draft: FullProjectDraft): Unit = withContext(Dispatchers.IO) {
+        ioMutex.withLock { saveFullLocked(draft) }
+    }
+
+    suspend fun save(project: Project): Unit = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            val stamped = project.copy(schemaVersion = CURRENT_PROJECT_SCHEMA)
+            val existing = loadFullLocked()
+            saveFullLocked(existing.copy(project = stamped))
+        }
+    }
+
+    suspend fun loadFull(): FullProjectDraft = withContext(Dispatchers.IO) {
+        ioMutex.withLock { loadFullLocked() }
+    }
+
+    suspend fun load(): Project = withContext(Dispatchers.IO) {
+        ioMutex.withLock { loadFullLocked().project }
+    }
+
+    suspend fun cleanupOrphanClipsAcrossAllDrafts(extraActiveProject: Project? = null): Unit = withContext(Dispatchers.IO) {
+        ioMutex.withLock { cleanupOrphanClipsLocked(extraActiveProject) }
+    }
+
     suspend fun cleanupOrphanClips(activeProject: Project): Unit =
         cleanupOrphanClipsAcrossAllDrafts(extraActiveProject = activeProject)
 
     suspend fun clearAll(): Unit = withContext(Dispatchers.IO) {
-        if (projectFile.exists()) {
-            projectFile.delete()
-        }
-        val tempFile = File(context.filesDir, "project.json.tmp")
-        if (tempFile.exists()) {
-            tempFile.delete()
-        }
-        draftsDir.listFiles()?.forEach { file ->
-            if (file.isFile) file.delete()
-        }
-        val allClips = clipsDir.listFiles() ?: return@withContext
-        for (file in allClips) {
-            if (file.isFile) {
-                file.delete()
+        ioMutex.withLock {
+            if (projectFile.exists()) {
+                projectFile.delete()
+            }
+            val tempFile = File(context.filesDir, "project.json.tmp")
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+            draftsDir.listFiles()?.forEach { file ->
+                if (file.isFile) file.delete()
+            }
+            clipsDir.listFiles()?.forEach { file ->
+                if (file.isFile) file.delete()
+            }
+            mediaDir.listFiles()?.forEach { file ->
+                if (file.isFile) file.delete()
             }
         }
     }
