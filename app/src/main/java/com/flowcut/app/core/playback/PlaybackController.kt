@@ -15,8 +15,10 @@ class PlaybackController(
     private val holder: SnapshotHolder = SnapshotHolder()
 ) {
     companion object {
-        const val FLING_DECAY = 1.8
-        const val MIN_FLING_VELOCITY_PX_PER_SEC = 4.0
+        const val FLING_DECAY = 3.6
+        const val FLING_LINEAR_DECEL_PX_PER_SEC2 = 520.0
+        const val MIN_FLING_VELOCITY_PX_PER_SEC = 55.0
+        const val MAX_FLING_VELOCITY_PX_PER_SEC = 12000.0
         private const val MAX_DT_SECONDS = 0.05
     }
 
@@ -102,8 +104,10 @@ class PlaybackController(
 
     fun endScrub(velocityUsPerSec: Double, pxPerUs: Double = 1.0) {
         seekEventListener?.onSeekEvent("endScrub", state.timeUs, state.timeUs, false)
-        if (abs(velocityUsPerSec) * pxPerUs >= MIN_FLING_VELOCITY_PX_PER_SEC) {
-            flingVelocityUsPerSec = velocityUsPerSec
+        val speedPxPerSec = abs(velocityUsPerSec) * pxPerUs
+        if (pxPerUs > 0.0 && speedPxPerSec >= MIN_FLING_VELOCITY_PX_PER_SEC) {
+            val maxVelUsPerSec = MAX_FLING_VELOCITY_PX_PER_SEC / pxPerUs
+            flingVelocityUsPerSec = velocityUsPerSec.coerceIn(-maxVelUsPerSec, maxVelUsPerSec)
             flingPxPerUs = pxPerUs
             lastFlingFrameNanos = 0L
             flingRemainderUs = 0.0
@@ -177,7 +181,7 @@ class PlaybackController(
             }
 
             PlayMode.FLINGING -> {
-                // Bug #1 fix: First frame uses standard 1/60s dt, subsequent frames clamp dt to [0.001..0.050]
+                // First frame uses standard 1/60s dt, subsequent frames clamp dt to [0.001..MAX_DT_SECONDS]
                 val dtSeconds: Double = if (lastFlingFrameNanos == 0L) {
                     lastFlingFrameNanos = frameTimeNanos
                     1.0 / 60.0
@@ -187,10 +191,26 @@ class PlaybackController(
                     dt.coerceIn(0.001, MAX_DT_SECONDS)
                 }
 
-                val decay = exp(-FLING_DECAY * dtSeconds)
-                flingVelocityUsPerSec *= decay
+                // Combined viscous + linear friction for crisp, natural pro-editor deceleration
+                val prevVelUs = flingVelocityUsPerSec
+                val viscousVelUs = prevVelUs * exp(-FLING_DECAY * dtSeconds)
+                val linearDecelUs = if (flingPxPerUs > 0.0) {
+                    (FLING_LINEAR_DECEL_PX_PER_SEC2 / flingPxPerUs) * dtSeconds
+                } else {
+                    0.0
+                }
+                val nextVelUs = if (viscousVelUs > 0.0) {
+                    (viscousVelUs - linearDecelUs).coerceAtLeast(0.0)
+                } else if (viscousVelUs < 0.0) {
+                    (viscousVelUs + linearDecelUs).coerceAtMost(0.0)
+                } else {
+                    0.0
+                }
 
-                val rawDeltaUs = (flingVelocityUsPerSec * dtSeconds) + flingRemainderUs
+                val avgVelUs = 0.5 * (prevVelUs + nextVelUs)
+                flingVelocityUsPerSec = nextVelUs
+
+                val rawDeltaUs = (avgVelUs * dtSeconds) + flingRemainderUs
                 val deltaUs = Math.round(rawDeltaUs)
                 flingRemainderUs = rawDeltaUs - deltaUs
                 val nextTimeUs = state.timeUs + deltaUs
@@ -211,7 +231,7 @@ class PlaybackController(
                     flingRemainderUs = 0.0
                 } else {
                     state.timeUs = nextTimeUs
-                    if (abs(flingVelocityUsPerSec) * flingPxPerUs < MIN_FLING_VELOCITY_PX_PER_SEC) {
+                    if (abs(nextVelUs) * flingPxPerUs < MIN_FLING_VELOCITY_PX_PER_SEC) {
                         state.mode = PlayMode.PAUSED
                         state.generation++
                         flingVelocityUsPerSec = 0.0

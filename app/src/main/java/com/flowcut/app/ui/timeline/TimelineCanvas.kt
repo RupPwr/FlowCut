@@ -639,6 +639,8 @@ fun TimelineCanvas(
     }
     val waveformService = remember(context, coroutineScope) { WaveformService(context, coroutineScope) }
 
+    val viewportWidthRef = remember { FloatArray(1) }
+
     DisposableEffect(thumbnailService, waveformService) {
         thumbnailService.onGeneratingChanged = { isGen ->
             currentOnThumbnailGeneratingChanged(isGen)
@@ -649,6 +651,7 @@ fun TimelineCanvas(
         onDispose {
             thumbnailService.onGeneratingChanged = null
             waveformService.onGeneratingChanged = null
+            thumbnailService.clearMemory()
         }
     }
 
@@ -672,56 +675,132 @@ fun TimelineCanvas(
         }
     }
 
-    // Main-Track Filmstrip Thumbnail Request Collection (outside onDraw, Rule R10)
-    val currentClips = holder.current.project.clips
-    val currentPlayheadUs = playhead.timeUs
-    val currentDpPerSecond = zoomState.dpPerSecond
-    val playheadBucketUs = if (currentDpPerSecond < 30f) 1_000_000L else 500_000L
-    LaunchedEffect(currentClips, currentDpPerSecond, currentPlayheadUs / playheadBucketUs) {
-        kotlinx.coroutines.delay(120L)
-        if (currentClips.isNotEmpty()) {
-            val requests = mutableListOf<ThumbnailService.TileRequest>()
-            val activeKeys = mutableSetOf<String>()
+    // Main-Track Filmstrip Thumbnail Scheduler (Rule R3 & R10 compliant: zero recompositions,
+    // tracks live playhead/zoom/viewport changes, exact cell alignment, center-outward priority)
+    LaunchedEffect(thumbnailService, holder, density) {
+        var lastSnapVersion = Long.MIN_VALUE
+        var lastZoomKey = Long.MIN_VALUE
+        var lastPlayheadBucket = Long.MIN_VALUE
+        var lastWidthBucket = -1
+        var lastMode = playhead.mode
+        var lastScrubMoveBucket = Long.MIN_VALUE
+        var scrubStillTicks = 0
+
+        class PrioritizedReq(val distUs: Long, val req: ThumbnailService.TileRequest)
+
+        while (isActive) {
+            val mode = playhead.mode
+            if (lastMode == PlayMode.FLINGING && mode != PlayMode.FLINGING) {
+                currentOnScrollingStateChanged(false)
+            }
+
+            val snap = holder.current
             val tUs = playhead.timeUs
-            val pxPerSec = zoomState.pxPerSecond(density)
+            val dpPerSec = zoomState.dpPerSecond
+            val pxPerSec = dpPerSec * density
             val baseStepUs = when {
                 pxPerSec >= 120.0 -> 500_000L
                 pxPerSec >= 40.0 -> 1_000_000L
                 pxPerSec >= 15.0 -> 2_000_000L
                 else -> 5_000_000L
             }
-            val cellStepUs = if (currentDpPerSecond < 30f) maxOf(baseStepUs, 1_000_000L) else baseStepUs
-            val visibleSpanUs = 10_000_000L
-            val minVisibleUs = (tUs - visibleSpanUs).coerceAtLeast(0L)
-            val maxVisibleUs = tUs + visibleSpanUs
+            val cellStepUs = if (dpPerSec < 30.0) maxOf(baseStepUs, 1_000_000L) else baseStepUs
 
-            val snap = holder.current
-            val nClips = snap.main.n
-            for (k in 0 until nClips) {
-                val clipStartUs = msToUs(snap.main.startMs[k])
-                val clipEndUs = msToUs(snap.main.endMs[k])
-                if (clipEndUs < minVisibleUs || clipStartUs > maxVisibleUs) continue
+            val widthPx = viewportWidthRef[0]
+            val widthBucket = (widthPx / 32f).toInt()
+            val zoomKey = (dpPerSec * 4.0).roundToLong()
+            val playheadBucket = tUs / cellStepUs
 
-                val clipObj = snap.project.clips.getOrNull(k) ?: continue
-                if (clipObj.path.isEmpty()) continue
+            val isActivelyMoving = (mode == PlayMode.SCRUBBING || mode == PlayMode.FLINGING)
+            if (mode == PlayMode.SCRUBBING) {
+                if (playheadBucket == lastScrubMoveBucket) {
+                    scrubStillTicks++
+                } else {
+                    lastScrubMoveBucket = playheadBucket
+                    scrubStillTicks = 0
+                }
+            } else {
+                scrubStillTicks = 0
+                lastScrubMoveBucket = playheadBucket
+            }
 
-                val stepStartUs = maxOf(clipStartUs, minVisibleUs)
-                val stepEndUs = minOf(clipEndUs, maxVisibleUs)
-                var cellUs = stepStartUs
-                while (cellUs < stepEndUs) {
-                    val localUs = cellUs - clipStartUs
-                    val sourceUs = clipObj.map().sourceUs(localUs)
-                    val req = ThumbnailService.TileRequest(clipObj.path, sourceUs)
-                    requests.add(req)
-                    activeKeys.add(req.key)
-                    cellUs += cellStepUs
+            val justSettled = (lastMode == PlayMode.SCRUBBING || lastMode == PlayMode.FLINGING) && !isActivelyMoving
+            val stateChanged = snap.version != lastSnapVersion ||
+                zoomKey != lastZoomKey ||
+                playheadBucket != lastPlayheadBucket ||
+                widthBucket != lastWidthBucket
+
+            val shouldSchedule = (!isActivelyMoving && (stateChanged || justSettled)) ||
+                (mode == PlayMode.SCRUBBING && scrubStillTicks == 2 && stateChanged)
+
+            if (shouldSchedule) {
+                lastSnapVersion = snap.version
+                lastZoomKey = zoomKey
+                lastPlayheadBucket = playheadBucket
+                lastWidthBucket = widthBucket
+
+                val nClips = snap.main.n
+                if (nClips > 0) {
+                    val pxPerUs = zoomState.pxPerUs(density)
+                    val effectiveHalfW = if (widthPx > 10f) widthPx / 2f else (220f * density)
+                    // Request full visible viewport plus 1.6x prefetch buffer on both sides
+                    val visibleHalfSpanUs = if (pxPerUs > 0.0) {
+                        ((effectiveHalfW * 1.6f) / pxPerUs).toLong().coerceIn(2_000_000L, 120_000_000L)
+                    } else {
+                        10_000_000L
+                    }
+                    val minVisibleUs = (tUs - visibleHalfSpanUs).coerceAtLeast(0L)
+                    val maxVisibleUs = tUs + visibleHalfSpanUs
+
+                    val prioritized = ArrayList<PrioritizedReq>(32)
+                    for (k in 0 until nClips) {
+                        val clipStartUs = msToUs(snap.main.startMs[k])
+                        val clipEndUs = msToUs(snap.main.endMs[k])
+                        if (clipEndUs < minVisibleUs || clipStartUs > maxVisibleUs) continue
+
+                        val clipObj = snap.project.clips.getOrNull(k) ?: continue
+                        if (clipObj.path.isEmpty()) continue
+
+                        // Exact same cell alignment as Canvas onDraw
+                        val visibleStartUs = maxOf(clipStartUs, minVisibleUs)
+                        val visibleEndUs = minOf(clipEndUs, maxVisibleUs)
+                        val cell0 = maxOf(0L, (visibleStartUs - clipStartUs) / cellStepUs)
+                        val cell1 = minOf(
+                            (clipEndUs - clipStartUs) / cellStepUs,
+                            (visibleEndUs - clipStartUs) / cellStepUs
+                        )
+
+                        for (cellIdx in cell0..cell1) {
+                            val cellTimeUs = clipStartUs + cellIdx * cellStepUs
+                            if (cellTimeUs >= clipEndUs) break
+                            val localUs = (cellTimeUs - clipStartUs).coerceAtLeast(0L)
+                            val sourceUs = clipObj.map().sourceUs(localUs)
+                            val distUs = abs(cellTimeUs - tUs)
+                            prioritized.add(
+                                PrioritizedReq(
+                                    distUs = distUs,
+                                    req = ThumbnailService.TileRequest(clipObj.path, sourceUs)
+                                )
+                            )
+                        }
+                    }
+
+                    // Decode tiles closest to the center playhead FIRST
+                    prioritized.sortBy { it.distUs }
+                    val requests = ArrayList<ThumbnailService.TileRequest>(prioritized.size)
+                    for (i in prioritized.indices) {
+                        requests.add(prioritized[i].req)
+                    }
+                    thumbnailService.requestTiles(requests) {
+                        currentOnWakeFrameDriver()
+                    }
+                } else {
+                    thumbnailService.cancelStaleRequests(emptySet())
                 }
             }
 
-            thumbnailService.requestTiles(requests) {
-                currentOnWakeFrameDriver()
-            }
-            thumbnailService.cancelStaleRequests(activeKeys)
+            lastMode = mode
+            delay(if (isActivelyMoving || mode == PlayMode.PLAYING) 50L else 100L)
         }
     }
 
@@ -741,6 +820,8 @@ fun TimelineCanvas(
                     velocityTracker.addPointerInputChange(down)
                     var activePointerId = down.id
                     var lastUptimeMillis = down.uptimeMillis
+                    var lastDragMoveUptimeMs = down.uptimeMillis
+                    var lastPointerUpUptimeMs = down.uptimeMillis
 
                     val wasMovingOnDown = playhead.mode == PlayMode.FLINGING || playhead.mode == PlayMode.PLAYING
                     val currentSel = currentSelection
@@ -1421,6 +1502,9 @@ fun TimelineCanvas(
                                         val dx = change.position.x - lastDragX
                                         lastDragX = change.position.x
                                         lastUptimeMillis = change.uptimeMillis
+                                        if (abs(dx) >= 0.5f) {
+                                            lastDragMoveUptimeMs = change.uptimeMillis
+                                        }
 
                                         val currentPxPerUs = zoomState.pxPerUs(density)
                                         if (currentPxPerUs > 0.0) {
@@ -1438,6 +1522,7 @@ fun TimelineCanvas(
                                     }
                                 }
                             } else {
+                                lastPointerUpUptimeMs = event.changes.firstOrNull()?.uptimeMillis ?: lastUptimeMillis
                                 break
                             }
                         }
@@ -1469,7 +1554,10 @@ fun TimelineCanvas(
                         currentOnCommitOverlayTrim(curOverlayItem.id, currentOverlayStartUs, currentOverlayEndUs)
                         currentOnWakeFrameDriver()
                     } else if (isDragging) {
-                        val velocityPxPerSec = velocityTracker.calculateVelocity().x
+                        val heldStillBeforeLift = (lastPointerUpUptimeMs - lastDragMoveUptimeMs) > 90L
+                        val rawVelocityPxPerSec = if (heldStillBeforeLift) 0f else velocityTracker.calculateVelocity().x
+                        val maxFlingPxPerSec = 4200f * density
+                        val velocityPxPerSec = rawVelocityPxPerSec.coerceIn(-maxFlingPxPerSec, maxFlingPxPerSec)
                         val pxPerUsAtEnd = zoomState.pxPerUs(density)
                         val velocityUsPerSec = if (pxPerUsAtEnd > 0.0) -velocityPxPerSec / pxPerUsAtEnd else 0.0
                         controller.endScrub(velocityUsPerSec, pxPerUsAtEnd)
@@ -1518,6 +1606,9 @@ fun TimelineCanvas(
         val activeTrimUs = activeTrimPlayheadUs.longValue
         val tUs = if (activeTrimUs != Long.MIN_VALUE) activeTrimUs else playhead.timeUs
 
+        if (viewportWidthRef[0] != size.width) {
+            viewportWidthRef[0] = size.width
+        }
         val halfWidthPx = size.width / 2f
         val halfWidthInt = halfWidthPx.toInt()
         val pxPerUs = zoomState.pxPerUs(density)
@@ -2231,11 +2322,32 @@ fun TimelineCanvas(
                         } else null
 
                         if (thumb != null) {
-                            val cellW = maxOf(1, (nextCellX - cellX).toInt())
+                            val dstLeft = cellX.toInt()
+                            val dstRight = nextCellX.toInt()
+                            val cellW = maxOf(1, dstRight - dstLeft)
                             val cellH = maxOf(1, mainClipHeight.toInt())
+                            val imgW = thumb.width
+                            val imgH = thumb.height
+                            val srcW: Int
+                            val srcH: Int
+                            val srcX: Int
+                            val srcY: Int
+                            if (imgW.toLong() * cellH > imgH.toLong() * cellW) {
+                                srcH = imgH
+                                srcW = ((imgH.toLong() * cellW) / cellH).toInt().coerceIn(1, imgW)
+                                srcX = (imgW - srcW) / 2
+                                srcY = 0
+                            } else {
+                                srcW = imgW
+                                srcH = ((imgW.toLong() * cellH) / cellW).toInt().coerceIn(1, imgH)
+                                srcX = 0
+                                srcY = (imgH - srcH) / 2
+                            }
                             drawImage(
                                 image = thumb,
-                                dstOffset = IntOffset(cellX.toInt(), mainClipTop.toInt()),
+                                srcOffset = IntOffset(srcX, srcY),
+                                srcSize = IntSize(srcW, srcH),
+                                dstOffset = IntOffset(dstLeft, mainClipTop.toInt()),
                                 dstSize = IntSize(cellW, cellH)
                             )
                         } else if (cellIdx % 2L == 1L) {

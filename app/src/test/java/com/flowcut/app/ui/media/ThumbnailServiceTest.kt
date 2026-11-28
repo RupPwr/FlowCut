@@ -1,7 +1,9 @@
 package com.flowcut.app.ui.media
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ThumbnailServiceTest {
@@ -52,5 +54,41 @@ class ThumbnailServiceTest {
         // Bucket time sensitivity
         val keyDifferentBucket = tileKey(pathA, bucket2)
         assertNotEquals(key1, keyDifferentBucket)
+    }
+
+    @Test
+    fun testFindNearestBucketIndexExactAndFallback() {
+        val buckets = longArrayOf(0L, 1_000_000L, 4_000_000L)
+        val maxDelta = 2_000_000L
+
+        // Empty array
+        assertEquals(-1, ThumbnailService.findNearestBucketIndex(LongArray(0), 500_000L, maxDelta))
+
+        // Exact matches
+        assertEquals(0, ThumbnailService.findNearestBucketIndex(buckets, 0L, maxDelta))
+        assertEquals(1, ThumbnailService.findNearestBucketIndex(buckets, 1_000_000L, maxDelta))
+        assertEquals(2, ThumbnailService.findNearestBucketIndex(buckets, 4_000_000L, maxDelta))
+
+        // Nearest neighbor within maxDelta
+        assertEquals(0, ThumbnailService.findNearestBucketIndex(buckets, 400_000L, maxDelta))
+        assertEquals(1, ThumbnailService.findNearestBucketIndex(buckets, 600_000L, maxDelta))
+        assertEquals(1, ThumbnailService.findNearestBucketIndex(buckets, 2_000_000L, maxDelta))
+        assertEquals(2, ThumbnailService.findNearestBucketIndex(buckets, 3_000_000L, maxDelta))
+        assertEquals(2, ThumbnailService.findNearestBucketIndex(buckets, 6_000_000L, maxDelta))
+
+        // Outside maxDelta returns -1
+        assertEquals(-1, ThumbnailService.findNearestBucketIndex(buckets, 7_000_000L, maxDelta))
+        assertEquals(-1, ThumbnailService.findNearestBucketIndex(longArrayOf(10_000_000L), 0L, maxDelta))
+    }
+
+    @Test
+    fun testStaticImagePathDetection() {
+        assertTrue(ThumbnailService.isStaticImagePath("/storage/photo.jpg"))
+        assertTrue(ThumbnailService.isStaticImagePath("/storage/photo.JPEG"))
+        assertTrue(ThumbnailService.isStaticImagePath("/storage/photo.png"))
+        assertTrue(ThumbnailService.isStaticImagePath("/storage/photo.webp"))
+        assertFalse(ThumbnailService.isStaticImagePath("/storage/video.mp4"))
+        assertFalse(ThumbnailService.isStaticImagePath("/storage/video.mkv"))
+        assertFalse(ThumbnailService.isStaticImagePath("/storage/no_extension"))
     }
 }

@@ -3,12 +3,16 @@ package com.flowcut.app.ui.media
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ThumbnailUtils
+import android.os.Process
 import android.util.Size
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -33,19 +37,31 @@ class PipThumbLoader(
                 continue
             }
             scope.launch(Dispatchers.IO) {
-                val bmp = try {
-                    decode(p)
-                } catch (_: Throwable) {
-                    null
-                }
-                if (bmp != null) {
-                    publish(p, bmp.asImageBitmap())
-                } else {
-                    failed.add(p)
-                }
-                inFlight.remove(p)
-                withContext(Dispatchers.Main) {
-                    onChanged()
+                try {
+                    val bmp = decodeSemaphore.withPermit {
+                        try {
+                            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                        } catch (_: Throwable) {}
+                        try {
+                            decode(p)
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                    if (bmp != null) {
+                        publish(p, bmp.asImageBitmap())
+                        withContext(Dispatchers.Main) {
+                            onChanged()
+                        }
+                    } else {
+                        failed.add(p)
+                    }
+                } catch (_: CancellationException) {
+                    // Do not blacklist cancelled PIP thumbnail decode
+                } finally {
+                    inFlight.remove(p)
                 }
             }
         }
@@ -76,7 +92,7 @@ class PipThumbLoader(
 
         return if (isVideo) {
             try {
-                ThumbnailUtils.createVideoThumbnail(file, Size(64, 64), null)
+                ThumbnailUtils.createVideoThumbnail(file, Size(96, 96), null)
             } catch (_: Throwable) {
                 null
             }
@@ -85,13 +101,14 @@ class PipThumbLoader(
                 val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(path, opts)
                 var sample = 1
-                while (opts.outWidth / (sample * 2) >= 64 && opts.outHeight / (sample * 2) >= 64) {
+                while (opts.outWidth / (sample * 2) >= 96 && opts.outHeight / (sample * 2) >= 96) {
                     sample *= 2
                 }
                 opts.inJustDecodeBounds = false
                 opts.inSampleSize = sample
+                opts.inPreferredConfig = Bitmap.Config.RGB_565
                 val raw = BitmapFactory.decodeFile(path, opts) ?: return null
-                val scaled = Bitmap.createScaledBitmap(raw, 64, 64, true)
+                val scaled = Bitmap.createScaledBitmap(raw, 96, 96, true)
                 if (scaled != raw) {
                     raw.recycle()
                 }
@@ -100,5 +117,9 @@ class PipThumbLoader(
                 null
             }
         }
+    }
+
+    companion object {
+        private val decodeSemaphore = Semaphore(2)
     }
 }
