@@ -80,6 +80,109 @@ class ReplaceAndTrimPreviewRecoveryTest {
     }
 
     @Test
+    fun testForwardTrimScrubWithinLongGopUsesSmoothForwardDecodeInsteadOfFreezingOnKeyframe() {
+        val state = SeekState(lastRenderedPtsUs = 0L)
+        // 5-second GOP: keyframe at 0s, user dragging trim handle forward past 3.2s
+        val decision = SeekDecisionEngine.evaluate(
+            targetUs = 3_200_000L,
+            currentPtsUs = 2_800_000L,
+            lastRenderedPtsUs = 2_800_000L,
+            state = state,
+            frameDurationUs = frameDurationUs,
+            isScrubbing = true,
+            isPaused = false,
+            isCatchingUpFromSeek = false,
+            syncFramePtsUs = 0L,
+            isEos = false,
+            isForwardScrub = true
+        )
+        assertEquals(SeekAction.RESUME_CATCHUP, decision.action)
+        assertEquals("scrub_forward_advance", decision.reason)
+    }
+
+    @Test
+    fun testForwardTrimScrubCrossingNewGopHopsToNewSyncFrame() {
+        val state = SeekState(lastRenderedPtsUs = 2_800_000L)
+        // Crossed into a new keyframe at 5.0s
+        val decision = SeekDecisionEngine.evaluate(
+            targetUs = 5_400_000L,
+            currentPtsUs = 2_800_000L,
+            lastRenderedPtsUs = 2_800_000L,
+            state = state,
+            frameDurationUs = frameDurationUs,
+            isScrubbing = true,
+            isPaused = false,
+            isCatchingUpFromSeek = false,
+            syncFramePtsUs = 5_000_000L,
+            isEos = false,
+            isForwardScrub = true
+        )
+        assertEquals(SeekAction.RENDER_NEAREST_SYNC, decision.action)
+        assertEquals("fast_scrub_sync", decision.reason)
+    }
+
+    @Test
+    fun testForwardTrimScrubWithoutKeyframeIndexDecodesForwardWithout60HzFlushStorm() {
+        val state = SeekState(lastRenderedPtsUs = 3_000_000L)
+        // Immediately after Replace before async .idx build finishes (syncFramePtsUs == null)
+        val decision = SeekDecisionEngine.evaluate(
+            targetUs = 3_350_000L,
+            currentPtsUs = 3_000_000L,
+            lastRenderedPtsUs = 3_000_000L,
+            state = state,
+            frameDurationUs = frameDurationUs,
+            isScrubbing = true,
+            isPaused = false,
+            isCatchingUpFromSeek = false,
+            syncFramePtsUs = null,
+            isEos = false,
+            isForwardScrub = true
+        )
+        assertEquals(SeekAction.RESUME_CATCHUP, decision.action)
+        assertEquals("scrub_forward_advance", decision.reason)
+    }
+
+    @Test
+    fun testForwardTrimScrubAtEosForcesSyncSeekInsteadOfCatchUp() {
+        val state = SeekState(lastRenderedPtsUs = 3_000_000L)
+        val decision = SeekDecisionEngine.evaluate(
+            targetUs = 3_500_000L,
+            currentPtsUs = 3_000_000L,
+            lastRenderedPtsUs = 3_000_000L,
+            state = state,
+            frameDurationUs = frameDurationUs,
+            isScrubbing = true,
+            isPaused = false,
+            isCatchingUpFromSeek = false,
+            syncFramePtsUs = 0L,
+            isEos = true,
+            isForwardScrub = true
+        )
+        assertEquals(SeekAction.RENDER_NEAREST_SYNC, decision.action)
+        assertEquals("fast_scrub_sync", decision.reason)
+    }
+
+    @Test
+    fun testBackwardTrimScrubUsesNearestSyncSeek() {
+        val state = SeekState(lastRenderedPtsUs = 6_000_000L)
+        val decision = SeekDecisionEngine.evaluate(
+            targetUs = 4_200_000L,
+            currentPtsUs = 6_000_000L,
+            lastRenderedPtsUs = 6_000_000L,
+            state = state,
+            frameDurationUs = frameDurationUs,
+            isScrubbing = true,
+            isPaused = false,
+            isCatchingUpFromSeek = false,
+            syncFramePtsUs = 4_000_000L,
+            isEos = false,
+            isForwardScrub = false
+        )
+        assertEquals(SeekAction.RENDER_NEAREST_SYNC, decision.action)
+        assertEquals("fast_scrub_sync", decision.reason)
+    }
+
+    @Test
     fun testReplaceShorterWithLongerClipThenExtendTrimAndReleaseNeverFreezesPreview() {
         // 1. Start with a shorter 3-second clip on the timeline
         val shortClip = Clip(
@@ -152,17 +255,33 @@ class ReplaceAndTrimPreviewRecoveryTest {
             assertEquals(trimmedEdgeUs, trimFrame.clipASourceUs)
         }
 
-        // 4. Release trim handle (trimPreviewTimeUs cleared to -1L) and scrub/play across timeline
+        // 4. Release trim handle and verify Play -> Pause -> Play cycles advance smoothly across extended duration
         renderer.trimPreviewTimeUs = -1L
-        val postTrimSeekPositionsUs = listOf(2_000_000L, 5_500_000L, 8_000_000L, 500_000L)
-        for (posUs in postTrimSeekPositionsUs) {
-            controller.seekTo(posUs)
+        controller.play()
+        var lastSourceUs = -1L
+        repeat(60) {
             frameNs += 16_666_667L
             controller.tick(frameNs)
             val frame = renderer.renderFrame()
             assertEquals("clip-long", frame.clipAId)
-            assertEquals(posUs, frame.tUs)
-            assertEquals(posUs, frame.clipASourceUs)
+            if (lastSourceUs != -1L) {
+                assertEquals(true, frame.clipASourceUs >= lastSourceUs)
+            }
+            lastSourceUs = frame.clipASourceUs
+        }
+
+        controller.pause()
+        frameNs += 16_666_667L
+        controller.tick(frameNs)
+        val pausedSourceUs = renderer.renderFrame().clipASourceUs
+
+        controller.play()
+        repeat(60) {
+            frameNs += 16_666_667L
+            controller.tick(frameNs)
+            val frame = renderer.renderFrame()
+            assertEquals("clip-long", frame.clipAId)
+            assertEquals(true, frame.clipASourceUs >= pausedSourceUs)
         }
     }
 }

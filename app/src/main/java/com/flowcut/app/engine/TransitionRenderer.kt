@@ -1241,6 +1241,30 @@ class TransitionRenderer(private val cacheDir: File? = null) : QuadDrawer, Mosai
     fun textureIdA(): Int = texAId
     fun textureIdB(): Int = texBId
 
+    fun recreateTextureA(): Int {
+        if (texAId != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(texAId), 0)
+            texAId = 0
+        }
+        val textures = IntArray(1)
+        GLES30.glGenTextures(1, textures, 0)
+        texAId = textures[0]
+        setupExternalTexture(texAId)
+        return texAId
+    }
+
+    fun recreateTextureB(): Int {
+        if (texBId != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(texBId), 0)
+            texBId = 0
+        }
+        val textures = IntArray(1)
+        GLES30.glGenTextures(1, textures, 0)
+        texBId = textures[0]
+        setupExternalTexture(texBId)
+        return texBId
+    }
+
     private fun hasActiveColorAdjust(spec: DrawSpec, useSlotB: Boolean): Boolean {
         val adj0 = if (useSlotB) spec.adjB0 else spec.adjA0
         val adj1 = if (useSlotB) spec.adjB1 else spec.adjA1

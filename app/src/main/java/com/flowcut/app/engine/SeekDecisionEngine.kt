@@ -40,7 +40,9 @@ object SeekDecisionEngine {
         isCatchingUpFromSeek: Boolean,
         syncFramePtsUs: Long? = null,
         maxCatchUpDistanceUs: Long = 600_000L,
-        isEos: Boolean = false
+        isEos: Boolean = false,
+        isForwardScrub: Boolean = false,
+        maxForwardScrubAdvanceUs: Long = 4_000_000L
     ): SeekDecision {
         val halfFrameUs = (frameDurationUs / 2L).coerceAtLeast(16_000L)
 
@@ -54,8 +56,35 @@ object SeekDecisionEngine {
             )
         }
 
-        // 2. Fast Scrub: during active scrub, render single nearest sync frame and stop (Step B.4)
+        // 2. Active Scrub / Trim Preview:
+        //    - When moving forward within the same GOP (or within bounded advance without .idx),
+        //      decode forward incrementally with zero dec.flush() calls so long GOPs never freeze
+        //      on a single keyframe.
+        //    - Otherwise jump to the nearest sync frame (deduplicating when already rendered and not at EOS).
         if (isScrubbing) {
+            if (!isEos && isForwardScrub) {
+                if (lastRenderedPtsUs != -1L && kotlin.math.abs(targetUs - lastRenderedPtsUs) <= halfFrameUs) {
+                    return SeekDecision(
+                        SeekAction.ACCEPT_CURRENT,
+                        targetUs,
+                        "already_at_target"
+                    )
+                }
+                if (currentPtsUs != -1L && targetUs > currentPtsUs + halfFrameUs) {
+                    val scrubInSameGop = if (syncFramePtsUs != null) {
+                        syncFramePtsUs <= currentPtsUs + halfFrameUs
+                    } else {
+                        targetUs - currentPtsUs <= maxForwardScrubAdvanceUs
+                    }
+                    if (scrubInSameGop) {
+                        return SeekDecision(
+                            SeekAction.RESUME_CATCHUP,
+                            targetUs,
+                            "scrub_forward_advance"
+                        )
+                    }
+                }
+            }
             if (!isEos && syncFramePtsUs != null && lastRenderedPtsUs != -1L &&
                 kotlin.math.abs(syncFramePtsUs - lastRenderedPtsUs) <= halfFrameUs
             ) {

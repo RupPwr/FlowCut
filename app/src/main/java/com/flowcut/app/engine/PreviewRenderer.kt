@@ -800,19 +800,24 @@ class PreviewRenderer(
         )
         renderer.init()
         GlPassScope.restoreBaseline(PREVIEW_W, PREVIEW_H)
-        recreateSurfaceTextures()
+        recreateSurfaceTextures(regenerateGlTextures = false)
         releaseDecoders(synchronous = true)
         passRegistry.onGlCreated()
     }
 
-    private fun recreateSurfaceTextureA(): SurfaceTexture {
+    private fun recreateSurfaceTextureA(regenerateGlTexture: Boolean = true): SurfaceTexture {
         if (surfaceTextureA != null) {
             surfaceTextureA?.setOnFrameAvailableListener(null)
             surfaceTextureA?.release()
             ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
         }
         pendingSurfaceFramesA.set(0)
-        val stA = SurfaceTexture(renderer.textureIdA()).apply {
+        val texIdA = if (regenerateGlTexture && context != null && Thread.currentThread() === PreviewWatchdog.glThread) {
+            renderer.recreateTextureA()
+        } else {
+            renderer.textureIdA()
+        }
+        val stA = SurfaceTexture(texIdA).apply {
             ResourceTracker.onCreated(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stA")
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
@@ -833,14 +838,19 @@ class PreviewRenderer(
         return stA
     }
 
-    private fun recreateSurfaceTextureB(): SurfaceTexture {
+    private fun recreateSurfaceTextureB(regenerateGlTexture: Boolean = true): SurfaceTexture {
         if (surfaceTextureB != null) {
             surfaceTextureB?.setOnFrameAvailableListener(null)
             surfaceTextureB?.release()
             ResourceTracker.onReleased(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
         }
         pendingSurfaceFramesB.set(0)
-        val stB = SurfaceTexture(renderer.textureIdB()).apply {
+        val texIdB = if (regenerateGlTexture && context != null && Thread.currentThread() === PreviewWatchdog.glThread) {
+            renderer.recreateTextureB()
+        } else {
+            renderer.textureIdB()
+        }
+        val stB = SurfaceTexture(texIdB).apply {
             ResourceTracker.onCreated(ResourceTracker.ResourceType.SURFACE_TEXTURE, "stB")
             setDefaultBufferSize(PREVIEW_W, PREVIEW_H)
             setOnFrameAvailableListener({
@@ -861,9 +871,9 @@ class PreviewRenderer(
         return stB
     }
 
-    private fun recreateSurfaceTextures() {
-        recreateSurfaceTextureA()
-        recreateSurfaceTextureB()
+    private fun recreateSurfaceTextures(regenerateGlTextures: Boolean = true) {
+        recreateSurfaceTextureA(regenerateGlTexture = regenerateGlTextures)
+        recreateSurfaceTextureB(regenerateGlTexture = regenerateGlTextures)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -1700,15 +1710,14 @@ class PreviewRenderer(
                 if (fsA.prewarmStage == 2) {
                     fsA.stepPrewarmTo(frame.clipASourceUs)
                     safeRequestRender()
-                }
-                if (fsA.prewarmStage >= 3) {
+                } else if (fsA.prewarmStage >= 3) {
                     val rendered = try {
                         fsA.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode)
                     } catch (e: Exception) {
                         PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.fsA", e)
                         false
                     }
-                    if (!rendered && fsA.isCatchingUpFromSeek) {
+                    if ((!rendered || isTrimPreview) && fsA.isCatchingUpFromSeek) {
                         safeRequestRender()
                     }
                 }
@@ -1724,11 +1733,12 @@ class PreviewRenderer(
                 }
             }
 
+            val waitMsA = if (playhead.mode == PlayMode.PLAYING) 3L else 6L
             if ((fsA?.didReleaseOutputBuffer == true) && pendingSurfaceFramesA.get() == 0) {
                 synchronized(frameLockA) {
                     if (pendingSurfaceFramesA.get() == 0) {
                         try {
-                            frameLockA.wait(3L)
+                            frameLockA.wait(waitMsA)
                         } catch (_: InterruptedException) {}
                     }
                 }
@@ -1763,6 +1773,8 @@ class PreviewRenderer(
                     if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
                     framePerfUpdateTexCount++
                 }
+            } else if (fsA?.didReleaseOutputBuffer == true) {
+                safeRequestRender()
             }
             val transformA = getClipTransform(clipA.id)
             System.arraycopy(rawMatA, 0, matA, 0, 16)
@@ -2056,22 +2068,19 @@ class PreviewRenderer(
                 fsB.playbackSpeed = speedA
                 if (fsB.prewarmStage < 2) {
                     fsB.startCodecAndSeek(frame.clipASourceUs)
-                    onRenderRequested?.invoke()
-                    glSurfaceView?.requestRender()
+                    safeRequestRender()
                 }
                 if (fsB.prewarmStage == 2) {
                     fsB.stepPrewarmTo(frame.clipASourceUs)
-                    onRenderRequested?.invoke()
-                    glSurfaceView?.requestRender()
-                }
-                if (fsB.prewarmStage >= 3) {
+                    safeRequestRender()
+                } else if (fsB.prewarmStage >= 3) {
                     val rendered = try {
                         fsB.frameAt(frame.clipASourceUs, isScrubbing = isScrubbing, isPaused = isPaused, mode = effectiveMode)
                     } catch (e: Exception) {
                         PreviewEventLog.logSwallowedException("PreviewRenderer.onDrawFrame.fsB", e)
                         false
                     }
-                    if (!rendered && fsB.isCatchingUpFromSeek) {
+                    if ((!rendered || isTrimPreview) && fsB.isCatchingUpFromSeek) {
                         safeRequestRender()
                     }
                 }
@@ -2087,11 +2096,12 @@ class PreviewRenderer(
                 }
             }
 
+            val waitMsB = if (playhead.mode == PlayMode.PLAYING) 3L else 6L
             if ((fsB?.didReleaseOutputBuffer == true) && pendingSurfaceFramesB.get() == 0) {
                 synchronized(frameLockB) {
                     if (pendingSurfaceFramesB.get() == 0) {
                         try {
-                            frameLockB.wait(3L)
+                            frameLockB.wait(waitMsB)
                         } catch (_: InterruptedException) {}
                     }
                 }
@@ -2126,6 +2136,8 @@ class PreviewRenderer(
                     if (updateDur > framePerfUpdateTexMaxNs) framePerfUpdateTexMaxNs = updateDur
                     framePerfUpdateTexCount++
                 }
+            } else if (fsB?.didReleaseOutputBuffer == true) {
+                safeRequestRender()
             }
             val transformB = getClipTransform(clipA.id)
             System.arraycopy(rawMatB, 0, matB, 0, 16)
@@ -2545,14 +2557,14 @@ class PreviewRenderer(
         if (gl != null) {
             gl.queueEvent {
                 releaseDecoders(synchronous = true)
-                recreateSurfaceTextures()
+                recreateSurfaceTextures(regenerateGlTextures = true)
                 glSurfaceView?.requestRender()
                 onRenderRequested?.invoke()
             }
         } else {
             releaseDecoders(synchronous = true)
             if (surfaceTextureA != null || surfaceTextureB != null) {
-                recreateSurfaceTextures()
+                recreateSurfaceTextures(regenerateGlTextures = false)
             }
             glSurfaceView?.requestRender()
             onRenderRequested?.invoke()
